@@ -1,4 +1,13 @@
 # 实现索引
+## 2026-07-27 原生客户端企业邀请码加入
+- `backend/matrix_native_client.py#L3248-L3253`、`backend/matrix_native_client.py#L3386-L3430`：企业管理员创建邀请后只展示并复制一次性邀请码，文案引导受邀人在本地客户端选择“加入企业”，不再生成或展示 Web 链接。
+- `backend/matrix_native_client.py#L19857-L19877`：新增 64 位十六进制邀请码标准化和脱敏错误映射；兼容粘贴历史邀请 URL，但只在本机解析查询参数，不向日志或审计输出邀请码。
+- `backend/matrix_native_client.py#L19880-L20409`：登录卡新增“加入企业”第三模式、邀请码校验、受邀资料、8 位新密码和已有账号当前密码控件；900 像素宽度下隐藏宣传区，且进入邀请模式会清空记住的登录密码。接受请求期间会锁定邀请码、校验按钮、模式切换和账号字段。
+- `backend/matrix_native_client.py#L20411-L20627`、`backend/matrix_native_client.py#L20631-L20728`：邀请码校验与接受均使用 POST JSON，并以请求代次和提交邀请码双重拒绝陈旧响应；成功后复用 `set_session()`、`set_auth_context()` 和现有登录成功过场，把持久化认证偏好切换为新账号且不保存密码/Token，已有用户可在 `existing_user_login_required` 后原位补填当前密码。
+- `tests/test_native_enterprise_invite.py#L23-L378`：覆盖邀请码/历史 URL 解析、脱敏错误、第三模式、900×700 布局、记忆密码隔离、跨模式及同模式陈旧响应、接受期间控件锁定、校验预填、已有用户重试、成功会话和认证偏好建立，以及 Web 邀请链接读取退役。
+- 验证：`py_compile` 通过；原生邀请 12/12、邀请 API 4/4、登录/权限/协议/布局/成功过场 28/28 通过。Windows Qt 屏幕外渲染 `.tmp-validation/login-invite-1240x780.png` 与 `.tmp-validation/login-invite-900x700.png`，卡片均在视口内、无控件重叠、密码为空。
+- 回滚：优先回滚本阶段提交；或校验 `backups/web-removal-20260727/archive.sha256` 后从隔离恢复目录取回修改前客户端文件。回滚会恢复网页邀请入口依赖，因此必须与后续 Web 删除提交一并回滚；本阶段不修改数据库 Schema。
+
 ## 2026-07-27 企业邀请码契约原生化
 - `backend/central_server.py#L7245-L7373`：邀请对象只持久化令牌哈希；创建成功只在顶层返回一次 `inviteCode`，公开邀请对象、列表和校验响应剔除 `token`、`tokenHash`、`inviteCode`，不再生成网页加入链接。
 - `backend/central_server.py#L7397-L7481`：接受邀请保留新用户创建账号和已有用户当前密码校验，成功响应补齐 `appRole`、`roleScope`、`memberships`、`organizations` 和会话信息，供原生客户端直接接入现有登录态。
@@ -1086,7 +1095,7 @@
 
 
 ## 2026-07-25 余额实时刷新与 LK888 中文失败状态退款
-- `backend/matrix_native_client.py#L19507-L19516`：登录成功后启动 `_start_balance_timer()`，每 30 秒调用 `refresh_balance()` 从中心服重新读取余额；`backend/matrix_native_client.py#L19555-L19557` 在退出登录时停止该定时器，避免登出后继续刷新旧会话。
+- `backend/matrix_native_client.py#L21159-L21171`：登录成功后启动 `_start_balance_timer()`，每 30 秒调用 `refresh_balance()` 从中心服重新读取余额；`backend/matrix_native_client.py#L21203-L21206` 在退出登录时停止该定时器，避免登出后继续刷新旧会话。
 - `backend/central_server.py#L731-L755`：新增 `lk888_proxy_task_flags()`，统一解析 LK888 task-status 的失败/完成状态，补充中文状态 `错误`、`失败`、`超时`、`已取消`、`取消`，并继续用真实媒体 URL 判断完成。
 - `backend/central_server.py#L994-L1008`：LK888 反代轮询到任务状态后调用 `lk888_proxy_task_flags()`；失败时按原 `ref` 调用 `refund_user_by_ref()` 幂等退款，退款成功后移除 `STATE['gen_charges'][task_id]`。
 - `tests/test_role_permissions.py#L231-L238`、`tests/test_billing_unified.py#L165-L169`：新增余额刷新定时器源码契约测试和 LK888 中文失败状态退款判断回归测试。先运行新增测试观察旧实现失败，再实现后转绿。
@@ -1112,15 +1121,16 @@
 - `backend/xhs_note_replacement.py#L234-L286`：4 图图文同款无副作用冒烟 helper。
 - `backend/api_server.py#L4789-L4927`：本地 `/api/xhs-note-replacement/*` 模板、预览、确认和保存草稿接口。
 - `backend/central_server.py#L5728-L5731`：中心服发布预检复用 `image_note` blocker。
-- `backend/matrix_native_client.py#L4129-L4162`：从小红书下载任务结果中提取素材文件，过滤掉没有用户图片的任务结果。
-- `backend/matrix_native_client.py#L4165-L4276`：解析本机图片、中心素材 URL 和仅带签名 URL 的图片；过滤视频等非图片文件，中心素材请求才携带登录头，外部 CDN 不外发登录凭据；模板阶段即可生成槽位行。
-- `backend/matrix_native_client.py#L4319-L4478`：内容采集页“图文同款”按钮校验单条小红书链接，复用下载任务，下载完成后提取图片素材、切换页面并发送 `xhs_note_replace_start`；无图片时提示先下载笔记。
-- `backend/matrix_native_client.py#L7433-L7943`：原生“图文同款”独立页面接收采集事件，立即显示全部原图缩略图和图片数量，支持点击查看大图，并自动读取结构；新任务清理旧笔记、替换图、槽位和文案状态。
-- `backend/matrix_native_client.py#L7607-L7664`：远程原图在后台加载，限制单图 20 MB；失败记录脱敏结构化日志 `xhs_note_source_image_load_failed`，旧任务图片响应由 generation 标识丢弃。
-- `backend/matrix_native_client.py#L7753-L7824`：读取图文结构包含 30 秒超时、明确缺图提示和旧模板请求失效处理；模板读取成功后无需先生成预览即可显示图片槽位。
-- `backend/matrix_native_client.py#L11288-L11288`：资产库允许 `note_template` 类型。
-- `backend/matrix_native_client.py#L17939-L17961`：资产库仅展示本地收藏，过滤项新增“图文模板”。
-- `backend/matrix_native_client.py#L19329-L19329`：原生导航新增“🧩 图文同款”。
+- `backend/matrix_native_client.py#L4129-L4176`：从小红书下载任务结果中提取素材文件；字典或纯 URL 结果统一拆为不含查询凭据的 `files` 与按索引对齐的 `urls`，避免签名 token 进入模板任务，同时保留可加载地址。
+- `backend/matrix_native_client.py#L4179-L4322`：解析本机图片、中心素材 URL 和仅带签名 URL 的图片；过滤视频等非图片文件，中心素材请求才携带登录头，外部 CDN 不外发登录凭据；模板阶段即可生成槽位行。
+- `backend/matrix_native_client.py#L4203-L4230`：远程响应按 64 KB 分块读取并在累计超过 20 MB 时立即终止；图片请求最多 4 路并发。
+- `backend/matrix_native_client.py#L4365-L4524`：内容采集页“图文同款”按钮校验单条小红书链接，复用下载任务，下载完成后提取图片素材、切换页面并发送 `xhs_note_replace_start`；无图片时提示先下载笔记。
+- `backend/matrix_native_client.py#L7479-L8019`：原生“图文同款”独立页面接收采集事件，立即显示全部原图缩略图和图片数量，支持点击查看大图，并自动读取结构；新任务清理旧笔记、替换图、槽位和文案状态。
+- `backend/matrix_native_client.py#L7654-L7715`：远程原图在后台流式加载；失败记录脱敏结构化日志 `xhs_note_source_image_load_failed`，旧任务图片响应由 generation 标识丢弃。
+- `backend/matrix_native_client.py#L7804-L7994`：读取结构、生成预览、确认 AI 图和保存草稿均固定捕获发起时的任务 ID 与 generation；切换笔记后旧响应不再覆盖新任务，读取结构仍包含 30 秒超时和明确缺图提示。
+- `backend/matrix_native_client.py#L11365-L11365`：资产库允许 `note_template` 类型。
+- `backend/matrix_native_client.py#L18016-L18038`：资产库仅展示本地收藏，过滤项新增“图文模板”。
+- `backend/matrix_native_client.py#L19406-L19406`：原生导航新增“🧩 图文同款”。
 - `frontend/index.html#L466-L621`：Web 端采集结果、素材卡和独立页面入口。
 - `frontend/index.html#L2343-L2386`：Web 端采集结果“图文同款”先通过本地浏览器下载 `/api/xhs/download`，并按图片扩展二次过滤，只在下载素材含图片文件时进入图文同款；缺图提示“未找到图片素材，请先下载笔记”。
 - `frontend/index.html#L2392-L2426`：Web 端读取图文结构统一走 `loadXhsNoteTemplateFromMaterial()`，读取前二次过滤图片文件，带 30 秒 `Promise.race` 超时；有 `AbortController` 时同时中断请求，空 `imageSlots` 显示缺图提示。
@@ -1128,8 +1138,8 @@
 - `tests/test_xhs_note_replacement.py#L346-L357`：4 图图文同款冒烟测试。
 - `tests/test_xhs_note_replacement.py#L230-L323`：覆盖 Web 端采集结果“图文同款”先下载、过滤图片文件再读取结构；执行真实前端方法验证非图片不进入模板；覆盖无 `AbortController` 时仍能触发超时提示。
 - `tests/test_xhs_note_replacement.py#L360-L373`：覆盖原生采集页一键图文同款、读取结构超时、下载完成跳转和“未找到图片素材，请先下载笔记”提示。
-- `tests/test_xhs_note_replacement.py#L376-L644`：覆盖图片过滤与 URL 解析、页面事件接收、本机/中心缩略图、外部签名 URL 凭据隔离、点击大图、模板槽位即时显示和新任务状态清理。
+- `tests/test_xhs_note_replacement.py#L376-L795`：覆盖真实内容采集导航交接、下载字典与签名 URL 规范化、流式大小限制、本机/中心缩略图、外部凭据隔离、点击大图、模板槽位即时显示、旧动作响应失效和保存任务 ID 固定捕获。
 
-验证：`.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_material_repair tests.test_native_publish tests.test_xhs_note_replacement -v` 通过 94 项；`.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_xhs_note_replacement.py` 退出码 0。
+验证：`.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_material_repair tests.test_native_publish tests.test_xhs_note_replacement -v` 通过 99 项；`.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_xhs_note_replacement.py` 退出码 0。
 
 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和实施计划中的 Task 8 记录并重启桌面客户端；不涉及数据库、中心服接口、OpenAPI 或 `migration.sql`。

@@ -1,5 +1,20 @@
 # Troubleshooting
 
+## 2026-07-27 原生邀请页布局与截图验证
+
+- 现象 1：请求把原生邀请页缩到 900×700 后，实际窗口宽度变成 1062，卡片几何看似在窗口内但窗口已超出目标宽度。
+- 根因 1：登录页左侧宣传区固定宽 520 像素，首次布局时仍可见，Qt 根据宣传区、间距、登录卡和页边距计算出 1062 像素最小宽度；旧 `resizeEvent()` 因窗口已被最小宽度撑大，无法进入 `< 940` 的隐藏分支。
+- 修复 1：创建宣传区后立即按登录页当前宽度设置初始可见性，后续仍由 `resizeEvent()` 控制。新增运行时布局测试确认 900×700 实际尺寸不变、卡片完整位于视口内且可见控件互不相交。
+- 现象 2：`QT_QPA_PLATFORM=offscreen` 下首次 `QWidget.grab()` 得到全黑 PNG。
+- 根因 2：登录页首次显示会执行 340 ms 淡入，截图在透明度仍为 0 时抓取；此外 `offscreen` 插件不可靠加载 Windows 中文字体，不能作为“文字可读”的最终视觉证据。
+- 修复 2：几何回归继续使用 `offscreen`；最终视觉验收改用 Windows Qt 平台、`WA_DontShowOnScreen`、禁用测试实例首次淡入，并用 `QImage + QWidget.render()` 屏幕外绘制。1240×780 与 900×700 截图像素采样分别包含 5852 和 3744 种颜色，卡片均在视口内，中文控件可读且无重叠。
+- 安全检查：从登录切换到邀请模式时，旧版会把记住的登录密码留在“设置新密码”字段。新增失败测试后改为进入邀请模式即清空密码和确认密码；最终截图与测试均确认密码为空。
+- 独立审查问题 1：校验或接受请求发出后切换到登录/注册模式，旧响应仍可能覆盖当前登录字段或建立邀请会话。修复为每次请求和模式切换递增请求代次，响应必须同时匹配当前 `invite` 模式和最新代次；模式切换会恢复按钮并清空已验证状态。
+- 独立审查问题 2：邀请成功只更新内存会话，磁盘仍保留上一个账号的记住密码和自动登录 Token，重启后可能自动进入旧账号。修复为成功时将认证偏好改写为新账号，`remember=false`、`autologin=false`、`password=''`、`token=''`，并保存当前协议版本；测试断言不持久化旧凭据。
+- 复核问题：即使不切换模式，接受请求期间仍可编辑邀请码或再次校验，可能出现服务端接受 A、界面显示 B，或新校验使 A 的成功响应过期。修复为接受期间锁定邀请身份、账号字段和三个模式按钮，校验入口在主按钮禁用时直接返回；接受响应除请求代次外还必须匹配提交码、已验证码和当前显示码。
+- 验证：运行 `$env:QT_QPA_PLATFORM='offscreen'; .\.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite -v`，以及计划中的登录、权限、协议、布局和成功过场回归。
+- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_enterprise_invite.py`、`docs/IMPLEMENTATION.md` 和本节；若同时回滚原生邀请入口，必须一并恢复 Web 邀请交付面。
+
 ## 2026-07-27 Web 交付面移除基线
 
 - 环境：Windows PowerShell 5.1、Python 3.12.13，Qt 使用 `QT_QPA_PLATFORM=offscreen`；本节所有结果均在生产代码首次修改前取得。
@@ -1563,9 +1578,17 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 现象：在桌面客户端“内容采集”选中小红书链接并点击“图文同款”，页面已跳转，但来源素材、已下载图片和图片槽位为空。
 - 根因：原生 `XhsNoteReplacementPage` 之前没有连接全局 `BRIDGE.payload`，因此没有接收 `xhs_note_replace_start`；页面也缺少原图缩略图区域，且槽位表只读取生成预览后的 `slotMappings`。
 - 修复：页面接收采集事件后立即清理上一条任务，带入素材信息，显示全部下载图片及数量，自动读取结构；模板返回后直接按 `template.imageSlots` 显示槽位，点击缩略图可查看大图。
-- 远程图片：本机文件优先直接读取；中心服 `/api/library/file/` 图片使用当前登录态后台加载，单图上限 20 MB。外部签名 CDN 地址不会携带 `X-Matrix-User-Token` 或企业标识，中心认证请求不自动跨域重定向。
+- 远程图片：本机文件优先直接读取；中心服 `/api/library/file/` 图片使用当前登录态后台加载。远程响应最多 4 路并发，按 64 KB 分块读取，单图累计超过 20 MB 会立即中止。外部签名 CDN 地址不会携带 `X-Matrix-User-Token` 或企业标识，中心认证请求不自动跨域重定向；签名 URL 与模板 `files` 分离，不把查询 token 写入任务槽位。
 - 观测：远程图片加载失败会记录 JSON 结构化事件 `xhs_note_source_image_load_failed`，包含脱敏后的 `materialId`、`imageIndex`、`fileName` 和异常堆栈，不记录签名 URL 或凭据。
-- 排查：先确认页面“原笔记图片”数量；若为 0，检查下载结果 `material.files` 是否包含 JPG/PNG/WebP 等图片。若数量正确但缩略图加载失败，按上述事件名查询客户端日志，并确认中心素材文件仍可访问。
+- 排查：先确认页面“原笔记图片”数量；若为 0，检查下载结果 `material.files` 是否包含 JPG/PNG/WebP 等图片，并检查同索引 `material.urls`。若数量正确但缩略图加载失败，按上述事件名查询客户端日志，并确认中心素材文件仍可访问。
 - 生效：Python 桌面客户端不会热加载源码。修改后必须关闭当前客户端并重新启动，再从“内容采集”点击“图文同款”验证。
-- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests -v`，再运行 `.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_material_repair tests.test_native_publish tests.test_xhs_note_replacement -v` 和 Python 编译检查。
+- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests -v`，应通过 14 项；再运行 `.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_material_repair tests.test_native_publish tests.test_xhs_note_replacement -v`，应通过 99 项，并执行 Python 编译检查。
 - 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 与 Task 8 计划记录并重启客户端；不涉及数据迁移，已下载素材和现有图文任务无需删除。
+
+## 2026-07-27 小红书获客采集假数据基线
+
+- 现象：获客中心出现主页链接为 `-`、用户名为空或等于评论、同一个主页重复，以及评论末尾带时间、地区、作者、`赞`、`回复`的记录。
+- 根因：`backend/platform_adapters.py` 把评论容器内普通 `div` 也作为候选，并在压平换行后猜测用户名和正文；归一化阶段未校验主页，跨笔记按“用户名 + 评论”去重。
+- Phase 0：假数据调用 `_xhs_normalize_comment()` 后三类无效记录全部被接受，证明现有代码缺少过滤行为。Windows 默认 GBK 标准输出无法打印 emoji，测试命令必须显式把 stdout 配置为 UTF-8；这不是业务模块导入失败。
+- 预期修复：在采集层收紧评论节点，清洗尾部元信息，按主页校验和去重，并为每条淘汰记录写脱敏 JSON 日志。
+- 回滚基线：修改前文件位于 `backups/xhs-lead-filtering-20260727/pre-edit/`，使用同目录 `manifest.sha256` 校验后恢复。
