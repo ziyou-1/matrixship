@@ -1587,7 +1587,7 @@ def node_info(node_id):
 
 def mirror_download_material_to_library(result, org_id, node_id=""):
     """Mirror a node-local downloaded material into central enterprise library.
-    The user-facing frontend reads central /api/library, while downloads execute on nodes.
+    The user-facing client reads central /api/library, while downloads execute on nodes.
     This function creates a central material backed by copied/proxied node media so it can be queued/published later.
     """
     if not isinstance(result, dict) or not result.get("ok"):
@@ -2568,7 +2568,7 @@ SMS_CFG = {
     "tmpl_login": os.getenv("ALIYUN_SMS_TMPL_LOGIN", "SMS_505715313"),
     "tmpl_register": os.getenv("ALIYUN_SMS_TMPL_REGISTER", "SMS_505940287"),
 }
-# 开发模式:不真发短信,验证码直接回给前端,便于本地测试(生产务必关掉)
+# 开发模式:不真发短信,验证码直接回给客户端,便于本地测试(生产务必关掉)
 SMS_DEV_MODE = os.getenv("SMS_DEV_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 
 _PHONE_CODES = {}        # {phone: {"code","expiresAt","sentAt","scene"}}
@@ -3071,7 +3071,7 @@ class WechatPayV3:
                 return e.code, {"_raw": raw}
 
     def native_prepay(self, out_trade_no, description, amount_fen, attach=None):
-        """返回 code_url(前端渲染二维码)。"""
+        """返回 code_url(客户端渲染二维码)。"""
         body = {"appid": self.appid, "mchid": self.mchid, "description": description,
                 "out_trade_no": out_trade_no, "notify_url": self.notify_url,
                 "amount": {"total": int(amount_fen), "currency": "CNY"}}
@@ -3125,7 +3125,7 @@ def create_recharge_order(user_id, amount_fen):
     else:
         credit = amount_fen  # 1 分 = 1 云豆
         unit = "云豆"
-    yundou = credit  # 兼容旧字段(前端读 yundou 展示到账数)
+    yundou = credit  # 兼容旧字段(客户端读 yundou 展示到账数)
     order_no = "MSHIP" + time.strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:8].upper()
     desc = "矩阵星舰%s充值 %.2f元" % (unit, amount_fen / 100.0)
     try:

@@ -128,7 +128,7 @@
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本文件即可；不涉及数据库迁移。
 ## 2026-07-24 企业中心只显示默认企业，没有丰田汽车
 - 现象：管理员或 boss 登录后进入“企业中心 -> 团队成员”，企业下拉框只看到“默认企业”，boss、user01、user02 仍显示在默认企业中，看不到预期的“丰田汽车”。
-- 根因：中心状态文件里当时只有 `org-default / 默认企业` 和 `org-9918a7f2bae2 / 用户8702的企业`，没有 `org-toyota / 丰田汽车`；同时 boss、user01、user02 的 membership 都绑定在 `org-default`，所以页面显示默认企业是按真实数据渲染，不是前端显示错误。
+- 根因：中心状态文件里当时只有 `org-default / 默认企业` 和 `org-9918a7f2bae2 / 用户8702的企业`，没有 `org-toyota / 丰田汽车`；同时 boss、user01、user02 的 membership 都绑定在 `org-default`，所以页面显示默认企业是按真实数据渲染，不是客户端显示错误。
 - 修复：`backend/matrix_native_client.py#L3032-L3322` 在团队成员页增加管理员专用“添加企业”入口，复用 `/api/enterprise/orgs/upsert` 创建企业；`backend/central_server.py#L6849-L6920`、`backend/central_server.py#L15041-L15047` 新增运行态成员替换接口 `/api/enterprise/memberships/replace`；`scripts/seed_toyota_enterprise.py#L1-L158` 已把 `org-toyota / 丰田汽车` 写入中心数据，并把 boss 设为企业家、user01/user02 设为普通用户。
 - 数据边界：`19711057505 / user-owner` 保留在默认企业；账号矩阵里已经授权登录的抖音/小红书账号没有迁移到丰田汽车。
 - 验证：运行 `.venv-win\Scripts\python.exe scripts\seed_toyota_enterprise.py --dry-run` 应返回 `changed=false`；抽查 `backend/central_data/scheduler_state.json` 应看到 `org-toyota / 丰田汽车`，且 boss/user01/user02 的 `orgId` 为 `org-toyota`。
@@ -546,7 +546,7 @@
 - 目标：验证 `happyhorse-video-edit` 是否接受“一个公网源视频片段 + 1 张授权人物参考图”，只替换一个主角的完整外观并保留原动作、镜头、背景和音频。
 - 有效请求契约：模型原生字段为 `video`、`images`、`resolution=720P`、`audio_setting=origin`、`watermark=false`；为兼容中心服适配层同时保留 `video_url`、`video_urls`、`reference_video`、`image_urls` 和 `params` 内对应字段。请求只发送公网 HTTPS URL，日志只记录字段名和 `errorId`。
 - 真实冒烟：使用 `happyhorse-video-edit` 生成的 `720x1280` 视频时长 `8.04s`，音频为 48kHz 双声道，平均音量约 `-12.3 dB`；女性全身参考成功替换原男性主角，原动作、站位、展厅、车辆、字幕结构和音频保留。结果样本保存在 `tmp_lk888_principal_native.mp4`，仅用于本地验证。
-- 对照失败：只发送通用 `video_urls + image_urls` 时任务仍返回视频，但人物参考图被忽略，输出仍为原男性主角。根因是兼容层没有把通用 `image_urls` 映射为模型需要的 `images`，不是前端上传失败。
+- 对照失败：只发送通用 `video_urls + image_urls` 时任务仍返回视频，但人物参考图被忽略，输出仍为原男性主角。根因是兼容层没有把通用 `image_urls` 映射为模型需要的 `images`，不是客户端上传失败。
 - 生产链路：新任务写入 `principalReplacementMode=source_video_edit` 后只允许 `happyhorse-video-edit`（或配置模型）；失败返回 `principal_video_edit_failed` 并停止片段，不回退到 Vidu/Wan/参考图生视频。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 后回滚到旧链路。
 - 已知风险：视觉模型可能把多人画面中的错误人物当作主角，或把上传人物的背景带入结果；页面现在展示主角预览、低置信度人工确认，并用 `principalReplacementMatch`、`fullBodyAppearanceMatch`、`otherSubjectsPreserved`、`motionPreserved` 做后置硬 QC。多人映射不在本版本范围内。
 - 历史余额阻断：早期冒烟曾因 LK888 `code=402`、余额不足而未创建任务；余额补充后已按上述原生字段完成验证。再次遇到 402 时应在上游充值/核对计费，不得用旧参考图链路伪装成功。
@@ -802,10 +802,10 @@
 - 修复：新增 `_selected_material_files()` 和 `_selected_material_open_target()`；单文件素材继续打开文件，多文件素材改为打开文件夹。多个命中文件不在同一目录时，优先打开素材候选根目录，找不到则打开第一个命中文件所在目录。
 - 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本文件即可；不涉及数据库迁移。
-## 2026-07-20 读取评论返回结果但前端显示 task_timeout
+## 2026-07-20 读取评论返回结果但旧 Web 入口显示 task_timeout（历史记录）
 
-- 现象：网页版内容采集点击“看评论”后显示 `读取失败: task_timeout`；中心服 `/api/local-browser/status` 可看到 Windows 本地节点在线，且对应 `douyin.comments` 任务已有 `result.ok=true` 和评论结果，但任务状态仍停在 `running`。
-- 根因：抖音评论接口返回的 `result.comments` 是对象结构，例如 `{status_code, comments:[...]}`。中心服 `local_browser_result()` 保存任务时把 `result.comments` 当列表执行 `[:500]`，触发 `KeyError: slice(...)`。异常发生前任务已被写成 `running` 并保存了部分结果，后续没有机会标记 `done`，前端轮询直到超时。
+- 现象：旧 Web 内容采集入口点击“看评论”后显示 `读取失败: task_timeout`；中心服 `/api/local-browser/status` 可看到 Windows 本地节点在线，且对应 `douyin.comments` 任务已有 `result.ok=true` 和评论结果，但任务状态仍停在 `running`。
+- 根因：抖音评论接口返回的 `result.comments` 是对象结构，例如 `{status_code, comments:[...]}`。中心服 `local_browser_result()` 保存任务时把 `result.comments` 当列表执行 `[:500]`，触发 `KeyError: slice(...)`。异常发生前任务已被写成 `running` 并保存了部分结果，后续没有机会标记 `done`，客户端轮询直到超时。
 - 修复：`backend/central_server.py#L12464-L12479` 新增本地浏览器结果列表归一化；`backend/central_server.py#L12893-L12899` 保存 `items/comments/leads` 时只切片列表，并在 `comments` 是对象时回退使用已规范化的 `items` 或嵌套评论列表。
 - 验证：`tests/test_api_download_contract.py#L295-L336` 覆盖 `douyin.comments` 返回对象型 `comments` 时任务必须结束为 `done`；运行 `.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract` 通过。
 - 回滚：仅回滚 `backend/central_server.py` 的本地浏览器结果列表归一化与对应测试。回滚后评论任务可能继续出现“结果已有但状态 running，页面 task_timeout”的表现。
@@ -1066,16 +1066,12 @@
 - 修复：新增 `_selected_material_files()` 和 `_selected_material_open_target()`；单文件素材继续打开文件，多文件素材改为打开文件夹。多个命中文件不在同一目录时，优先打开素材候选根目录，找不到则打开第一个命中文件所在目录。
 - 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本文件即可；不涉及数据库迁移。
-## Web 版点击左侧栏后仍停在企业页
+## Web 版点击左侧栏后仍停在企业页（历史记录，已退役）
 
-- 现象：访问 `http://127.0.0.1:8088/` 后点击左侧业务模块，看起来没有切换页面。
-- 根因：这是前端的未登录门禁。`frontend/index.html#L2768-L2768` 会在没有会话 Token 时拦截业务模块；旧逻辑连 `accounts` 也拦截，导致用户到不了放置登录框的账号矩阵页。此前 Web 登录请求又没有提交中心服要求的 `legalConsent`，所以即使输入账号密码也会被 `/api/auth/login` 以 HTTP 428 拒绝，最终表现成左侧按钮一直“没反应”。
-- 修复：`frontend/index.html#L2768-L2768` 和 `frontend/dist/index.html#L2768-L2768` 放行 `accounts` 作为 Web 登录入口，其余业务模块继续拦截；`frontend/index.html#L160-L167` 增加 Web 登录协议勾选；`frontend/index.html#L2854-L2862` 提交版本化 `legalConsent`；`frontend/index.html#L8-L22` 让 8088 静态 Web 本地开发页请求 9080 中心服，避免请求打到静态服务端口。
-- 冒烟结果：未登录点击“账号矩阵”可看到手机号/用户名、登录密码、协议勾选和“登录企业账号”；点击“风控中心”等业务模块仍回到企业中心并提示先登录。当前本地管理员密码约定为 `admin/test123456`，由中心服启动环境 `CENTRAL_ADMIN_PASSWORD` 注入。
-- 回滚：恢复 `frontend/index.html`、`frontend/dist/index.html`、`tests/test_web_login_navigation.py`、`tests/test_legal_agreements.py` 和本排障记录到上一稳定快照；不涉及数据库迁移或 `migration.sql`。
-- 验证命令：
-  - `.venv-win\Scripts\python.exe -m unittest tests.test_web_login_navigation tests.test_legal_agreements tests.test_auth_login_modes`
-  - 浏览器刷新 `http://127.0.0.1:8088/`，确认登录区显示协议勾选框，页面 `MATRIX_API_BASE` 为 `http://127.0.0.1:9080`。
+- 状态：该 Web 入口已随 `2026-07-27 Web 交付面移除` 下线；当前登录入口只保留原生客户端。
+- 历史根因：旧 Web 未登录门禁会拦截业务模块，且 Web 登录请求未提交中心服要求的 `legalConsent`。
+- 当前排查：如用户无法登录，请从原生客户端登录页检查账号、密码、协议同意和中心服 `/api/auth/login` 响应；不要再访问 `frontend` 静态页。
+- 回滚：如需恢复历史 Web 登录入口，必须先校验 `backups/web-removal-20260727/archive.sha256`，再整体恢复 Web 归档和对应提交。
 
 ## 2026-07-25 素材发布多文件素材只打开了第一个文件
 - 现象：在“素材与发布”中选中包含多个文件的素材，点击“打开素材”时只打开第一个命中的视频或图片，用户无法直接看到同一素材下的其它文件。
@@ -1568,10 +1564,10 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 
 ## 内容采集一键进入图文同款（2026-07-25）
 
-- 在「内容采集」中选中单条小红书链接，点击「图文同款」后，Web 端和原生客户端都会先下载该笔记的用户图片；Web 端会按图片扩展二次过滤，再自动进入图文同款页面并读取图文结构；即使运行环境没有 `AbortController`，30 秒超时仍会给出明确提示。
+- 在「内容采集」中选中单条小红书链接，点击「图文同款」后，原生客户端会先下载该笔记的用户图片，再进入图文同款页面并读取图文结构；Web 端入口已退役。
 - 如果提示「未找到图片素材，请先下载笔记」，说明当前下载结果没有用户发布图片；请确认这条笔记确实是图文笔记，必要时先点击「下载」检查素材。页面静态图、搜索图标和横幅不会被当作笔记素材。
 - 如果提示「读取图文结构超时」，请确认本机执行引擎在线，并确认笔记已经下载完成后重试。单次读取最多等待 30 秒，超时后可再次点击「读取图文结构」。
-- 回滚：回滚 `frontend/index.html`、`backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及中心服、数据库或 `migration.sql`。
+- 回滚：如需恢复历史 Web 图文同款入口，必须先校验 `backups/web-removal-20260727/archive.sha256` 并整体恢复 Web 归档；常规回滚只需回滚原生客户端、后端、测试和文档改动。
 
 ## 原生图文同款跳转后不显示已下载内容（2026-07-27）
 

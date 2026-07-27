@@ -552,7 +552,7 @@
 
 - 注：2026-07-23 起并行处理只负责上传用户产品原图，不再包含白底归一化步骤。
 - `backend/matrix_native_client.py#L6489-L6496`：同款替换上传参考图入口改为调用 `_process_replacement_product_refs()`，产品图预处理报告继续写入任务 JSON，后续人脸图和场景图上传链路保持原有顺序。
-- `backend/matrix_native_client.py#L6681-L6690`：开始生成时把产品图处理进度转发为 `video_replace_progress`，阶段标记为 `product_refs`，前端状态栏和进度详情会显示具体产品图编号，而不是只停留在“上传参考图”。
+- `backend/matrix_native_client.py#L6681-L6690`：开始生成时把产品图处理进度转发为 `video_replace_progress`，阶段标记为 `product_refs`，客户端状态栏和进度详情会显示具体产品图编号，而不是只停留在“上传参考图”。
 - `backend/matrix_native_client.py#L9908-L9974`：新增 `VIDEO_REPLACE_PRODUCT_PARALLEL` 并发控制和 `_process_replacement_product_refs()`；默认并行度为 `2`，范围限制在 `1..3`，并保留输出顺序、单图耗时 `elapsedSec`、上传 URL 和归一化报告。
 - `tests/test_video_replacement_v2.py#L1779-L1831`：覆盖产品图受限并行、结果顺序稳定、进度回调触达页面事件的契约。
 - 回滚：设置 `VIDEO_REPLACE_PRODUCT_PARALLEL=1` 可恢复串行处理；若上游图像归一化服务异常或成本需要临时规避，可设置 `VIDEO_REPLACE_PRODUCT_NORMALIZE=0` 跳过白底归一化。本次不涉及数据库迁移，`migration.sql` 无需变更。
@@ -704,7 +704,7 @@
 - `backend/utils/media_validation.py#L254-L306`：坏文件隔离和保留期清理。
 - `backend/utils/structured_log.py#L56-L162`：URL、认证信息和密钥脱敏，输出带堆栈及 `errorId` 的 JSON 日志。
 - `backend/utils/data_util.py#L186-L335`：抖音鉴权下载到独立 `.part`，校验后原子替换。
-- `backend/api_server.py#L446-L463`、`backend/api_server.py#L2943-L2954`：抖音登录态完整性校验，拒绝只有 `msToken` 或缺少浏览器指纹的缓存，返回 `douyin_auth_incomplete` 供前端提示重新登录。
+- `backend/api_server.py#L446-L463`、`backend/api_server.py#L2943-L2954`：抖音登录态完整性校验，拒绝只有 `msToken` 或缺少浏览器指纹的缓存，返回 `douyin_auth_incomplete` 供客户端提示重新登录。
 - `backend/matrix_native_client.py#L3640-L3646`、`backend/matrix_native_client.py#L8645-L8653`：原生客户端分解下载失败文案映射，将 `douyin_auth_incomplete` 和历史 `'s_v_web_id'` 显示为重新登录抖音提示。
 - `backend/api_server.py#L1443-L1678`：本地素材入库校验、原 ID 修复和事务回滚。
 - `backend/central_server.py#L1397-L1651`：中心素材镜像校验、隔离和原 ID 修复。
@@ -864,11 +864,7 @@
 
 - `backend/matrix_native_client.py#L63-L89`：内置协议读取、版本化同意 payload 和自动登录版本门禁。
 - `backend/matrix_native_client.py#L12731-L12777`：可滚动《用户协议》/《隐私政策》双标签弹窗。
-- `frontend/index.html#L8-L22`、`frontend/dist/index.html#L8-L22`：Web 静态页本地开发访问 `127.0.0.1:8088` 时，将 API 基址指向中心服 `127.0.0.1:9080`；生产 Web 仍保持同源 `/api`。
-- `frontend/index.html#L160-L167`、`frontend/dist/index.html#L160-L167`：Web 登录表单要求勾选用户协议和隐私政策。
-- `frontend/index.html#L2099-L2105`、`frontend/dist/index.html#L2099-L2105`：Web 登录使用当前客户端版本和法律版本常量。
-- `frontend/index.html#L2768-L2768`、`frontend/dist/index.html#L2768-L2768`：未登录用户点击左侧业务模块时回到企业登录页并提示先登录；`accounts` 例外，作为 Web 登录入口放行。
-- `frontend/index.html#L2854-L2862`、`frontend/dist/index.html#L2854-L2862`：Web 登录请求提交版本化 `legalConsent`，避免中心服返回 `legal_consent_required`。
+- 历史 Web 登录实现已在 `2026-07-27 Web 交付面移除` 中退役；当前登录协议和同意审计只保留原生客户端与中心服契约。
 - `backend/legal/user_agreement.md#L1-L85`：用户协议 v1.0，包含 `100 云豆 = 1 元`、AI/换脸/平台授权和争议解决条款。
 - `backend/legal/privacy_policy.md#L1-L103`：隐私政策 v1.0，包含人脸、声音、Cookie、第三方 AI、保留期和用户权利。
 - `backend/central_server.py#L2469-L2534`：同意 Schema 校验、HTTP 428 契约、服务端时间和 `legal.consent.accept` 审计。
@@ -1055,7 +1051,7 @@
 - 验证：先运行新增测试观察旧实现因缺少 `_selected_material_open_target` 失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v` 通过 17 条用例。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-24 同款替换任务级模型切换
-- `backend/matrix_native_client.py#L1478-L1599`：新增同款替换模型筛选 helper，白名单保留 `happyhorse-video-edit`、`kwvideo-v2-quannengcankao` 和参考视频模型；`kwvideo-v2-quannengcankao` 是 LK888 页面“SD 2.0 全能参考”的实际模型标识，页面卡片 ID 76 仅用于云灵前端内部选择，并只作为内置可选模型，不抢占未选择时的 Vidu/Wan 自动兜底顺序。
+- `backend/matrix_native_client.py#L1478-L1599`：新增同款替换模型筛选 helper，白名单保留 `happyhorse-video-edit`、`kwvideo-v2-quannengcankao` 和参考视频模型；`kwvideo-v2-quannengcankao` 是 LK888 页面“SD 2.0 全能参考”的实际模型标识，页面卡片 ID 76 仅用于云灵页面内部选择，并只作为内置可选模型，不抢占未选择时的 Vidu/Wan 自动兜底顺序。
 - `backend/matrix_native_client.py#L1626-L1642`、`backend/matrix_native_client.py#L10844-L10852`、`backend/matrix_native_client.py#L11078-L11105`、`backend/matrix_native_client.py#L12864-L12926`：主角源视频编辑候选读取任务级 `model`，所选模型会进入远程请求和片段实际模型记录；分辨率按模型适配，`happyhorse-*` 使用 `720P/1080P`，`kwvideo-v2-quannengcankao` 等非 happyhorse 模型保持 `720p/1080p`，避免 LK888 对 `resolution=720P` 返回 400。
 - `backend/matrix_native_client.py#L6651-L6673`、`backend/matrix_native_client.py#L6813-L6894`、`backend/matrix_native_client.py#L7125-L7183`、`backend/matrix_native_client.py#L7251-L7308`：同款替换页新增“同款替换模型”下拉框，先显示内置适配模型，后台刷新 LK888 目录后补充 SD 2.0 全能参考等备选模型。
 - `backend/matrix_native_client.py#L7113-L7183`、`backend/matrix_native_client.py#L7251-L7308`、`backend/matrix_native_client.py#L7685-L7685`：生成方案和正式生成都把页面选择写入任务 JSON 的 `model`，后续单段重生继续沿用同一任务模型。
@@ -1068,9 +1064,8 @@
 - 验证：先运行新增测试观察旧实现因缺少 `_selected_material_open_target` 失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v` 通过 17 条用例。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-24 Web 左侧栏登录入口放行
-- `frontend/index.html#L2768-L2768`、`frontend/dist/index.html#L2768-L2768`：未登录时左侧栏继续拦截业务模块，但放行 `accounts` 作为登录入口，点击“账号矩阵”可直接进入账号矩阵页的登录表单。
-- `tests/test_web_login_navigation.py#L10-L20`：新增源码契约测试，锁定未登录门禁必须允许 `accounts`，同时保留 `enterprise` 提示和业务模块拦截。
-- 回滚：恢复 `frontend/index.html`、`frontend/dist/index.html`、`tests/test_web_login_navigation.py`、`CHANGELOG.md` 和本文档即可；不涉及中心服、数据库或 `migration.sql`。回滚后未登录用户会再次被挡在企业页外，无法直接从 Web 侧栏进入登录框。
+- 历史记录：该 Web 左侧栏登录入口已随 `2026-07-27 Web 交付面移除` 退役；当前登录入口位于原生客户端，`tests/test_web_login_navigation.py` 已删除。
+- 回滚：如需恢复历史 Web 入口，必须先校验 `backups/web-removal-20260727/archive.sha256`，再整体回滚 Web 移除提交；不要只恢复单个 `frontend` 文件。
 
 ## 2026-07-25 素材发布多文件打开目录
 - `backend/matrix_native_client.py#L4733-L4804`：素材发布页把本机素材路径查找拆成文件名解析、候选目录解析、已存在文件列表和打开目标选择；仍按视频优先、图片其次查找单个素材文件。
