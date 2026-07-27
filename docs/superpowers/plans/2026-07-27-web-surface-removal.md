@@ -148,6 +148,7 @@ Expected: 没有缺失目标；`targets.txt` 只包含上述相对路径。
 Run:
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 $files = foreach ($target in $targets) {
   $item = Get-Item -LiteralPath $target
   if ($item.PSIsContainer) {
@@ -157,14 +158,20 @@ $files = foreach ($target in $targets) {
   }
 }
 $files = $files | Sort-Object FullName -Unique
+$workspacePrefix = $workspace + [IO.Path]::DirectorySeparatorChar
 $manifest = foreach ($file in $files) {
-  $relative = [IO.Path]::GetRelativePath($workspace, $file.FullName).Replace('\', '/')
+  if (-not $file.FullName.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Archive target escaped workspace: $($file.FullName)"
+  }
+  $relative = $file.FullName.Substring($workspacePrefix.Length).Replace('\', '/')
   $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
   "$hash`t$($file.Length)`t$relative"
 }
 $manifest | Set-Content -Encoding UTF8 (Join-Path $backupDir 'manifest.sha256')
 tar.exe -a -c -f (Join-Path $backupDir 'web-surface.zip') -T (Join-Path $backupDir 'targets.txt')
-$archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $backupDir 'web-surface.zip')).Hash.ToLowerInvariant()
+$archive = Get-Item -LiteralPath (Join-Path $backupDir 'web-surface.zip')
+if ($LASTEXITCODE -ne 0 -or $archive.Length -le 0) { throw "Archive creation failed: tar exit $LASTEXITCODE" }
+$archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
 "$archiveHash  web-surface.zip" | Set-Content -Encoding ASCII (Join-Path $backupDir 'archive.sha256')
 ```
 
