@@ -456,7 +456,7 @@ return dict(ctx, **{
     "expiresAt": session.get("expiresAt"),
     "user": out_user,
     "membership": out_membership,
-    "memberships": user_memberships(out_user.get("id")),
+    "memberships": user_memberships(out_user),
     "organizations": user_orgs(out_user.get("id")),
     "orgId": org_id,
     "message": "invite_accepted",
