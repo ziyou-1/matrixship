@@ -1148,18 +1148,42 @@ Expected: `OK`. If an unrelated external-media or environment test fails, record
 Use a non-production port and temporary data directory:
 
 ```powershell
-$smokeData = Join-Path (Resolve-Path '.tmp-validation').Path 'web-removal-central'
+$ErrorActionPreference = 'Stop'
+$workspace = (Resolve-Path '.').Path
+$smokeData = Join-Path $workspace '.tmp-validation\web-removal-central'
+if (Test-Path -LiteralPath $smokeData) {
+  $resolvedSmokeData = (Resolve-Path -LiteralPath $smokeData).Path
+  if (-not $resolvedSmokeData.StartsWith($workspace + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Smoke data path escaped workspace: $resolvedSmokeData"
+  }
+  Remove-Item -LiteralPath $resolvedSmokeData -Recurse -Force
+}
 New-Item -ItemType Directory -Force -Path $smokeData | Out-Null
 $oldHost = $env:CENTRAL_HOST
 $oldPort = $env:CENTRAL_PORT
 $oldData = $env:CENTRAL_DATA_DIR
+$oldPythonPath = $env:PYTHONPATH
 $env:CENTRAL_HOST = '127.0.0.1'
 $env:CENTRAL_PORT = '19080'
 $env:CENTRAL_DATA_DIR = $smokeData
-$process = Start-Process -FilePath '.\.venv-win\Scripts\python.exe' -ArgumentList 'backend\central_server.py' -WorkingDirectory (Resolve-Path '.').Path -WindowStyle Hidden -PassThru
+$env:PYTHONPATH = (Resolve-Path '.\.venv-win\Lib\site-packages').Path + ';' + (Resolve-Path '.\backend').Path
+$basePython = (& .\.venv-win\Scripts\python.exe -c 'import sys; print(sys._base_executable)').Trim()
+$process = $null
 try {
+  # Use one base-Python process so cleanup does not leave the Windows venv launcher's child behind.
+  $code = "import runpy, sys, types; dotenv = types.ModuleType('dotenv'); dotenv.load_dotenv = lambda *args, **kwargs: False; sys.modules['dotenv'] = dotenv; runpy.run_path('backend/central_server.py', run_name='__main__')"
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $basePython
+  $psi.Arguments = '-c "' + $code + '"'
+  $psi.WorkingDirectory = $workspace
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $psi
+  if (-not $process.Start()) { throw 'Central smoke process did not start' }
   $ready = $false
   for ($i = 0; $i -lt 20; $i++) {
+    if ($process.HasExited) { throw "Central smoke server exited early: $($process.ExitCode)" }
     try {
       $health = Invoke-RestMethod -Uri 'http://127.0.0.1:19080/api/health' -TimeoutSec 2
       if ($health.ok) { $ready = $true; break }
@@ -1191,14 +1215,26 @@ try {
   }
   if ($verify.error -ne 'invalid_invite') { throw 'Invite verify smoke returned unexpected payload' }
 } finally {
-  if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+  if ($process) {
+    if (-not $process.HasExited) { $process.Kill() }
+    $process.WaitForExit()
+    $process.Dispose()
+  }
   $env:CENTRAL_HOST = $oldHost
   $env:CENTRAL_PORT = $oldPort
   $env:CENTRAL_DATA_DIR = $oldData
+  $env:PYTHONPATH = $oldPythonPath
+}
+Start-Sleep -Milliseconds 500
+try {
+  Invoke-RestMethod -Uri 'http://127.0.0.1:19080/api/health' -TimeoutSec 1 | Out-Null
+  throw 'Central smoke port is still live after cleanup'
+} catch [System.Net.WebException] {
+  # Expected: the isolated process is gone and the test port refuses connections.
 }
 ```
 
-Expected: health `ok=true`, `/admin` returns 404, POST verify returns structured `invalid_invite`, process is stopped in `finally`.
+Expected: health `ok=true`, `/admin` returns 404, POST verify returns structured `invalid_invite`, and port 19080 is closed after cleanup.
 
 - [ ] **Step 5: 最终静态和回滚审计**
 
