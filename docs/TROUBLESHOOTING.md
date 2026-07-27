@@ -9,6 +9,7 @@
 - 编译：`py_compile` 覆盖中心服、原生客户端、本地 API、启动器、worker 和本地浏览器 worker，退出 0。现有 `backend/api_server.py:1386`、`:1402` 中嵌入的 JavaScript 正则分别触发 `invalid escape sequence '\s'` 和 `invalid escape sequence '\/'` 告警，本次基线不修改该无关逻辑。
 - 回归：定向 119 项首次运行 118 项通过，`test_source_image_entries_accept_url_only_signed_images` 一次返回 0 个条目；该项单独运行、所属 8 项测试类、同进程重复顺序以及原 119 项命令完整复跑均通过，且图片扩展集合没有测试期写入。该瞬态未稳定复现，因此未修改原生客户端逻辑；最终基线为 119/119 通过。
 - 健康冒烟：Windows PowerShell 5.1 的 `Start-Process` 因当前环境同时包含 `Path`/`PATH` 而拒绝构造环境字典；此外 `backend/.env` 使用 `override=True`，会把测试端口覆盖为 9080。最终启动器对测试进程禁用 dotenv 文件加载，显式使用临时数据目录和 19079，并直接调用基础 Python 配合虚拟环境 `site-packages`，避免 Windows venv 启动器产生不可单独回收的子进程。`GET /api/health` 返回 `ok=true`、`mode=central`、`nodeCount=0`，进程停止后 19079 端口关闭。原有 9080 服务 PID 47572 启动于 2026-07-25，本次未终止或修改。
+- 邀请 API TDD：新增 4 项契约测试在旧实现上出现 3 个 `KeyError: inviteCode` 和 1 个 GET 校验路由断言失败，证明测试能识别旧网页契约。首次实现后，两个接受邀请用例因把用户 ID 字符串传给只接受用户字典的 `user_memberships()` 而报 `AttributeError`；改为复用既有 `user_memberships(out_user)` 契约后，邀请、权限和登录定向回归 18/18 通过。
 - 门禁：后续任一步出现回归时先停止并与该归档比对。恢复前必须停止中心服和客户端，先校验 `archive.sha256`，再解压到临时目录并按 `manifest.sha256` 逐项核对；不得直接覆盖当前工作区。
 
 ## 2026-07-25 同款替换口播音频和画面口型节奏不同步
