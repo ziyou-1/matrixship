@@ -1,4 +1,11 @@
 # 实现索引
+## 2026-07-27 Web 交付面移除
+- `tests/test_web_surface_removed.py#L8-L43`：锁定产品 Web 文件缺席、活动 HTML 缺席、中心服不再服务 `/admin` 或 `frontend/downloads` 安装包路径，同时保留 `/MatrixShipAgent-Setup.exe` 和 `MATRIXSHIP_AGENT_INSTALLER`。
+- `backend/central_server.py#L13462-L13568`：安装包下载只保留环境变量、服务器固定路径和后端目录候选；`/admin` HTML 路由已移除，中心服继续提供 JSON API 与安装包下载。
+- `backend/build_matrix_agent.ps1#L109-L113`、`backend/installer/MatrixShipAgent.iss#L21-L22`：Windows 原生客户端安装包输出到 `backend\dist\installer\MatrixShipAgent-Setup.exe`，不再复制到 Web 下载目录。
+- `backend/agent_launcher.py#L45-L79`、`backend/matrix_native_client.py#L8-L8`、`backend/matrix_native_client.py#L5459-L5459`：运行时提示和模块注释改为原生客户端/中心服/本地执行引擎表述，不再把产品入口描述成网页前端。
+- 回滚：校验 `backups/web-removal-20260727/archive.sha256` 中的 `fbf0989fef5727f461d6424fa24eacea4385d73e078528266997af403b794097` 后，从 `web-surface.zip` 恢复被删除的 Web 文件；若新版本错误率超过 1%，回滚本阶段提交并恢复上一稳定安装包。
+
 ## 2026-07-27 原生客户端企业邀请码加入
 - `backend/matrix_native_client.py#L3248-L3253`、`backend/matrix_native_client.py#L3386-L3430`：企业管理员创建邀请后只展示并复制一次性邀请码，文案引导受邀人在本地客户端选择“加入企业”，不再生成或展示 Web 链接。
 - `backend/matrix_native_client.py#L19857-L19877`：新增 64 位十六进制邀请码标准化和脱敏错误映射；兼容粘贴历史邀请 URL，但只在本机解析查询参数，不向日志或审计输出邀请码。
@@ -9,9 +16,9 @@
 - 回滚：优先回滚本阶段提交；或校验 `backups/web-removal-20260727/archive.sha256` 后从隔离恢复目录取回修改前客户端文件。回滚会恢复网页邀请入口依赖，因此必须与后续 Web 删除提交一并回滚；本阶段不修改数据库 Schema。
 
 ## 2026-07-27 企业邀请码契约原生化
-- `backend/central_server.py#L7245-L7373`：邀请对象只持久化令牌哈希；创建成功只在顶层返回一次 `inviteCode`，公开邀请对象、列表和校验响应剔除 `token`、`tokenHash`、`inviteCode`，不再生成网页加入链接。
-- `backend/central_server.py#L7397-L7481`：接受邀请保留新用户创建账号和已有用户当前密码校验，成功响应补齐 `appRole`、`roleScope`、`memberships`、`organizations` 和会话信息，供原生客户端直接接入现有登录态。
-- `backend/central_server.py#L14160-L14171`、`backend/central_server.py#L14394-L14397`、`backend/central_server.py#L15300-L15306`：邀请校验改为公开 POST JSON 请求；审计只记录邀请 ID、企业 ID、状态和错误码，接受与创建路由沿用脱敏审计元数据。
+- `backend/central_server.py#L7263-L7370`：邀请对象只持久化令牌哈希；创建成功只在顶层返回一次 `inviteCode`，公开邀请对象、列表和校验响应剔除 `token`、`tokenHash`、`inviteCode`，不再生成网页加入链接。
+- `backend/central_server.py#L7397-L7479`：接受邀请保留新用户创建账号和已有用户当前密码校验，成功响应补齐 `appRole`、`roleScope`、`memberships`、`organizations` 和会话信息，供原生客户端直接接入现有登录态。
+- `backend/central_server.py#L14145-L14155`、`backend/central_server.py#L14379-L14382`、`backend/central_server.py#L15285-L15291`：邀请校验改为公开 POST JSON 请求；审计只记录邀请 ID、企业 ID、状态和错误码，接受与创建路由沿用脱敏审计元数据。
 - `tests/test_enterprise_invites.py#L23-L136`：TDD 覆盖邀请码只返回一次且不进入状态/列表、未注册用户与已有用户接受、完整角色上下文，以及 GET 校验退役和 POST 审计不含邀请码。
 - 回滚：先校验 `backups/web-removal-20260727/archive.sha256` 和 `manifest.sha256`，再从归档恢复本阶段文件；不得把明文邀请码写入日志、审计或持久化状态。本阶段不修改数据库 Schema。
 

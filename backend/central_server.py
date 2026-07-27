@@ -3,7 +3,7 @@
 
 Commercial scheme #3:
 
-    Web frontend -> central_server -> many execution nodes -> Douyin
+    Native client -> central_server -> many execution nodes -> Douyin
 
 Users do not install a local helper.  Each execution node is operated by you and
 has its own IP, browser profile, cookies and cooldown state.  If one node is
@@ -13463,7 +13463,6 @@ class Handler(BaseHTTPRequestHandler):
         candidates = [
             os.path.abspath(os.path.expandvars(os.getenv("MATRIXSHIP_AGENT_INSTALLER", ""))),
             "/root/juzhen-xingjian/MatrixShipAgent-Setup.exe",
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "downloads", "MatrixShipAgent-Setup.exe")),
             os.path.abspath(os.path.join(os.path.dirname(__file__), "MatrixShipAgent-Setup.exe")),
         ]
         fp = next((p for p in candidates if p and os.path.isfile(p)), "")
@@ -13576,20 +13575,6 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, {"ok": True, "version": CENTRAL_VERSION, "release": rel,
                                         "latest": rel.get("latestVersion"), "downloadUrl": rel.get("downloadUrl"),
                                         "notice": rel.get("notice"), "force": bool(rel.get("force"))})
-        if path == "/admin" or path == "/admin/":
-            try:
-                ap = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_console.html")
-                with open(ap, "rb") as f:
-                    html = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(html)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(html)
-                return
-            except Exception:
-                return json_response(self, {"ok": False, "error": "admin_console_missing"}, 404)
         if path.startswith("/api/cloud-login/"):
             return json_response(self, {"ok": False, "error": "cloud_login_removed", "message": "云端登录已下线，请在本机客户端用本地浏览器登录"}, 410)
         if path.startswith("/api/library/file/"):
