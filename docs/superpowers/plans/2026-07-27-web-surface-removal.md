@@ -137,7 +137,8 @@ $targets = @(
 )
 $missing = $targets | Where-Object { -not (Test-Path -LiteralPath $_) }
 if ($missing) { throw "Missing rollback targets: $($missing -join ', ')" }
-$targets | Set-Content -Encoding UTF8 (Join-Path $backupDir 'targets.txt')
+# Windows PowerShell 5.1 writes a BOM for UTF8; bsdtar treats it as part of the first path.
+$targets | Set-Content -Encoding ASCII (Join-Path $backupDir 'targets.txt')
 ```
 
 Expected: 没有缺失目标；`targets.txt` 只包含上述相对路径。
