@@ -141,6 +141,26 @@ class XhsNotePublishGateTests(unittest.TestCase):
             note.image_note_publish_blocker({"type": "image_note", "platform": "xhs", "files": []}),
             "no_files",
         )
+    def test_xhs_image_note_rejects_blank_files(self):
+        material = {"type": "image_note", "platform": "xhs", "files": ["", "  ", None]}
+        self.assertEqual(note.image_note_publish_blocker(material), "no_files")
+
+    def test_xhs_image_note_rejects_more_than_18_valid_files(self):
+        material = {
+            "type": "image_note",
+            "platform": "xhs",
+            "files": ["%02d.jpg" % index for index in range(19)] + ["", "  "],
+        }
+        self.assertEqual(note.image_note_publish_blocker(material), "xhs_note_too_many_images")
+
+    def test_required_ai_image_review_requires_confirmed_slots(self):
+        material = {
+            "type": "image_note",
+            "platform": "xhs",
+            "files": ["01.jpg"],
+            "aiImageReview": {"required": True, "pendingSlots": []},
+        }
+        self.assertEqual(note.image_note_publish_blocker(material), "xhs_note_ai_image_unconfirmed")
 
     def test_normalize_publish_tags_adds_hash_and_deduplicates(self):
         self.assertEqual(
@@ -171,9 +191,19 @@ class XhsNotePublishGateTests(unittest.TestCase):
         self.assertEqual(updated["status"], "published")
         self.assertEqual(updated["published"], 1)
         self.assertEqual(updated["publishResult"]["accountId"], "xhs-self")
+    def test_apply_publish_result_does_not_mark_published_when_ok_is_false(self):
+        material = {"id": "mat-1", "type": "image_note", "platform": "xhs", "published": 0, "status": "draft"}
+        updated = note.apply_publish_result(
+            material,
+            {"ok": False, "filled": True, "published": True},
+            account_id="xhs-self",
+            dry_run=False,
+        )
+        self.assertNotEqual(updated["status"], "published")
+        self.assertEqual(updated["published"], 0)
 
     def test_unconfirmed_ai_image_has_specific_blocker(self):
-        material = {"type": "image_note", "platform": "xhs", "files": ["01.jpg"], "aiImageReview": {"pendingSlots": [1]}}
+        material = {"type": "image_note", "platform": "xhs", "files": ["01.jpg"], "aiImageReview": {"required": True, "pendingSlots": [1]}}
         self.assertEqual(note.image_note_publish_blocker(material), "xhs_note_ai_image_unconfirmed")
 
     def test_image_note_publish_no_longer_returns_v1_not_supported(self):

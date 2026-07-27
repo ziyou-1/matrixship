@@ -223,7 +223,7 @@ def build_draft_material_payload(job: dict, saved_files: list[str]) -> dict:
         "importedFromXhsNoteReplacement": True,
     }
 
-def publish_feature_enabled(env: Optional[dict] = None) -> bool:
+def publish_feature_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
     env = os.environ if env is None else env
     return str(env.get(PUBLISH_FEATURE_ENV, "1")).strip().lower() not in ("0", "false", "no", "off")
 
@@ -260,10 +260,15 @@ def image_note_publish_blocker(material: dict) -> str:
         return ""
     if str(material.get("platform") or "").strip().lower() != "xhs":
         return "xhs_note_platform_unsupported"
-    if not (material.get("files") or []):
+    files = [item for item in (material.get("files") or []) if str(item or "").strip()]
+    if not files:
         return "no_files"
+    if len(files) > 18:
+        return "xhs_note_too_many_images"
     review = material.get("aiImageReview") or {}
-    if review.get("pendingSlots"):
+    if review.get("required") and (
+        review.get("pendingSlots") or not review.get("confirmedSlots")
+    ):
         return "xhs_note_ai_image_unconfirmed"
     return ""
 
@@ -285,7 +290,7 @@ def apply_publish_result(material: dict, result: dict, account_id: str, dry_run:
     if error_id:
         publish_record["errorId"] = error_id
     material["publishResult"] = publish_record
-    if result.get("published") and not dry_run:
+    if result.get("ok") and result.get("published") and not dry_run:
         material["status"] = "published"
         material["published"] = 1
         material["publishedAt"] = now_ts
