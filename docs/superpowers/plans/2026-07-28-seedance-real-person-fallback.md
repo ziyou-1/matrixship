@@ -25,7 +25,7 @@
 
 **Files:**
 - Create: `tests/test_aicanvas_real_person_fallback.py`
-- Test: `.tmp-aicanvas-server-current.py`
+- Test: `tools/aicanvas_remote/server_current.py`
 
 **Interfaces:**
 - Consumes: `_submit_ai_comic_media_task(...)` from the AI Canvas server mirror.
@@ -62,7 +62,7 @@ Expected: the fallback test fails for missing production behavior; unrelated-err
 ### Task 2: Remote One-Shot Fallback Implementation
 
 **Files:**
-- Modify: `.tmp-aicanvas-server-current.py:12910-13052`
+- Modify: `tools/aicanvas_remote/server_current.py:12910-13052`
 - Test: `tests/test_aicanvas_real_person_fallback.py`
 
 **Interfaces:**
@@ -160,7 +160,7 @@ Document the trigger, `COMIC_REAL_PERSON_VIDEO_FALLBACK_MODEL`, billing behavior
 Run:
 
 ```powershell
-.\.venv-win\Scripts\python.exe -m py_compile .tmp-aicanvas-server-current.py backend\matrix_native_client.py tests\test_aicanvas_real_person_fallback.py tests\test_video_replacement.py
+.\.venv-win\Scripts\python.exe -m py_compile tools/aicanvas_remote/server_current.py backend\matrix_native_client.py tests\test_aicanvas_real_person_fallback.py tests\test_video_replacement.py
 git diff --check
 ```
 

@@ -26,7 +26,7 @@
 
 ## File Map
 
-- Modify: `.tmp-aicanvas-server-current.py` - 远程 `server.py` 的受控本地副本，增加单帧生成参数过滤。
+- Modify: `tools/aicanvas_remote/server_current.py` - 远程 `server.py` 的受控本地副本，增加单帧生成参数过滤。
 - Modify: `backend/matrix_native_client.py` - 漫剧鉴权下载、状态迁移、单帧/视频重生成、图片预览和内嵌播放器。
 - Modify: `tests/test_aicanvas_frame_billing.py` - `frameIndex` 缺省、单帧和非法值契约测试。
 - Modify: `tests/test_video_replacement.py` - 鉴权下载、旧任务恢复、单帧/视频重生成数据流测试。
@@ -236,7 +236,7 @@ Expected: 4 tests PASS。
 ### Task 3: 远程 `frameIndex` 单帧接口扩展
 
 **Files:**
-- Modify: `.tmp-aicanvas-server-current.py` near `_handle_comic_frame_generate_image_proxy`
+- Modify: `tools/aicanvas_remote/server_current.py` near `_handle_comic_frame_generate_image_proxy`
 - Modify: `tests/test_aicanvas_frame_billing.py`
 - Modify: `docs/openapi.yaml`
 - Modify: `tests/test_openapi_contract.py`
@@ -572,7 +572,7 @@ run_bg(lambda: self._run_comic_video_regeneration(self._job, [segment]))
 ### Task 5A: 自动声音与 AI 音色的远程隔离
 
 **Files:**
-- Modify: `.tmp-aicanvas-server-current.py`
+- Modify: `tools/aicanvas_remote/server_current.py`
 - Modify: `tests/test_aicanvas_frame_billing.py`
 
 **Interfaces:**
@@ -715,7 +715,7 @@ def set_media(self, path, autoplay=False, loop=False):
 - Modify: `docs/IMPLEMENTATION.md`
 - Modify: `docs/TROUBLESHOOTING.md`
 - Modify: `CHANGELOG.md`
-- Deploy source: `.tmp-aicanvas-server-current.py`
+- Deploy source: `tools/aicanvas_remote/server_current.py`
 - Deploy target: remote `/root/AI-CanvasPro/server.py`
 
 **Interfaces:**
@@ -736,12 +736,12 @@ def set_media(self, path, autoplay=False, loop=False):
 
 - [ ] **Step 2: 重算实现文档行号**
 
-使用 `rg -n` 查找最终函数，将 `docs/IMPLEMENTATION.md` 更新为实际 `backend/matrix_native_client.py#Lx-Ly`、`.tmp-aicanvas-server-current.py#Lx-Ly` 和测试行号。不得保留旧偏移或范围占位符。
+使用 `rg -n` 查找最终函数，将 `docs/IMPLEMENTATION.md` 更新为实际 `backend/matrix_native_client.py#Lx-Ly`、`tools/aicanvas_remote/server_current.py#Lx-Ly` 和测试行号。不得保留旧偏移或范围占位符。
 
 - [ ] **Step 3: 运行语法和目标回归**
 
 ```powershell
-.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py .tmp-aicanvas-server-current.py tests\test_video_replacement.py tests\test_video_replacement_v2.py tests\test_aicanvas_frame_billing.py
+.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tools/aicanvas_remote/server_current.py tests\test_video_replacement.py tests\test_video_replacement_v2.py tests\test_aicanvas_frame_billing.py
 .\.venv-win\Scripts\python.exe -m unittest tests.test_aicanvas_frame_billing tests.test_video_replacement tests.test_video_replacement_v2 tests.test_aicanvas_real_person_fallback tests.test_openapi_contract -v
 git diff --check
 ```
@@ -762,7 +762,7 @@ sha256sum /root/AI-CanvasPro/server.py
 
 - [ ] **Step 5: 部署远程兼容扩展并检查健康**
 
-上传经过测试的 `.tmp-aicanvas-server-current.py` 到临时路径，校验 SHA-256 后原子替换 `/root/AI-CanvasPro/server.py`，随后：
+上传经过测试的 `tools/aicanvas_remote/server_current.py` 到临时路径，校验 SHA-256 后原子替换 `/root/AI-CanvasPro/server.py`，随后：
 
 ```bash
 systemctl restart ai-canvas.service
@@ -797,7 +797,7 @@ Expected: 服务为 `active`，8777 正常监听，登录页返回 2xx 或 3xx�
 重新运行 Step 2 行号校验和 Step 3 全量验证。只暂存本计划涉及的文件，检查 `git diff --cached --name-only` 不包含用户无关改动后再提交：
 
 ```powershell
-git add backend/matrix_native_client.py .tmp-aicanvas-server-current.py tests/test_video_replacement.py tests/test_video_replacement_v2.py tests/test_aicanvas_frame_billing.py tests/test_openapi_contract.py docs/API_REFERENCE.md docs/ARCHITECTURE.md docs/DEPLOYMENT.md docs/openapi.yaml docs/IMPLEMENTATION.md docs/TROUBLESHOOTING.md CHANGELOG.md docs/superpowers/specs/2026-07-29-comic-inline-media-regeneration-design.md docs/superpowers/plans/2026-07-29-comic-inline-media-regeneration.md
+git add backend/matrix_native_client.py tools/aicanvas_remote/server_current.py tests/test_video_replacement.py tests/test_video_replacement_v2.py tests/test_aicanvas_frame_billing.py tests/test_openapi_contract.py docs/API_REFERENCE.md docs/ARCHITECTURE.md docs/DEPLOYMENT.md docs/openapi.yaml docs/IMPLEMENTATION.md docs/TROUBLESHOOTING.md CHANGELOG.md docs/superpowers/specs/2026-07-29-comic-inline-media-regeneration-design.md docs/superpowers/plans/2026-07-29-comic-inline-media-regeneration.md
 git diff --cached --name-only
 git commit -m "feat: add inline comic media regeneration"
 ```

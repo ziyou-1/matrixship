@@ -1,8 +1,7 @@
 # Git Boundary
 
-This file defines which project surfaces are source artifacts, which are local
-runtime artifacts, and which temporary surfaces must stay visible until they are
-renamed or migrated.
+This file defines which project surfaces are source artifacts and which are
+local runtime, validation, cache, or scratch artifacts.
 
 ## Tracked source surfaces
 
@@ -20,6 +19,10 @@ they are part of a release:
 - Operator scripts: `scripts/`.
 - Operational tools: `tools/`, except generated binaries or downloaded
   third-party executables that should be kept outside the repository.
+- Remote AI Canvas mirrors: `tools/aicanvas_remote/server_current.py` and
+  `tools/aicanvas_remote/server_legacy.py`. These are reviewable local mirrors
+  of remote service files and must be staged with tests and rollback notes when
+  changed.
 - Documentation and contracts: `docs/`, including `docs/openapi.yaml`,
   `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`,
   `docs/DEPLOYMENT.md`, `docs/IMPLEMENTATION.md`, and
@@ -46,27 +49,12 @@ artifacts. They should stay out of Git:
   `.tmp-*.log`, `.tmp-*.txt`, `.tmp-*.json`, `.tmp-*.cmd`,
   `.tmp-*.ps1`, `tmp_*.log`, `tmp_*.mp4`, and `tmp_*/`.
 - Known one-off scratch scripts: `.tmp-aicanvas-ai-api-service.py`,
+  `.tmp-aicanvas-server-current.py`, `.tmp-aicanvas-server.py`,
   `.tmp-aicanvas-test-*.py`, `.tmp-platform-*.py`,
   `.tmp-platform-test-*.py`, `.tmp-real-comic-e2e*.py`,
   `.tmp-run-prepared-comic-e2e*.py`, `.tmp-resume-real-comic-e2e.py`,
   `.tmp-recover-comic-task.py`, and `.tmp-remote-aicanvas-ops.py`.
 - Local OS/editor files: `.DS_Store` and `Thumbs.db`.
-
-## Visible transitional surfaces
-
-These files are not normal product source, but they must remain visible until
-the remote AI Canvas workflow is formalized:
-
-- `.tmp-aicanvas-server-current.py`
-- `.tmp-aicanvas-server.py`
-
-Do not ignore `.tmp-*.py`. A broad rule would hide the two remote service
-mirrors above and make remote AI Canvas changes hard to review, test, deploy,
-or roll back.
-
-Future cleanup should move these mirrors to a stable path such as
-`tools/aicanvas_remote/`, then update tests and documentation references before
-adding any new ignore rule.
 
 ## Operating rules
 
@@ -75,5 +63,5 @@ adding any new ignore rule.
 3. Keep source, tests, contracts, deployment manifests, and operator docs
    visible.
 4. Do not hide uncertain files with broad globs. Classify them first.
-5. Before a release, review untracked visible files and decide whether they are
-   source artifacts or transitional surfaces.
+5. Remote AI Canvas service mirrors belong under `tools/aicanvas_remote/`, not
+   under root `.tmp-*` filenames.

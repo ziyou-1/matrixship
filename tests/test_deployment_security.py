@@ -160,6 +160,8 @@ class DeploymentSecurityTest(unittest.TestCase):
         required_patterns = {
             ".tmp-known-hosts",
             ".tmp-aicanvas-ai-api-service.py",
+            ".tmp-aicanvas-server-current.py",
+            ".tmp-aicanvas-server.py",
             ".tmp-aicanvas-test-*.py",
             ".tmp-platform-*.py",
             ".tmp-platform-test-*.py",
@@ -184,15 +186,24 @@ class DeploymentSecurityTest(unittest.TestCase):
         for required in (
             "Tracked source surfaces",
             "Ignored local surfaces",
-            "Visible transitional surfaces",
-            "Do not ignore `.tmp-*.py`",
-            ".tmp-aicanvas-server-current.py",
+            "Remote AI Canvas mirrors",
+            "tools/aicanvas_remote/server_current.py",
+            "tools/aicanvas_remote/server_legacy.py",
             "backend/",
             "docs/",
             "tests/",
             ".tmp-validation/",
         ):
             self.assertIn(required, text)
+
+    def test_remote_aicanvas_server_mirrors_use_stable_source_paths(self):
+        current = ROOT / "tools" / "aicanvas_remote" / "server_current.py"
+        legacy = ROOT / "tools" / "aicanvas_remote" / "server_legacy.py"
+
+        self.assertTrue(current.exists(), "current AI Canvas mirror is missing")
+        self.assertTrue(legacy.exists(), "legacy AI Canvas mirror is missing")
+        self.assertFalse((ROOT / ".tmp-aicanvas-server-current.py").exists())
+        self.assertFalse((ROOT / ".tmp-aicanvas-server.py").exists())
 
     def test_git_tracking_manifest_lists_stage_and_hold_surfaces(self):
         manifest = ROOT / "docs" / "GIT_TRACKING_MANIFEST.md"
@@ -201,7 +212,7 @@ class DeploymentSecurityTest(unittest.TestCase):
 
         for required in (
             "Must stage as source",
-            "Visible transitional files",
+            "Remote AI Canvas mirrors",
             "Not staged without migration",
             ".gitignore",
             "backend/api_server.py",
@@ -209,8 +220,8 @@ class DeploymentSecurityTest(unittest.TestCase):
             "backend/matrix_native_client.py",
             "docs/openapi.yaml",
             "tests/test_deployment_security.py",
-            ".tmp-aicanvas-server-current.py",
-            ".tmp-aicanvas-server.py",
+            "tools/aicanvas_remote/server_current.py",
+            "tools/aicanvas_remote/server_legacy.py",
             "tools/cloudflared",
             "tools/cloudflared.tgz",
         ):

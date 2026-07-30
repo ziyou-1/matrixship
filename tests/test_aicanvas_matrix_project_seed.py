@@ -7,7 +7,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / ".tmp-aicanvas-server-current.py"
+SERVER = ROOT / "tools/aicanvas_remote/server_current.py"
 
 
 def load_create_project():

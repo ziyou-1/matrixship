@@ -35,12 +35,12 @@
 - `backend/matrix_native_client.py#L11152-L11207`: 漫剧视频生成请求只提交当前片段首帧/尾帧；若首尾帧缺失才回退使用 `flowchartUrl/keyframeUrl`。视频阶段不再叠加人物、场景、产品或历史 `referenceImageUrls`，减少真人、水印、品牌 Logo、屏幕文字等参考图在 Ark/Seedance 视频阶段触发安全策略。
 - `backend/matrix_native_client.py#L11300-L11340`: 本地客户端把 `InputImageSensitiveContentDetected.PolicyViolation`、`copyright restriction` 和 `policy violation` 识别为可降级原因；轮询提示区分“真人参考图”和“素材版权/品牌风险”，失败消息保留 Seedance 原因和备用模型上游错误。
 - `backend/matrix_native_client.py#L20364-L20425`: 同款替换参考图预检提示词新增水印、百度百科/平台来源标记、抖音/小红书截图边框、电子屏幕大段文字、促销海报、代言人照片、第三方品牌和 Logo 过密检查；自有门店 Logo 可 warning 通过，但会给出重新拍摄建议。
-- `.tmp-aicanvas-server-current.py#L12973-L12994`: 漫剧服务快照把 `PolicyViolation/copyright restriction` 纳入 Seedance 视频备用模型链，按 Vidu Q3、万相、Kling、PixVerse 顺序继续尝试。
-- `.tmp-aicanvas-server.py#L25225-L25241`: 旧服务快照的 Ark proxy 错误提示补充素材版权/品牌风险分支，避免以后切回旧文件时仍只显示通用 502。
+- `tools/aicanvas_remote/server_current.py#L12973-L12994`: 漫剧服务快照把 `PolicyViolation/copyright restriction` 纳入 Seedance 视频备用模型链，按 Vidu Q3、万相、Kling、PixVerse 顺序继续尝试。
+- `tools/aicanvas_remote/server_legacy.py#L25225-L25241`: 旧服务快照的 Ark proxy 错误提示补充素材版权/品牌风险分支，避免以后切回旧文件时仍只显示通用 502。
 - `tests/test_video_replacement.py#L189-L243`、`tests/test_video_replacement.py#L244-L285`、`tests/test_video_replacement.py#L1217-L1295`、`tests/test_video_replacement.py#L1696-L1754`: 覆盖视频阶段只传首尾帧、PolicyViolation 本地识别、降级进度/失败文案和上传人物参考图优先清洗原片男销售外观。
 - `tests/test_video_replacement_v2.py#L2799-L2825`、`tests/test_aicanvas_real_person_fallback.py#L29-L34`、`tests/test_aicanvas_real_person_fallback.py#L329-L338`: 覆盖参考图预检风险词和 Seedance PolicyViolation 自动进入 Vidu 备用模型。
 - 验证：新增失败用例先覆盖旧行为；实现后 `tests.test_video_replacement` 92/92 通过，`tests.test_aicanvas_real_person_fallback` 14/14 通过，预检专项 2/2 通过，相关 Python 文件 `py_compile` 通过。
-- 回滚：回滚 `backend/matrix_native_client.py`、`.tmp-aicanvas-server-current.py`、`.tmp-aicanvas-server.py`、`tests/test_video_replacement.py`、`tests/test_video_replacement_v2.py`、`tests/test_aicanvas_real_person_fallback.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可恢复旧行为。本次不改数据库、OpenAPI、Docker、环境变量或 `migration.sql`；本地客户端需重启后生效，远程服务器需单独部署/重启对应漫剧服务文件后才会影响线上任务。
+- 回滚：回滚 `backend/matrix_native_client.py`、`tools/aicanvas_remote/server_current.py`、`tools/aicanvas_remote/server_legacy.py`、`tests/test_video_replacement.py`、`tests/test_video_replacement_v2.py`、`tests/test_aicanvas_real_person_fallback.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可恢复旧行为。本次不改数据库、OpenAPI、Docker、环境变量或 `migration.sql`；本地客户端需重启后生效，远程服务器需单独部署/重启对应漫剧服务文件后才会影响线上任务。
 
 # 2026-07-30 抖音私信保存登录信息弹窗关闭增强
 - `backend/api_server.py#L1876-L1914`: `browser_send_dm()` 新增 `disable_chromium_password_prompts()`，在私信临时浏览器 profile 写入 `credentials_enable_service=false` 和 `profile.password_manager_enabled=false`，并在启动参数中追加 `--disable-save-password-bubble`，减少浏览器保存密码气泡遮挡主页。
@@ -318,17 +318,17 @@
 - 验证与回滚：先观察新增测试失败，再实现通过。回滚可设置 `XHS_GUEST_COLLECTION_DEFAULT=0` 后重启本地客户端和本地执行引擎，或回退上述代码和测试文件；无数据库迁移、无新公共路由、无 Docker 结构变更，`migration.sql` 不需要修改。
 
 ## 2026-07-29 Seedance 音频时长超限进入备用模型链
-- `.tmp-aicanvas-server-current.py#L12936-L12952`：新增严格错误分类，仅识别 Seedance R2V `InvalidParameter` 中明确包含音频时长必须小于等于模型上限的错误，归一为 `InvalidParameter.AudioDurationExceeded`。
-- `.tmp-aicanvas-server-current.py#L13255-L13310`：该错误与真人隐私拒绝共用既有有序降级状态机；失败的 Seedance 调用先退款，Vidu/首尾帧备用参数移除音频字段，分辨率等其他参数错误仍直接失败。
+- `tools/aicanvas_remote/server_current.py#L12936-L12952`：新增严格错误分类，仅识别 Seedance R2V `InvalidParameter` 中明确包含音频时长必须小于等于模型上限的错误，归一为 `InvalidParameter.AudioDurationExceeded`。
+- `tools/aicanvas_remote/server_current.py#L13255-L13310`：该错误与真人隐私拒绝共用既有有序降级状态机；失败的 Seedance 调用先退款，Vidu/首尾帧备用参数移除音频字段，分辨率等其他参数错误仍直接失败。
 - `tests/test_aicanvas_real_person_fallback.py#L288-L304`：回归覆盖超过 15.2 秒的真实 Seedance 错误会切换 Vidu、移除音频并保留退款；本次专项回归 52/52 通过。包含旧版 V2 的扩展套件 270/273 通过，剩余 3 条均为小红书内容采集既有改动导致，与本链路无关。
 - 真实任务 `be79cc777af2497bbc95601b12b65eab` / 项目 299：3 个片段均已由 Vidu 成功生成；片段 2 验证了 `InvalidParameter.AudioDurationExceeded` 自动退款并切换 Vidu，片段 1、3 未被重复生成。
 - 回滚：恢复本次远程部署前 `server.py` 时间戳备份并只重启 `ai-canvas.service`。无数据库迁移，不重启本地客户端。
 
 ## 2026-07-29 同款替换精确分镜项目初始化
 - `backend/matrix_native_client.py#L9654-L9700`：同款替换创建漫剧项目时写入 `source_mode=matrix_video_replacement`、`manualAssetsOnly=true`、精确 `storyboardCount`，并把每个本地片段的纯画面描述和最终口播稿分别写入对应分镜。
-- `.tmp-aicanvas-server-current.py#L14146-L14202`：远程漫剧服务仅对 `matrix_video_replacement` 接受外部分镜种子，按项目 ID 生成稳定分镜 ID；项目初始角色、场景、道具保持为空，等待本地客户端上传真实素材。普通漫剧项目忽略外部分镜种子，继续原有分析流程。
+- `tools/aicanvas_remote/server_current.py#L14146-L14202`：远程漫剧服务仅对 `matrix_video_replacement` 接受外部分镜种子，按项目 ID 生成稳定分镜 ID；项目初始角色、场景、道具保持为空，等待本地客户端上传真实素材。普通漫剧项目忽略外部分镜种子，继续原有分析流程。
 - `tests/test_video_replacement.py#L260-L286`、`tests/test_aicanvas_matrix_project_seed.py#L35-L67`：覆盖客户端精确分镜载荷、同款替换项目不自动创建占位资产、普通漫剧项目不接受外部分镜种子。
-- 验证：本次专项回归 52/52 通过；包含旧版 V2 的扩展套件 270/273 通过，3 条未通过项均属于小红书内容采集既有改动；`backend/matrix_native_client.py` 和 `.tmp-aicanvas-server-current.py` 编译通过。
+- 验证：本次专项回归 52/52 通过；包含旧版 V2 的扩展套件 270/273 通过，3 条未通过项均属于小红书内容采集既有改动；`backend/matrix_native_client.py` 和 `tools/aicanvas_remote/server_current.py` 编译通过。
 - 回滚：本地回滚上述客户端和测试文件；远程恢复部署前 `server.py` 时间戳备份并只重启 `ai-canvas.service`。项目 298 保留为故障证据，不继续生成；本次无数据库迁移，不重启本地客户端。
 
 ## 2026-07-29 小红书标题 20 字限制
@@ -428,11 +428,11 @@
 - `backend/matrix_native_client.py#L9660-L9692`、`backend/matrix_native_client.py#L9846-L9895`：解析首尾两个任务 ID、补全 `/uploads/...` 相对媒体地址，并从远程分镜恢复首尾帧 URL；旧单任务 helper 和 `flowchart*` 字段继续兼容。
 - `backend/matrix_native_client.py#L9937-L9962`、`backend/matrix_native_client.py#L11279-L11538`：已有远程视频 URL 时直接规范化并下载，不重复提交；首尾帧分别等待并原子保存任务 ID、URL 和视频状态。
 - `backend/matrix_native_client.py#L11807-L11900`、`backend/matrix_native_client.py#L11965-L12020`：异步加载首尾帧缩略图，片段表固定为六列，口播稿编辑器受单元格尺寸约束。
-- `.tmp-aicanvas-server-current.py#L11201-L11297`：任务响应同时返回请求模型、实际模型、降级原因、候选链、当前索引和历史记录的 snake_case/camelCase 字段。
-- `.tmp-aicanvas-server-current.py#L12647-L12780`：轮询明确失败时保留原本地任务 ID 并进入下一模型；查询异常继续原任务重试，不会因 502、超时或限流创建新任务。
-- `.tmp-aicanvas-server-current.py#L12936-L13314`：默认降级顺序为 Vidu Q3、万相 2.7、Kling V3 Omni、PixVerse V6；每个失败调用单独退款，首尾帧模型删除不支持的音频字段，结构化日志不包含密钥和素材签名参数。
+- `tools/aicanvas_remote/server_current.py#L11201-L11297`：任务响应同时返回请求模型、实际模型、降级原因、候选链、当前索引和历史记录的 snake_case/camelCase 字段。
+- `tools/aicanvas_remote/server_current.py#L12647-L12780`：轮询明确失败时保留原本地任务 ID 并进入下一模型；查询异常继续原任务重试，不会因 502、超时或限流创建新任务。
+- `tools/aicanvas_remote/server_current.py#L12936-L13314`：默认降级顺序为 Vidu Q3、万相 2.7、Kling V3 Omni、PixVerse V6；每个失败调用单独退款，首尾帧模型删除不支持的音频字段，结构化日志不包含密钥和素材签名参数。
 - `tests/test_video_replacement.py#L24-L37`、`tests/test_video_replacement.py#L706-L823`、`tests/test_video_replacement_v2.py#L474-L513`、`tests/test_aicanvas_real_person_fallback.py#L222-L402`：覆盖双任务、相对 URL、已生成视频复用、六列表格、模型顺序、字段适配、远程失败续切和空配置禁用。
-- 验证：相关三组测试共 269/269 通过，`backend/matrix_native_client.py` 与 `.tmp-aicanvas-server-current.py` 编译通过。
+- 验证：相关三组测试共 269/269 通过，`backend/matrix_native_client.py` 与 `tools/aicanvas_remote/server_current.py` 编译通过。
 - 回滚：恢复远程时间戳备份并只重启 8777；本地回滚客户端和测试文件。无需数据库迁移、OpenAPI 或中心服重启；按用户要求不自动重启本地客户端。
 
 ## 2026-07-28 同款替换统一单图与漫剧远程自动时长
@@ -1917,10 +1917,10 @@
 - 回滚：设置 `XHS_SAFETY_MODE=0` 后重启本地客户端和本地执行引擎，可临时关闭执行前拦截；代码级回滚恢复 `backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_xhs_safety_mode.py`、`tests/test_api_download_contract.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `docs/DEPLOYMENT.md` 即可。无数据库结构、OpenAPI 新接口、Docker 或 `migration.sql` 变更。
 ## 2026-07-29 漫剧备用视频模型强制合入分镜 TTS
 
-- `.tmp-aicanvas-server-current.py#L12688-L12688`、`.tmp-aicanvas-server-current.py#L12770-L12770`：既有完成任务和刚轮询完成的备用模型任务，在写回项目分镜前都必须先经过 TTS 音轨终结；终结失败直接把任务标记为失败，不允许继续使用模型原声。
-- `.tmp-aicanvas-server-current.py#L13000-L13029`：从未被备用模型参数裁剪破坏的 `fallback_source_params` 中优先恢复该分镜的 TTS URL，并兼容现有音频字段别名。
-- `.tmp-aicanvas-server-current.py#L13031-L13109`：FFmpeg 只映射备用视频的画面流和分镜 TTS 音频流。TTS 比视频长时通过 `tpad=stop_mode=clone` 冻结尾帧；视频比 TTS 长时通过 `apad` 补静音；输出经临时文件校验后原子落盘并返回 `/data/uploads/` 账号隔离地址，模型原音轨不会进入新文件。
-- `.tmp-aicanvas-server-current.py#L13112-L13184`：成功任务记录 `audioSource=storyboard_tts`、`audioMixStatus=completed` 和三类时长；原模型视频 URL 保留为 `providerResultUrl` 供审计和回滚。失败日志为脱敏 JSON 事件，不记录 TTS URL。
+- `tools/aicanvas_remote/server_current.py#L12688-L12688`、`tools/aicanvas_remote/server_current.py#L12770-L12770`：既有完成任务和刚轮询完成的备用模型任务，在写回项目分镜前都必须先经过 TTS 音轨终结；终结失败直接把任务标记为失败，不允许继续使用模型原声。
+- `tools/aicanvas_remote/server_current.py#L13000-L13029`：从未被备用模型参数裁剪破坏的 `fallback_source_params` 中优先恢复该分镜的 TTS URL，并兼容现有音频字段别名。
+- `tools/aicanvas_remote/server_current.py#L13031-L13109`：FFmpeg 只映射备用视频的画面流和分镜 TTS 音频流。TTS 比视频长时通过 `tpad=stop_mode=clone` 冻结尾帧；视频比 TTS 长时通过 `apad` 补静音；输出经临时文件校验后原子落盘并返回 `/data/uploads/` 账号隔离地址，模型原音轨不会进入新文件。
+- `tools/aicanvas_remote/server_current.py#L13112-L13184`：成功任务记录 `audioSource=storyboard_tts`、`audioMixStatus=completed` 和三类时长；原模型视频 URL 保留为 `providerResultUrl` 供审计和回滚。失败日志为脱敏 JSON 事件，不记录 TTS URL。
 - `tests/test_aicanvas_real_person_fallback.py#L447-L599`：覆盖 TTS 来源恢复、短视频冻结尾帧、长视频补静音、模型音轨不映射、账号隔离媒体路由、成功元数据和混音失败阻止项目回写。
 - 验证：新增测试先因三个目标函数缺失得到 5 个预期错误，媒体路由测试又先捕获旧 `/uploads/` 前缀；实现后 `.venv-win` 相关回归 57/57 通过，`py_compile` 和 `git diff --check` 退出 0。真实 FFmpeg 冒烟将 3 秒带模型音轨的视频与 5 秒 TTS 合成为 5 秒且含音轨的新视频。
 - 生产部署：远程 `server.py` SHA-256 为 `8393970e0f9121ba7d9ba2b9bc68a278794464de629c6a464733f64309af52c5`，服务处于 `active`。项目 299 片段 2 已用现有 16.042 秒 Vidu 视频和 17.571 秒 TTS 重混为 17.584 秒 H.264/AAC 文件，任务记录 `audioSource=storyboard_tts`，未重新调用模型或计费。
@@ -1936,17 +1936,17 @@
 
 - 状态边界：Task 1-6/5A 的最终本地代码、远端部署源码和关键测试已重新索引；Task 7 已按批准范围完成。远程服务已部署，本地客户端按用户要求未重启；未执行 Git 暂存或提交。
 - Task 1-2，受保护媒体鉴权与下载：`backend/matrix_native_client.py#L10728-L10829` 负责脱敏媒体日志、同源保护判断、视频/首尾帧下载及失败状态；`backend/matrix_native_client.py#L11020-L11075` 对同源媒体附加 Bearer、401 时只刷新一次凭证、外部 CDN 不带凭证，并以 `.part` 原子落盘；`backend/matrix_native_client.py#L11099-L11135` 负责 Matrix ticket 交换、漫剧 Token 缓存和鉴权头。恢复语义见 `docs/TROUBLESHOOTING.md#L2128-L2137`。
-- Task 3，`frameIndex` 校验、推断和 direct/batch/proxy 路由：`.tmp-aicanvas-server-current.py#L13644-L13665` 严格校验 `frameIndex/frame_index` 并在批量载荷展开前移除帧选择器；`.tmp-aicanvas-server-current.py#L14069-L14112` 只展开被选中的关键帧；`.tmp-aicanvas-server-current.py#L17974-L18218` 是 direct 单分镜图片/视频入口，`.tmp-aicanvas-server-current.py#L18220-L18457` 是 batch 入口；`.tmp-aicanvas-server-current.py#L19568-L19586` 按显式 workflow、`quantity=2`、`count=7`、pending/project 顺序推断工作流；`.tmp-aicanvas-server-current.py#L20232-L20385` 执行 proxy 单帧/双帧提交和独立计费 ID，`.tmp-aicanvas-server-current.py#L22511-L22532` 在通用平台代理中优先分流该请求；`.tmp-aicanvas-server-current.py#L19944-L19987` 只把所选帧任务结果覆盖回对应位置。契约见 `docs/openapi.yaml#L113-L139`、`docs/openapi.yaml#L843-L875` 和 `docs/API_REFERENCE.md#L380-L410`。
+- Task 3，`frameIndex` 校验、推断和 direct/batch/proxy 路由：`tools/aicanvas_remote/server_current.py#L13644-L13665` 严格校验 `frameIndex/frame_index` 并在批量载荷展开前移除帧选择器；`tools/aicanvas_remote/server_current.py#L14069-L14112` 只展开被选中的关键帧；`tools/aicanvas_remote/server_current.py#L17974-L18218` 是 direct 单分镜图片/视频入口，`tools/aicanvas_remote/server_current.py#L18220-L18457` 是 batch 入口；`tools/aicanvas_remote/server_current.py#L19568-L19586` 按显式 workflow、`quantity=2`、`count=7`、pending/project 顺序推断工作流；`tools/aicanvas_remote/server_current.py#L20232-L20385` 执行 proxy 单帧/双帧提交和独立计费 ID，`tools/aicanvas_remote/server_current.py#L22511-L22532` 在通用平台代理中优先分流该请求；`tools/aicanvas_remote/server_current.py#L19944-L19987` 只把所选帧任务结果覆盖回对应位置。契约见 `docs/openapi.yaml#L113-L139`、`docs/openapi.yaml#L843-L875` 和 `docs/API_REFERENCE.md#L380-L410`。
 - Task 4，图片载荷与纯视觉资产绑定：`backend/matrix_native_client.py#L10295-L10326` 构造不含音频/声音/TTS/时长字段的图片生成载荷，同时保留人物、场景、道具及视觉参考；`backend/matrix_native_client.py#L10547-L10570` 支持分镜更新时显式 `include_audio=False`；`backend/matrix_native_client.py#L11205-L11215` 为单帧提交写入一致的 `frameIndex/frame_index`；`backend/matrix_native_client.py#L12856-L12898` 的单帧 runner 仅更新分镜视觉字段、提交所选帧并保留另一帧。
 - Task 4-5，单帧/视频重生成与 pending 恢复：`backend/matrix_native_client.py#L10843-L10907` 定义完成态 pending 恢复点及候选状态提升，`backend/matrix_native_client.py#L10910-L10988` 归档脱敏的视频尝试并在单帧成功后标记 `video_stale`，`backend/matrix_native_client.py#L10935-L10962` 对批量重试执行缺帧跳过和仅下载恢复筛选；`backend/matrix_native_client.py#L12791-L12854` 是单帧 UI 入口，`backend/matrix_native_client.py#L12856-L12898` 是单帧执行器，`backend/matrix_native_client.py#L12900-L13140` 是视频强制重生成、下载失败持久化和无重提/无重复计费的 pending 恢复执行器。
-- Task 5A，远端声音模式、重复任务和 fallback：`.tmp-aicanvas-server-current.py#L9802-L9866` 规范化 `auto/tts/legacy` 并决定跳过或准备分镜 TTS；`.tmp-aicanvas-server-current.py#L12920-L12954` 按声音语义隔离重复视频任务；`.tmp-aicanvas-server-current.py#L13039-L13067` 恢复 fallback TTS 来源，`.tmp-aicanvas-server-current.py#L13151-L13247` 对 direct 与 batch 共用终结逻辑，`auto` 保留 provider 音轨而 `tts/legacy` 强制重混；`.tmp-aicanvas-server-current.py#L13250-L13393` 保存 fallback 原始参数并推进候选模型；`.tmp-aicanvas-server-current.py#L13396-L13632` 统一 direct/batch 提交、重复复用和声音元数据，`.tmp-aicanvas-server-current.py#L13919-L13938` 防止复用任务的声音模式被不匹配请求覆盖。direct/batch 调用点分别位于 `.tmp-aicanvas-server-current.py#L17974-L18218` 和 `.tmp-aicanvas-server-current.py#L18220-L18457`。
+- Task 5A，远端声音模式、重复任务和 fallback：`tools/aicanvas_remote/server_current.py#L9802-L9866` 规范化 `auto/tts/legacy` 并决定跳过或准备分镜 TTS；`tools/aicanvas_remote/server_current.py#L12920-L12954` 按声音语义隔离重复视频任务；`tools/aicanvas_remote/server_current.py#L13039-L13067` 恢复 fallback TTS 来源，`tools/aicanvas_remote/server_current.py#L13151-L13247` 对 direct 与 batch 共用终结逻辑，`auto` 保留 provider 音轨而 `tts/legacy` 强制重混；`tools/aicanvas_remote/server_current.py#L13250-L13393` 保存 fallback 原始参数并推进候选模型；`tools/aicanvas_remote/server_current.py#L13396-L13632` 统一 direct/batch 提交、重复复用和声音元数据，`tools/aicanvas_remote/server_current.py#L13919-L13938` 防止复用任务的声音模式被不匹配请求覆盖。direct/batch 调用点分别位于 `tools/aicanvas_remote/server_current.py#L17974-L18218` 和 `tools/aicanvas_remote/server_current.py#L18220-L18457`。
 - Task 6，本地预览、播放器、状态和释放：`backend/matrix_native_client.py#L2144-L2177` 校验并缓存本地视频结果；`backend/matrix_native_client.py#L2180-L2345` 提供默认不自动播放且可显式释放后端资源的播放器，`backend/matrix_native_client.py#L2348-L2395` 只读取本地图片进行缩放预览；`backend/matrix_native_client.py#L2398-L2544` 定义视频单元格状态、固定尺寸控件、播放/暂停、进度、音量、全屏和释放；`backend/matrix_native_client.py#L13380-L13439` 在缺失本地帧时后台鉴权下载后再打开预览，`backend/matrix_native_client.py#L13441-L13497` 提供首尾帧独立刷新控件，`backend/matrix_native_client.py#L13563-L13588` 在刷新和销毁时释放旧播放器。
 - 关键本地回归：`tests/test_video_replacement.py#L42-L173` 覆盖单帧别名和纯视觉图片载荷；`tests/test_video_replacement.py#L267-L918` 覆盖单帧状态、帧/视频 runner、声音载荷、批量跳过和 pending 仅下载恢复；`tests/test_video_replacement.py#L935-L1083` 覆盖受保护媒体 Bearer、单次 401 刷新、外部 CDN 隔离、下载失败和已完成远程视频恢复；`tests/test_video_replacement_v2.py#L638-L997` 覆盖本地预览、独立刷新、播放器状态/控件/校验/释放、帧失败后旧视频保留及脱敏失败日志。
 - 关键远端与契约回归：`tests/test_aicanvas_frame_billing.py#L217-L667` 覆盖 `auto/tts/legacy`、direct/batch 重复任务隔离和共用 fallback 终结；`tests/test_aicanvas_frame_billing.py#L669-L1145` 覆盖独立计费 ID、direct/proxy workflow 推断、严格帧选择校验、batch 字段隔离和单帧 overlay；`tests/test_openapi_contract.py#L66-L102` 锁定 OpenAPI 的整数枚举、成功响应兼容和 400 Schema。
 - 独立审查修复：`docs/openapi.yaml#L855-L869` 只强制成功响应包含 `data.task_id`，兼容只返回单任务 ID 的 `action_flow` 与同时返回 `task_ids` 的双帧/多帧工作流；`backend/matrix_native_client.py#L2398-L2424` 在失败状态下优先校验并继续播放已保留的有效本地视频。对应回归为 `tests/test_openapi_contract.py#L66-L102` 和 `tests/test_video_replacement_v2.py#L810-L829`，均先在旧实现下失败再转绿。
 - 当前新鲜证据：`py_compile` 已通过，115 项核心测试已通过。完整计划门禁已重跑 375 项，其中 368 项通过；剩余 7 项与记录基线逐项一致，为 4 项旧原片声音预期和 3 项小红书旧夹具/文案问题，未发现新的本功能失败。
 - 远程发布与恢复：`2026-07-29 19:48:04 +08:00` 将 SHA-256 `f53d4d2ace67e12886557f28882fa61d40104083983ced96876b7efeaceb1f78` 原子部署到 `/root/AI-CanvasPro/server.py`，上一版本备份为 `/root/AI-CanvasPro/server.py.bak.comic-inline-media-20260729_194804`。部署后 38 项 mock 上游冒烟通过，服务、8777 端口和登录页正常。任务 `5a8c84d4aa1f40239b49435abae6fd08` 的 3 个远程完成视频通过鉴权仅下载恢复，生成提交数为 0，并合成 31.67 秒、720x1280、含音轨的有效成片。
-- 回滚与发布边界：本地发布工作集包括 `backend/matrix_native_client.py`、`.tmp-aicanvas-server-current.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、相关四级文档与变更记录、`tests/test_video_replacement.py` 的确认框 fixture 修正、`tests/test_video_replacement_v2.py`、`tests/test_aicanvas_frame_billing.py` 和 `tests/test_openapi_contract.py`。远程部署前服务进程仍未改变；本次无数据库迁移。
+- 回滚与发布边界：本地发布工作集包括 `backend/matrix_native_client.py`、`tools/aicanvas_remote/server_current.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、相关四级文档与变更记录、`tests/test_video_replacement.py` 的确认框 fixture 修正、`tests/test_video_replacement_v2.py`、`tests/test_aicanvas_frame_billing.py` 和 `tests/test_openapi_contract.py`。远程部署前服务进程仍未改变；本次无数据库迁移。
 
 ## 2026-07-30 账单领域模块与 Phase 0 冒烟
 

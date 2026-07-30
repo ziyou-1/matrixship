@@ -16,7 +16,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / ".tmp-aicanvas-server-current.py"
+SERVER = ROOT / "tools/aicanvas_remote/server_current.py"
 PRIVACY_ERROR = (
     "InputImageSensitiveContentDetected.PrivacyInformation: "
     "The request failed because the input image may contain real person."

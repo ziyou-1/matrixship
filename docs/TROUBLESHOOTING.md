@@ -22,9 +22,9 @@
 ## 2026-07-30 同款替换 5 段视频全部失败：Seedance/Ark 素材版权或品牌风险
 - 现象：同款替换任务状态为 `partial`，多个片段视频生成失败；错误包含 `comic_task_failed:ark 400 Bad Request`、`InputImageSensitiveContentDetected.PolicyViolation` 或 `copyright restriction`。失败消息可能提到输入图片 `content[1] content[3] content[5]` 与版权限制相关。
 - 定位：最新失败任务 `854f074f38464b12b23c8ebaa92e9e1b` 的第 2/3/4 段在视频提交阶段失败，不是公网 URL、余额或下载失败。旧视频请求同时携带首帧、尾帧、人物参考图、场景参考图、产品参考图，容易把百度百科水印、展厅密集 Logo、电子屏幕文字、促销海报等风险一起带进 Seedance/Ark 视频阶段。
-- 修复：`backend/matrix_native_client.py#L11152-L11207` 改为视频阶段只传当前片段首尾帧；`backend/matrix_native_client.py#L11300-L11340` 和 `.tmp-aicanvas-server-current.py#L12973-L12994` 把 `PolicyViolation/copyright restriction` 纳入备用模型降级；`backend/matrix_native_client.py#L20364-L20425` 在上传/生成前预检水印、百度百科/平台来源、电子屏幕、促销海报、第三方品牌和 Logo 过密。
+- 修复：`backend/matrix_native_client.py#L11152-L11207` 改为视频阶段只传当前片段首尾帧；`backend/matrix_native_client.py#L11300-L11340` 和 `tools/aicanvas_remote/server_current.py#L12973-L12994` 把 `PolicyViolation/copyright restriction` 纳入备用模型降级；`backend/matrix_native_client.py#L20364-L20425` 在上传/生成前预检水印、百度百科/平台来源、电子屏幕、促销海报、第三方品牌和 Logo 过密。
 - 用户素材建议：人物图使用已授权真人或虚拟模特，避免平台水印、百科截图、直播间界面和第三方商品背景；场景图可以保留自有品牌门店 Logo，但不要让 Logo 满墙、屏幕大段文字、促销海报或其他品牌商标占据画面；产品图用自有清晰照片，保留外形、颜色、包装文字和 Logo，避免网页截图和水印。
-- 恢复：已失败旧任务不会自动变成功，需要重试失败片段或重新创建任务。本地客户端重启后生效；线上漫剧服务如仍使用旧代码，需要单独部署并重启远程服务。回滚 `backend/matrix_native_client.py`、`.tmp-aicanvas-server-current.py`、`.tmp-aicanvas-server.py` 及对应测试/文档即可恢复旧行为。
+- 恢复：已失败旧任务不会自动变成功，需要重试失败片段或重新创建任务。本地客户端重启后生效；线上漫剧服务如仍使用旧代码，需要单独部署并重启远程服务。回滚 `backend/matrix_native_client.py`、`tools/aicanvas_remote/server_current.py`、`tools/aicanvas_remote/server_legacy.py` 及对应测试/文档即可恢复旧行为。
 
 ## 2026-07-30 抖音客户主页已打开但没有自动点击“私信”
 - 现象：后台浏览器已经打开客户主页，页面弹出“是否保存登录信息？”或右上方能看到“私信”按钮，但客户端提示 `dm_button_not_found`、`dm_panel_not_open` 或 `dm_input_not_found`。实际可能是弹窗遮住主页，或私信按钮没有被页面真正响应。

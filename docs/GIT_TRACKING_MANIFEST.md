@@ -44,20 +44,17 @@ current contents and excluding credentials or runtime data:
 - Tests: `tests/`, including `tests/test_deployment_security.py`.
 - Operator scripts and shell helpers: `scripts/`, `bin/`,
   `start-local-test.ps1`, and `start-visible-client.bat`.
-- Source tools: `tools/repair_scheduler_state.py`.
+- Source tools: `tools/repair_scheduler_state.py`,
+  `tools/aicanvas_remote/server_current.py`, and
+  `tools/aicanvas_remote/server_legacy.py`.
 
-## Visible transitional files
+## Remote AI Canvas mirrors
 
-Keep these visible in `git status` until they are migrated to a stable source
-path or explicitly archived. They are remote AI Canvas service mirrors, not
-normal scratch files:
+These are formal source mirrors of remote service files. Stage them when changed
+with focused tests, deployment notes, backup hash, and rollback path:
 
-- `.tmp-aicanvas-server-current.py`
-- `.tmp-aicanvas-server.py`
-
-Before staging either file, migrate it to a stable directory such as
-`tools/aicanvas_remote/`, update references in tests and docs, and record the
-rollback path.
+- `tools/aicanvas_remote/server_current.py`
+- `tools/aicanvas_remote/server_legacy.py`
 
 ## Not staged without migration
 
@@ -73,8 +70,8 @@ a documented installer, checksum, or pinned package source:
 1. Run `git status --short --ignored` and confirm ignored files are only local
    runtime, dependency, cache, validation, credential, or downloaded artifacts.
 2. Review every source candidate for secrets before staging.
-3. Keep `.tmp-aicanvas-server-current.py` and `.tmp-aicanvas-server.py`
-   visible unless they have been migrated to a formal path.
+3. Keep remote AI Canvas mirrors under `tools/aicanvas_remote/`; do not create
+   new root `.tmp-aicanvas-server*.py` source mirrors.
 4. Do not stage modified tracked files from unrelated feature work unless the
    release scope explicitly includes them.
 5. Re-run `tests.test_deployment_security` after any change to `.gitignore`,

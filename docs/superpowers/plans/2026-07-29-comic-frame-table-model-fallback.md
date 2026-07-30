@@ -26,7 +26,7 @@
 - `backend/matrix_native_client.py`: local frame parsing, URL normalization, comic segment orchestration, thumbnail cells, and table sizing.
 - `tests/test_video_replacement.py`: local comic helper and orchestration tests.
 - `tests/test_video_replacement_v2.py`: local table layout source-contract test.
-- `.tmp-aicanvas-server-current.py`: test mirror of remote `/root/AI-CanvasPro/server.py`; updated first, then deployed after backup.
+- `tools/aicanvas_remote/server_current.py`: test mirror of remote `/root/AI-CanvasPro/server.py`; updated first, then deployed after backup.
 - `tests/test_aicanvas_real_person_fallback.py`: isolated remote fallback-chain and billing tests.
 - `docs/ARCHITECTURE.md`, `docs/API_REFERENCE.md`, `docs/DEPLOYMENT.md`: data flow, response fields, configuration, and rollout.
 - `docs/IMPLEMENTATION.md`: final source locations with recalculated line numbers.
@@ -261,7 +261,7 @@ git commit -m "feat: show comic start and end frames"
 
 **Files:**
 - Modify: `tests/test_aicanvas_real_person_fallback.py`
-- Modify: `.tmp-aicanvas-server-current.py:12920-13177`
+- Modify: `tools/aicanvas_remote/server_current.py:12920-13177`
 
 **Interfaces:**
 - Produces: `_comic_real_person_video_fallback_models() -> tuple[str, ...]`.
@@ -330,7 +330,7 @@ Assert logs include `project_id`, `storyboard_id`, `requested_model`, `actual_mo
 
 ```powershell
 .\.venv-win\Scripts\python.exe -m unittest tests.test_aicanvas_real_person_fallback -v
-.\.venv-win\Scripts\python.exe -m py_compile .tmp-aicanvas-server-current.py
+.\.venv-win\Scripts\python.exe -m py_compile tools/aicanvas_remote/server_current.py
 ```
 
 Expected: all tests pass and no warning is emitted.
@@ -362,7 +362,7 @@ Add a dated `CHANGELOG.md` entry. Set `migration.sql` to a comment-only entry st
 
 ```powershell
 .\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement tests.test_video_replacement_v2 tests.test_aicanvas_real_person_fallback -v
-.\.venv-win\Scripts\python.exe -m py_compile backend/matrix_native_client.py .tmp-aicanvas-server-current.py
+.\.venv-win\Scripts\python.exe -m py_compile backend/matrix_native_client.py tools/aicanvas_remote/server_current.py
 ```
 
 Expected: all tests pass.

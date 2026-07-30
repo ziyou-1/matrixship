@@ -29,6 +29,8 @@ backend/uploads/
 .tmp-*.ps1
 .tmp-known-hosts
 .tmp-aicanvas-ai-api-service.py
+.tmp-aicanvas-server-current.py
+.tmp-aicanvas-server.py
 .tmp-aicanvas-test-*.py
 .tmp-platform-*.py
 .tmp-platform-test-*.py

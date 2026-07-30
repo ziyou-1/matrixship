@@ -53,7 +53,7 @@
 
 ### Operations
 - 已失败的旧同款替换任务需要重试失败片段或重新创建任务。本地客户端重启后生效；线上漫剧服务如仍使用旧代码，需要单独部署并重启远程服务。
-- 本次不改数据库、OpenAPI、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`.tmp-aicanvas-server-current.py`、`.tmp-aicanvas-server.py`、相关测试和文档即可恢复旧行为。
+- 本次不改数据库、OpenAPI、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tools/aicanvas_remote/server_current.py`、`tools/aicanvas_remote/server_legacy.py`、相关测试和文档即可恢复旧行为。
 
 ## 2026-07-30 抖音私信按钮点击误判修复
 ### Fixed
