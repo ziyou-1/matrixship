@@ -1,0 +1,63 @@
+# Local Python environments
+venv/
+.venv/
+.venv-win/
+.tmp-validation/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Runtime data
+data/
+logs/
+*.log
+screenlog.*
+backend/central_data/
+backend/datas/
+backend/uploads/
+
+# Local validation and agent scratch artifacts
+.playwright-cli/
+.workbuddy/
+.tmp-*.log
+.tmp-*.txt
+.tmp-*.json
+.tmp-*.cmd
+.tmp-*.ps1
+.tmp-known-hosts
+.tmp-aicanvas-ai-api-service.py
+.tmp-aicanvas-test-*.py
+.tmp-platform-*.py
+.tmp-platform-test-*.py
+.tmp-real-comic-e2e*.py
+.tmp-run-prepared-comic-e2e*.py
+.tmp-resume-real-comic-e2e.py
+.tmp-recover-comic-task.py
+.tmp-remote-aicanvas-ops.py
+tmp_*.log
+tmp_*.mp4
+tmp_*/
+
+# Downloaded local tool binaries
+tools/cloudflared
+tools/cloudflared.tgz
+
+# Local dependencies and build outputs
+node_modules/
+backend/node_modules/
+__pycache__/
+**/__pycache__/
+*.pyc
+dist/
+build/
+*.tgz
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
+
+# Local rollback snapshots remain on disk but are not source artifacts
+backups/

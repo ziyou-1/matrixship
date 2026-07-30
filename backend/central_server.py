@@ -23,6 +23,7 @@ import threading
 import time
 import traceback
 import uuid
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlencode
 import urllib.error
@@ -35,18 +36,39 @@ try:
 except Exception:
     load_dotenv = None
 
-if load_dotenv:
+
+def _load_central_dotenv(load_dotenv_fn=None):
+    load_dotenv_fn = load_dotenv if load_dotenv_fn is None else load_dotenv_fn
+    enabled = os.getenv("CENTRAL_LOAD_DOTENV", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    if not load_dotenv_fn or not enabled:
+        return
     _HERE = os.path.dirname(os.path.abspath(__file__))
-    load_dotenv(os.path.join(os.path.dirname(_HERE), ".env"), override=False)
-    load_dotenv(os.path.join(_HERE, ".env"), override=True)
+    load_dotenv_fn(os.path.join(os.path.dirname(_HERE), ".env"), override=False)
+    load_dotenv_fn(os.path.join(_HERE, ".env"), override=True)
+
+
+_load_central_dotenv()
 
 try:
     import maindb  # 漫剧(ai-education)共享主库访问层:用户/余额/价格/资产
 except Exception:
     maindb = None
 
+from billing_analytics import (
+    BillingQueryError,
+    build_billing_analytics,
+    build_billing_ledger,
+    normalize_billing_records,
+    parse_ledger_filters,
+    parse_period,
+    validate_billing_payload,
+)
+from jsonschema import ValidationError as JsonSchemaValidationError
 from utils.media_validation import cleanup_quarantine, validate_image_file, validate_video_file
 from utils.structured_log import json_log
+from matrix_sso import MatrixSsoError, issue_ticket as issue_matrix_sso_ticket
 
 
 CENTRAL_VERSION = "1.1.16-agent-mode"
@@ -69,8 +91,10 @@ SESSION_TTL_SEC = float(os.getenv("CENTRAL_SESSION_TTL_SEC", str(7 * 24 * 3600))
 TASK_RECOVERY_GRACE_SEC = float(os.getenv("CENTRAL_TASK_RECOVERY_GRACE_SEC", "90") or 90)
 TASK_QUEUED_MAX_SEC = float(os.getenv("CENTRAL_TASK_QUEUED_MAX_SEC", "900") or 900)
 DEFAULT_ORG_ID = "org-default"
-# 新用户注册赠豆(云豆,1 云豆=¥0.01)。每个手机号首次建号赠一次;=0 关闭。
-SIGNUP_BONUS_YUNDOU = float(os.getenv("CENTRAL_SIGNUP_BONUS", "100") or 0)
+# 新用户注册赠豆(云豆,1 云豆=¥1)。每个手机号首次建号赠一次;=0 关闭。
+YUNDOU_PER_YUAN = 1.0
+LEGACY_YUNDOU_PER_YUAN = 100.0
+SIGNUP_BONUS_YUNDOU = float(os.getenv("CENTRAL_SIGNUP_BONUS", "1") or 0)
 # 漫剧模式下新用户注册赠送的**算力**(与云豆不同量纲;算力≈真金,默认 0 不赠,运营方按需 env 配)
 MAINDB_SIGNUP_BONUS = float(os.getenv("MAINDB_SIGNUP_BONUS", "0") or 0)
 # matrixship 生成在漫剧成本价(model_prices)基础上的加价倍率(只影响 matrixship,漫剧画布不受影响)。
@@ -81,6 +105,21 @@ MAINDB_YUAN_TO_POWER = float(os.getenv("MAINDB_YUAN_TO_POWER", "10") or 10)
 LEGAL_TERMS_VERSION = os.getenv("LEGAL_TERMS_VERSION", "1.0") or "1.0"
 LEGAL_PRIVACY_VERSION = os.getenv("LEGAL_PRIVACY_VERSION", "1.0") or "1.0"
 LEGAL_EFFECTIVE_DATE = os.getenv("LEGAL_EFFECTIVE_DATE", "2026-07-15") or "2026-07-15"
+COMIC_SSO_ENABLED = os.getenv("MATRIX_COMIC_SSO_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+COMIC_SSO_SECRET = os.getenv("MATRIX_COMIC_SSO_SECRET", "").strip()
+COMIC_SSO_ISSUER = os.getenv("MATRIX_COMIC_SSO_ISSUER", "matrix-central").strip() or "matrix-central"
+COMIC_SSO_AUDIENCE = os.getenv("MATRIX_COMIC_SSO_AUDIENCE", "aicanvas").strip() or "aicanvas"
+try:
+    COMIC_SSO_TTL_SEC = max(15, min(120, int(os.getenv("MATRIX_COMIC_SSO_TTL_SEC", "60") or 60)))
+except (TypeError, ValueError):
+    COMIC_SSO_TTL_SEC = 60
+COMIC_SSO_EXCHANGE_PATH = "/api/v2/auth/exchange-matrix-ticket"
+COMIC_FIXED_USER_ID = os.getenv("MATRIX_COMIC_FIXED_USER_ID", "44").strip()
+COMIC_FIXED_USERNAME = os.getenv("MATRIX_COMIC_FIXED_USERNAME", "003").strip() or "003"
+COMIC_FIXED_DISPLAY_NAME = (
+    os.getenv("MATRIX_COMIC_FIXED_DISPLAY_NAME", COMIC_FIXED_USERNAME).strip()
+    or COMIC_FIXED_USERNAME
+)
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MATERIALS_DIR, exist_ok=True)
@@ -284,6 +323,32 @@ def backup_state_file_on_startup(now_label=None):
     return backup_path
 
 
+def publish_runtime_from_state(state):
+    rt = (state or {}).get("publishRuntime") if isinstance(state, dict) else {}
+    rt = rt if isinstance(rt, dict) else {}
+    day = str(rt.get("day") or today_key())
+    today = today_key()
+    counts = {}
+    if day == today:
+        for k, v in (rt.get("counts") or {}).items():
+            try:
+                counts[str(k)] = max(0, int(v or 0))
+            except Exception:
+                counts[str(k)] = 0
+    last_ts_by_org = {}
+    for k, v in (rt.get("last_ts_by_org") or {}).items():
+        org_key = (str(k or "").strip() or DEFAULT_ORG_ID)
+        try:
+            last_ts_by_org[org_key] = float(v or 0)
+        except Exception:
+            last_ts_by_org[org_key] = 0.0
+    try:
+        last_ts = float(rt.get("last_ts") or 0)
+    except Exception:
+        last_ts = 0.0
+    return {"day": today, "last_ts": last_ts, "counts": counts, "last_ts_by_org": last_ts_by_org}
+
+
 def init_state():
     global STATE_LOAD_ERROR
     st = _load_json(STORE_JSON, {})
@@ -314,6 +379,7 @@ def init_state():
     st.setdefault("cloudLoginProgress", [])
     st.setdefault("enterpriseInvites", [])
     st.setdefault("legalConsents", {})
+    st["publishRuntime"] = publish_runtime_from_state(st)
     st.setdefault("settings", {"perAccountPerDay": 1, "intervalMin": 60, "enabled": False})
     st.setdefault("orgSettings", {})
     st.setdefault("orgQuotas", {})
@@ -348,7 +414,7 @@ def init_state():
 
 STATE_STARTUP_BACKUP = backup_state_file_on_startup()
 STATE = init_state()
-PUBLISH_RT = {"day": "", "last_ts": 0.0, "counts": {}}
+PUBLISH_RT = STATE.setdefault("publishRuntime", publish_runtime_from_state(STATE))
 
 
 def normalize_org_id(value=None):
@@ -686,6 +752,49 @@ def audit_safe_body(body):
     return safe
 
 
+def safe_local_browser_payload(task_type, payload):
+    payload = payload if isinstance(payload, dict) else {}
+    if task_type == "douyin.dm.inbox":
+        return {
+            "targetFingerprint": _short_hash(payload.get("target") or payload.get("userUrl") or payload.get("secUid") or ""),
+            "limit": payload.get("limit"),
+            "sinceFingerprint": payload.get("sinceFingerprint") or "",
+        }
+    return audit_safe_body(payload)
+
+
+def safe_local_browser_result(task_type, result):
+    result = result if isinstance(result, dict) else {}
+    if task_type != "douyin.dm.inbox":
+        return strip_large_payloads(result, max_inline=20000)
+    messages = []
+    for msg in list(result.get("messages") or [])[:20]:
+        if not isinstance(msg, dict):
+            continue
+        messages.append({
+            "id": str(msg.get("id") or msg.get("fingerprint") or ""),
+            "fingerprint": str(msg.get("fingerprint") or msg.get("id") or ""),
+            "direction": str(msg.get("direction") or ""),
+            "kind": str(msg.get("kind") or "unknown"),
+            "createdAtText": str(msg.get("createdAtText") or ""),
+            "text": "",
+            "textFingerprint": _short_hash(msg.get("text") or ""),
+        })
+    return {
+        "ok": bool(result.get("ok")),
+        "platform": result.get("platform") or "douyin",
+        "targetFingerprint": _short_hash(result.get("target") or ""),
+        "messages": messages,
+        "messageCount": len(result.get("messages") or []),
+        "nonTextCount": result.get("nonTextCount") or 0,
+        "sinceFingerprint": result.get("sinceFingerprint") or "",
+        "limit": result.get("limit"),
+        "needLogin": bool(result.get("needLogin")),
+        "empty": bool(result.get("empty")),
+        "error": result.get("error") or "",
+    }
+
+
 def strip_large_payloads(value, max_inline=4096):
     """Return a copy suitable for persistence/audit without embedded images."""
     if isinstance(value, dict):
@@ -864,20 +973,20 @@ def gen_price_yundou(model, params):
     m = (model or "").lower()
     p = params or {}
     if "kling-avatar" in m:  # 数字人
-        return 5040 if str(p.get("mode") or "").lower() == "pro" else 2520
+        return 50.4 if str(p.get("mode") or "").lower() == "pro" else 25.2
     if "vidu" in m:          # 工作流视频(vidu-jieshuoman)
-        return 2520
+        return 25.2
     if "seedance" in m:      # 商品视频(doubao-seedance)
-        return 308
+        return 3.08
     if "gpt-image" in m or "image-2" in m or "image2" in m:  # 出图(商品/爆款/工作流/封面)
-        return 14
+        return 0.14
     if "tts" in m or "speech" in m:  # 语音
-        return 21
+        return 0.21
     if any(k in m for k in ("suno", "music", "audio", "sound")):  # 音乐/音频
-        return 21
+        return 0.21
     if any(k in m for k in ("veo", "sora", "runway", "pika", "hailuo", "wan", "cog", "video", "avatar", "image", "flux", "midjourney", "sd")):
-        return 308           # 其它视频/图像类媒体模型:保底(不白嫖)
-    return 308               # 兜底:未知模型按视频价保底(客户端只用已定价模型;未知=改过的客户端,按高价扣防白嫖)
+        return 3.08          # 其它视频/图像类媒体模型:保底(不白嫖)
+    return 3.08              # 兜底:未知模型按视频价保底(客户端只用已定价模型;未知=改过的客户端,按高价扣防白嫖)
 
 
 def _lk888_multipart_fields(body, content_type):
@@ -998,7 +1107,7 @@ def lk888_proxy(handler, method, parsed):
                 if not _ok:
                     return json_response(handler, {"ok": False, "error": "insufficient_balance",
                                                    "need": _amt, "balance": _bal,
-                                                   "message": "云豆余额不足(需 %d,当前 %s),请充值后再生成。" % (_amt, _bal)}, 402)
+                                                   "message": "云豆余额不足(需 %s,当前 %s),请充值后再生成。" % (_amt, _bal)}, 402)
                 charge_ctx = {"ref": _gref, "userId": u.get("id"), "amount": _amt, "sync": _is_sync_img, "ts": now()}
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", "Bearer " + key)
@@ -1340,6 +1449,33 @@ def safe_filename(name, fallback="file"):
     return base or fallback
 
 
+def library_upload_metadata(fields):
+    fields = fields if isinstance(fields, dict) else {}
+    out = {}
+    for key in (
+        "platform", "body", "status", "sourceTitle", "sourceBody",
+        "replacementJobId", "sourceTemplateId", "localDraftMaterialId",
+    ):
+        value = str(fields.get(key) or "").strip()
+        if value:
+            out[key] = value
+    for key in ("tags", "sourceTags"):
+        raw = str(fields.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = re.split(r"[,，\s]+", raw)
+        if isinstance(parsed, (list, tuple, set)):
+            tags = [str(x or "").strip() for x in parsed if str(x or "").strip()]
+            if tags:
+                out[key] = tags
+    if str(fields.get("importedFromXhsNoteReplacement") or "").strip().lower() in ("1", "true", "yes", "on"):
+        out["importedFromXhsNoteReplacement"] = True
+    return out
+
+
 def load_library(org_id=None):
     org_id = normalize_org_id(org_id) if org_id else None
     with LOCK:
@@ -1485,12 +1621,20 @@ def material_payload(mid, org_id=None):
     m = find_material(mid, org_id)
     if not m:
         return None
-    return {
+    payload = {
         "id": m.get("id"),
         "title": m.get("title") or "",
         "type": m.get("type") or "video",
         "files": [{"name": fn, "url": "/api/library/file/%s/%s" % (quote(m.get("id") or ""), quote(fn))} for fn in (m.get("files") or [])],
     }
+    for key in (
+        "platform", "body", "tags", "status", "sourceTitle", "sourceBody", "sourceTags",
+        "replacementJobId", "sourceTemplateId", "localDraftMaterialId",
+        "importedFromXhsNoteReplacement",
+    ):
+        if key in m:
+            payload[key] = m.get(key)
+    return payload
 
 
 def safe_material_file_name(name, idx=0):
@@ -2346,6 +2490,89 @@ def current_user(handler):
     return u
 
 
+class ComicSsoIssueError(RuntimeError):
+    def __init__(self, code, message=""):
+        self.code = str(code or "comic_sso_issue_failed")
+        super().__init__(message or self.code)
+
+
+def comic_sso_ticket_user_scope(user):
+    """Return the AI CanvasPro user claims used for Matrix same-style replacement."""
+    matrix_user_id = str((user or {}).get("id") or "").strip()
+    fixed_user_id = str(COMIC_FIXED_USER_ID or "").strip()
+    if fixed_user_id:
+        try:
+            user_id = int(fixed_user_id)
+        except (TypeError, ValueError) as exc:
+            raise ComicSsoIssueError("comic_fixed_user_invalid") from exc
+        if user_id <= 0:
+            raise ComicSsoIssueError("comic_fixed_user_invalid")
+        return {
+            "mode": "fixed",
+            "userId": user_id,
+            "username": COMIC_FIXED_USERNAME,
+            "displayName": COMIC_FIXED_DISPLAY_NAME or COMIC_FIXED_USERNAME,
+            "matrixUserId": matrix_user_id,
+        }
+    if not is_maindb_user(user):
+        raise ComicSsoIssueError("comic_sso_user_not_mapped")
+    try:
+        user_id = int((user or {}).get("id"))
+    except (TypeError, ValueError) as exc:
+        raise ComicSsoIssueError("comic_sso_user_not_mapped") from exc
+    if user_id <= 0:
+        raise ComicSsoIssueError("comic_sso_user_not_mapped")
+    display_name = first_nonempty(
+        (user or {}).get("name"),
+        (user or {}).get("nickname"),
+        (user or {}).get("username"),
+    )
+    return {
+        "mode": "mapped",
+        "userId": user_id,
+        "username": str((user or {}).get("username") or ""),
+        "displayName": display_name,
+        "matrixUserId": matrix_user_id,
+    }
+
+
+def issue_comic_sso_ticket_for_user(user, org_id=None, now_ts=None, nonce=None):
+    if not COMIC_SSO_ENABLED:
+        raise ComicSsoIssueError("comic_sso_disabled")
+    if len(COMIC_SSO_SECRET.encode("utf-8")) < 32:
+        raise ComicSsoIssueError("comic_sso_secret_missing")
+    comic_scope = comic_sso_ticket_user_scope(user)
+    user_id = int(comic_scope["userId"])
+    display_name = str(comic_scope.get("displayName") or "")
+    try:
+        ticket, payload = issue_matrix_sso_ticket(
+            secret=COMIC_SSO_SECRET,
+            issuer=COMIC_SSO_ISSUER,
+            audience=COMIC_SSO_AUDIENCE,
+            user_id=user_id,
+            org_id=normalize_org_id(org_id),
+            display_name=display_name,
+            ttl_seconds=COMIC_SSO_TTL_SEC,
+            now=now_ts,
+            nonce=nonce,
+        )
+    except MatrixSsoError as exc:
+        raise ComicSsoIssueError("comic_sso_ticket_invalid", exc.code) from exc
+    return {
+        "ok": True,
+        "ticket": ticket,
+        "expiresAt": int(payload["exp"]),
+        "exchangePath": COMIC_SSO_EXCHANGE_PATH,
+        "audience": COMIC_SSO_AUDIENCE,
+        "userId": user_id,
+        "comicUserId": user_id,
+        "comicUsername": str(comic_scope.get("username") or ""),
+        "comicAccountMode": str(comic_scope.get("mode") or ""),
+        "matrixUserId": str(comic_scope.get("matrixUserId") or ""),
+        "orgId": normalize_org_id(org_id),
+    }
+
+
 def hash_password(password, salt=None):
     salt = salt or uuid.uuid4().hex
     h = hashlib.sha256((salt + ":" + (password or "")).encode("utf-8")).hexdigest()
@@ -2720,16 +2947,17 @@ def get_or_create_phone_user(phone):
 
 # ============ 余额 / 计费框架(单价规则留空,等业务方定) ============
 BILLING_CAPABILITY_PRICES_YUNDOU = {
-    "product_image": 14,
-    "product_video": 308,
-    "copywriting": 7,
-    "viral_image": 21,
-    "digital_human": 2520,
-    "digital_human_pro": 5040,
-    "mix": 14,
-    "workflow_image": 14,
-    "workflow_video": 2520,
-    "workflow_tts": 21,
+    "product_image": 0.14,
+    "product_video": 3.08,
+    "copywriting": 0.07,
+    "viral_image": 0.21,
+    "digital_human": 25.2,
+    "digital_human_pro": 50.4,
+    "mix": 0.14,
+    "workflow_image": 0.14,
+    "workflow_video": 25.2,
+    "workflow_tts": 0.21,
+    "comic_keyframe_image": 0.14,
 }
 
 LK888_PROXY_CHARGED_CAPABILITIES = {
@@ -2754,7 +2982,68 @@ def capability_price_yundou(capability, requested_amount=None):
 
 
 def maindb_power_from_yundou(yundou_amount):
-    return round(float(yundou_amount or 0) / 100.0 * MAINDB_YUAN_TO_POWER, 6)
+    return round(float(yundou_amount or 0) * MAINDB_YUAN_TO_POWER, 6)
+
+
+def _scale_legacy_yundou_value(value):
+    try:
+        return round(float(value or 0) / LEGACY_YUNDOU_PER_YUAN * YUNDOU_PER_YUAN, 6)
+    except Exception:
+        return value
+
+
+def migrate_yundou_state_to_one_to_one(state, now_label=None):
+    """Scale old local cloud-bean wallet data from 100 beans/yuan to 1 bean/yuan.
+
+    This mutates an in-memory state dict only. Operators should call it through
+    the repair script after backing up the state file; startup never runs it
+    automatically so the migration cannot be applied twice by accident.
+    """
+    if not isinstance(state, dict):
+        return {"migrated": False, "error": "state_not_object"}
+    marker = state.get("billingRateMigration") or {}
+    if marker.get("yundouPerYuan") == YUNDOU_PER_YUAN:
+        return {"migrated": False, "reason": "already_migrated"}
+
+    counts = {"users": 0, "ledger": 0, "rechargeOrders": 0, "redeemCodes": 0}
+    for user in state.get("users") or []:
+        if isinstance(user, dict) and "balance" in user:
+            user["balance"] = _scale_legacy_yundou_value(user.get("balance"))
+            counts["users"] += 1
+
+    for entry in state.get("ledger") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("wallet") == "maindb_generic":
+            if "yundouAmount" in entry:
+                entry["yundouAmount"] = _scale_legacy_yundou_value(entry.get("yundouAmount"))
+            counts["ledger"] += 1
+            continue
+        for key in ("delta", "balanceAfter", "yundouAmount"):
+            if key in entry:
+                entry[key] = _scale_legacy_yundou_value(entry.get(key))
+        counts["ledger"] += 1
+
+    for order in state.get("recharge_orders") or []:
+        if not isinstance(order, dict) or order.get("currency") == "power":
+            continue
+        for key in ("yundou", "credit"):
+            if key in order:
+                order[key] = _scale_legacy_yundou_value(order.get(key))
+        counts["rechargeOrders"] += 1
+
+    for code in state.get("redeem_codes") or []:
+        if isinstance(code, dict) and "amount" in code:
+            code["amount"] = _scale_legacy_yundou_value(code.get("amount"))
+            counts["redeemCodes"] += 1
+
+    state["billingRateMigration"] = {
+        "fromYundouPerYuan": LEGACY_YUNDOU_PER_YUAN,
+        "yundouPerYuan": YUNDOU_PER_YUAN,
+        "migratedAt": now_label or time.strftime("%Y%m%d%H%M%S"),
+        "counts": counts,
+    }
+    return {"migrated": True, "counts": counts}
 
 
 def get_balance(user_id):
@@ -2766,6 +3055,159 @@ def get_balance(user_id):
     with LOCK:
         u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
     return round(float((u or {}).get("balance") or 0.0), 6)
+
+
+def collect_billing_records(user_id, period):
+    with LOCK:
+        ledger_rows = [
+            dict(row) for row in (STATE.get("ledger") or [])
+            if same_user_id(row.get("userId", row.get("user_id")), user_id)
+        ]
+        recharge_orders = [
+            dict(row) for row in (STATE.get("recharge_orders") or [])
+            if same_user_id(row.get("userId", row.get("user_id")), user_id)
+        ]
+        redeem_codes = [
+            dict(row) for row in (STATE.get("redeem_codes") or [])
+            if same_user_id(row.get("usedBy", row.get("userId", row.get("user_id"))), user_id)
+        ]
+
+    model_usage_rows = []
+    main_db_configured = False
+    if isinstance(user_id, int) and maindb is not None:
+        try:
+            main_db_configured = bool(maindb.configured())
+        except Exception as exc:
+            raise RuntimeError("billing_data_source_failed") from exc
+        if main_db_configured and not maindb_on():
+            raise RuntimeError("billing_data_source_failed")
+    if main_db_configured:
+        start_at = period["startDate"] + " 00:00:00"
+        end_at = (date.fromisoformat(period["endDate"]) + timedelta(days=1)).isoformat() + " 00:00:00"
+        try:
+            model_usage_rows = maindb.list_model_usage_logs(
+                user_id, start_at, end_at, limit=50001
+            )
+        except Exception as exc:
+            raise RuntimeError("billing_data_source_failed") from exc
+        if not isinstance(model_usage_rows, (list, tuple)):
+            raise RuntimeError("billing_data_source_failed")
+        if len(model_usage_rows) >= 50001:
+            raise RuntimeError("billing_record_limit_exceeded")
+        model_usage_rows = [dict(row) for row in model_usage_rows]
+
+    source_rows = (
+        len(ledger_rows) + len(model_usage_rows) +
+        len(recharge_orders) + len(redeem_codes)
+    )
+    records = normalize_billing_records(
+        user_id, ledger_rows, model_usage_rows, recharge_orders, redeem_codes
+    )
+    return records, {
+        "sourceRows": source_rows,
+        "deduplicatedRows": len(records),
+    }
+
+
+def _normalized_billing_query(params):
+    normalized = {}
+    for key, value in (params or {}).items():
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        if key in ("page", "pageSize") and not isinstance(value, bool):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                pass
+        normalized[key] = value
+    return normalized
+
+
+class BillingResponseValidationError(RuntimeError):
+    pass
+
+
+def _validated_billing_response(schema_name, payload):
+    try:
+        return validate_billing_payload(schema_name, payload)
+    except JsonSchemaValidationError as exc:
+        raise BillingResponseValidationError(
+            "billing_response_schema_invalid"
+        ) from exc
+
+
+def billing_dashboard_payload(user_id, params, analytics=False):
+    started_at = time.perf_counter()
+    params = _normalized_billing_query(params)
+    validate_billing_payload("analytics_query" if analytics else "ledger_query", params)
+    period = parse_period(params)
+    records, meta = collect_billing_records(user_id, period)
+    if analytics:
+        payload = dict(
+            build_billing_analytics(records, get_balance(user_id), period), ok=True
+        )
+        payload = _validated_billing_response("analytics_response", payload)
+    else:
+        filters = parse_ledger_filters(params)
+        payload = dict(
+            build_billing_ledger(records, filters),
+            ok=True,
+            balance=get_balance(user_id),
+        )
+        payload = _validated_billing_response("ledger_response", payload)
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 3)
+    json_log(
+        logger,
+        "billing_analytics_completed",
+        level="info",
+        matrixUserId=user_id,
+        startDate=period["startDate"],
+        endDate=period["endDate"],
+        groupBy=period["groupBy"],
+        sourceRows=meta["sourceRows"],
+        deduplicatedRows=meta["deduplicatedRows"],
+        elapsedMs=elapsed_ms,
+    )
+    return payload
+
+
+def _billing_api_error(user_id, exc):
+    if isinstance(exc, BillingQueryError):
+        status = 400
+        error = exc.code
+        message = exc.message
+        event = "billing_query_rejected"
+    elif isinstance(exc, BillingResponseValidationError):
+        status = 500
+        error = "internal_billing_response_error"
+        message = "Billing response could not be generated"
+        event = "billing_response_invalid"
+    elif isinstance(exc, JsonSchemaValidationError):
+        status = 400
+        error = "invalid_billing_query"
+        message = "Billing query parameters are invalid"
+        event = "billing_query_rejected"
+    else:
+        status = 503
+        error = "billing_data_source_failed"
+        message = "Billing data is temporarily unavailable"
+        event = "billing_data_source_failed"
+    error_id = "err-" + uuid.uuid4().hex[:16]
+    safe_exc = RuntimeError(error).with_traceback(exc.__traceback__)
+    json_log(
+        logger,
+        event,
+        exc=safe_exc,
+        errorId=error_id,
+        matrixUserId=user_id,
+        error=error,
+    )
+    return {
+        "ok": False,
+        "error": error,
+        "message": message,
+        "errorId": error_id,
+    }, status
 
 
 def _add_ledger(user_id, delta, reason, ref, balance_after):
@@ -2859,7 +3301,13 @@ def topup_user(user_id, amount, reason="充值", ref=""):
     if maindb_on() and isinstance(user_id, int):
         try:
             ok, bal = maindb.topup(user_id, amount, reason)
-            return (True, round(float(bal), 6), None) if ok else (False, round(float(bal), 6), "topup_failed")
+            if not ok:
+                return False, round(float(bal), 6), "topup_failed"
+            bal = round(float(bal), 6)
+            with LOCK:
+                _add_ledger(user_id, amount, reason, ref or ("admin-topup:" + uuid.uuid4().hex), bal)
+                persist()
+            return True, bal, None
         except Exception as e:
             return False, get_balance(user_id), str(e)[:80]
     with LOCK:
@@ -2926,7 +3374,14 @@ def refund_user_by_ref(user_id, ref):
         # 漫剧模式:按 request_id 退 model_usage_logs(幂等)
         try:
             ok, amt = maindb.refund_generation(ref, "matrixship 退款")
-            return True, get_balance(user_id), round(float(amt or 0), 6), None
+            amt = round(float(amt or 0), 6)
+            if not ok or amt <= 0:
+                return True, get_balance(user_id), 0.0, None
+            bal = get_balance(user_id)
+            with LOCK:
+                _add_ledger(user_id, amt, "退款:模型生成", ref, bal)
+                persist()
+            return True, bal, amt, None
         except Exception as e:
             return False, get_balance(user_id), 0.0, str(e)[:80]
     with LOCK:
@@ -3003,12 +3458,12 @@ def gen_redeem_codes(count, amount, note="", created_by=""):
 # ===================== 微信支付 v3(Native 扫码充值云豆) =====================
 # 移植自 ai-education-platform 的 wechatpay_v3(直连商户 / Native)。用 urllib + cryptography;
 # 到账确认走「轮询订单状态」query_by_out_trade_no(中心服是 HTTP,无需公网 HTTPS 回调)。
-# 复用漫剧同一微信商户(商户号见 env);1 元 = 100 云豆(= 支付分数)。配置全走 env(systemd drop-in)。
+# 复用漫剧同一微信商户(商户号见 env);1 元 = 1 云豆。配置全走 env(systemd drop-in)。
 WXPAY_API_BASE = "https://api.mch.weixin.qq.com"
 RECHARGE_PACKAGES = [
-    {"id": "p6", "yuan": 6, "yundou": 600}, {"id": "p30", "yuan": 30, "yundou": 3000},
-    {"id": "p68", "yuan": 68, "yundou": 6800}, {"id": "p128", "yuan": 128, "yundou": 12800},
-    {"id": "p298", "yuan": 298, "yundou": 29800}, {"id": "p648", "yuan": 648, "yundou": 64800},
+    {"id": "p6", "yuan": 6, "yundou": 6}, {"id": "p30", "yuan": 30, "yundou": 30},
+    {"id": "p68", "yuan": 68, "yundou": 68}, {"id": "p128", "yuan": 128, "yundou": 128},
+    {"id": "p298", "yuan": 298, "yundou": 298}, {"id": "p648", "yuan": 648, "yundou": 648},
 ]
 RECHARGE_MIN_FEN = 100        # 1 元
 RECHARGE_MAX_FEN = 500000     # 5000 元
@@ -3101,7 +3556,7 @@ def wxpay():
 
 
 def create_recharge_order(user_id, amount_fen):
-    """创建云豆充值订单并向微信 Native 下单。amount_fen=支付分数;云豆=分数(1元=100分=100云豆)。
+    """创建云豆充值订单并向微信 Native 下单。amount_fen=支付分数;1 元到账 1 云豆。
     返回 (ok, order_dict, error)。"""
     try:
         amount_fen = int(amount_fen)
@@ -3117,13 +3572,13 @@ def create_recharge_order(user_id, amount_fen):
             k for k, v in [("APPID", wx.appid), ("MCHID", wx.mchid), ("APIv3KEY", wx.apiv3_key),
                            ("CERT_SERIAL", wx.cert_serial), ("PRIVATE_KEY", wx.private_key_path),
                            ("NOTIFY_URL", wx.notify_url)] if not v) + ")"
-    # 漫剧模式:入账**算力**(1元=MAINDB_YUAN_TO_POWER 算力,默认 10);否则旧云豆(1元=100)
+    # 漫剧模式:入账**算力**(1元=MAINDB_YUAN_TO_POWER 算力,默认 10);否则云豆(1元=1)
     _mdb_mode = maindb_on() and isinstance(user_id, int)
     if _mdb_mode:
         credit = round(amount_fen / 100.0 * MAINDB_YUAN_TO_POWER, 6)  # 算力
         unit = "算力"
     else:
-        credit = amount_fen  # 1 分 = 1 云豆
+        credit = round(amount_fen / 100.0 * YUNDOU_PER_YUAN, 6)
         unit = "云豆"
     yundou = credit  # 兼容旧字段(客户端读 yundou 展示到账数)
     order_no = "MSHIP" + time.strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:8].upper()
@@ -3168,12 +3623,15 @@ def poll_recharge_order(user_id, order_no):
                 if maindb_on() and isinstance(user_id, int):
                     # 入账到漫剧算力(computing_power);STATE 只留订单+credited 标志做幂等
                     try:
-                        maindb.topup(user_id, _credit, "微信充值 " + order_no)
+                        _ok, _bal = maindb.topup(user_id, _credit, "微信充值 " + order_no)
                     except Exception:
-                        pass
-                    o["status"] = "SUCCESS"; o["credited"] = True; o["paidAt"] = now()
-                    o["transactionId"] = data.get("transaction_id")
-                    persist()
+                        _ok = False
+                    if _ok:
+                        _bal = round(float(_bal), 6)
+                        o["status"] = "SUCCESS"; o["credited"] = True; o["paidAt"] = now()
+                        o["transactionId"] = data.get("transaction_id")
+                        _add_ledger(user_id, _credit, "微信充值", "wxpay:" + order_no, _bal)
+                        persist()
                 else:
                     u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
                     if u:
@@ -3183,7 +3641,7 @@ def poll_recharge_order(user_id, order_no):
                         o["transactionId"] = data.get("transaction_id")
                         _add_ledger(user_id, _credit, "微信充值", "wxpay:" + order_no, u["balance"])
                         persist()
-        return True, {"status": "SUCCESS", "credited": True,
+        return True, {"status": "SUCCESS", "credited": bool((o or {}).get("credited")),
                       "balance": get_balance(user_id), "yundou": (o or {}).get("yundou")}, None
     with LOCK:
         o = next((x for x in STATE.get("recharge_orders") or [] if x.get("orderNo") == order_no), None)
@@ -3209,15 +3667,19 @@ def redeem_code(user_id, code):
         amount = round(float(rc.get("amount") or 0), 6)
         # 漫剧模式:核销后把额度加到漫剧算力
         if maindb_on() and isinstance(user_id, int):
+            try:
+                _ok, _bal = maindb.topup(user_id, amount, "兑换码充值 " + norm)
+            except Exception as e:
+                return False, get_balance(user_id), 0.0, str(e)[:80]
+            if not _ok:
+                return False, round(float(_bal), 6), 0.0, "topup_failed"
+            _bal = round(float(_bal), 6)
             rc["status"] = "used"
             rc["usedBy"] = user_id
             rc["usedAt"] = now()
+            _add_ledger(user_id, amount, "兑换码充值", "redeem:" + norm, _bal)
             persist()
-            try:
-                _ok, _bal = maindb.topup(user_id, amount, "兑换码充值 " + norm)
-                return True, round(float(_bal), 6), amount, None
-            except Exception:
-                return True, get_balance(user_id), amount, None
+            return True, _bal, amount, None
         u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
         if not u:
             return False, None, 0.0, "user_not_found"
@@ -5675,6 +6137,7 @@ def reset_publish_runtime_day():
         PUBLISH_RT["day"] = day
         PUBLISH_RT["counts"] = {}
         PUBLISH_RT["last_ts_by_org"] = {}
+        STATE["publishRuntime"] = PUBLISH_RT
 
 
 def publish_count_for(org_id, account_id):
@@ -5688,6 +6151,35 @@ def record_publish_success(org_id, account_id):
     PUBLISH_RT.setdefault("counts", {})[key] = int(PUBLISH_RT.get("counts", {}).get(key, 0) or 0) + 1
     PUBLISH_RT["last_ts"] = now()
     PUBLISH_RT.setdefault("last_ts_by_org", {})[normalize_org_id(org_id)] = PUBLISH_RT["last_ts"]
+    STATE["publishRuntime"] = PUBLISH_RT
+    persist()
+
+
+def publish_count_for_account_asset(account):
+    account = account or {}
+    org_id = item_org_id(account)
+    keys = set()
+    for key in ("id", "localAccountId", "accountId"):
+        value = str(account.get(key) or "").strip()
+        if value:
+            keys.add(value)
+            if ":" in value:
+                keys.add(value.split(":", 1)[1])
+    if not keys:
+        keys.add("douyin-self")
+    return sum(publish_count_for(org_id, key) for key in keys)
+
+
+def account_asset_with_metrics(account):
+    item = dict(account or {})
+    today_publish = publish_count_for_account_asset(item)
+    item["todayPublish"] = today_publish
+    item["publishedToday"] = today_publish
+    item["todayPublishDay"] = today_key()
+    item["todayPublishUpdatedAt"] = float(PUBLISH_RT.get("last_ts") or 0)
+    if item.get("followers") in (None, "") and item.get("fans") not in (None, ""):
+        item["followers"] = item.get("fans")
+    return item
 
 
 def queued_count_for(org_id, account_id):
@@ -6632,7 +7124,7 @@ def accounts_for_response(org_id=None, user=None, include_all=False):
     accounts = aggregate_accounts(org_id)
     role = product_role_for_user(user, org_id)
     if include_all or role in (PRODUCT_ROLE_PLATFORM_ADMIN, PRODUCT_ROLE_ENTERPRISE_ADMIN):
-        return dedupe_accounts_latest(accounts)
+        return [account_asset_with_metrics(a) for a in dedupe_accounts_latest(accounts)]
     if not user:
         return []
     uid = user.get("id")
@@ -6656,7 +7148,7 @@ def accounts_for_response(org_id=None, user=None, include_all=False):
         if not (a.get("online") and a.get("cookieReady")):
             continue
         visible.append(a)
-    return dedupe_accounts_latest(visible)
+    return [account_asset_with_metrics(a) for a in dedupe_accounts_latest(visible)]
 
 
 def account_repair_metrics(org_id=None, state="", owner="", severity="", q="", limit=50):
@@ -7413,8 +7905,6 @@ def accept_enterprise_invite(body, handler=None):
         email = email or invite.get("recipientEmail") or ""
     if not name:
         return {"ok": False, "error": "missing_name"}, 400
-    if not (phone or email):
-        return {"ok": False, "error": "missing_identifier"}, 400
     if len(password) < 8:
         return {"ok": False, "error": "password_too_short", "minLength": 8}, 400
     org_id = normalize_org_id(invite.get("orgId"))
@@ -9043,12 +9533,19 @@ def quota_usage_count(org_id, resource):
     ts = now()
     with LOCK:
         if resource == "tasksPerDay":
-            return len([
+            tasks = [
                 t for t in (STATE.get("tasks") or {}).values()
                 if item_org_id(t) == org_id
                 and is_billable_task_path(t.get("path") or "")
                 and float(t.get("createdAt") or 0) >= ts - 86400
+            ]
+            tasks.extend([
+                local_browser_task_as_task(t)
+                for t in (STATE.get("localBrowserTasks") or {}).values()
+                if item_org_id(t) == org_id
+                and float(t.get("createdAt") or 0) >= ts - 86400
             ])
+            return len([t for t in tasks if is_billable_task_path(t.get("path") or "")])
         if resource == "materials":
             return len([m for m in (STATE.get("library") or []) if item_org_id(m) == org_id])
         if resource == "nodes":
@@ -9096,6 +9593,11 @@ def enterprise_usage(org_id=None):
     ts = now()
     with LOCK:
         tasks = [dict(t) for t in (STATE.get("tasks") or {}).values() if item_org_id(t) == org_id]
+        tasks.extend([
+            local_browser_task_as_task(t)
+            for t in (STATE.get("localBrowserTasks") or {}).values()
+            if item_org_id(t) == org_id
+        ])
         nodes = [dict(n) for n in (STATE.get("nodes") or {}).values() if item_org_id(n) == org_id]
         library = [dict(m) for m in (STATE.get("library") or []) if item_org_id(m) == org_id]
         queue = [dict(q) for q in (STATE.get("queue") or []) if item_org_id(q) == org_id]
@@ -9501,6 +10003,7 @@ def enterprise_summary(user=None):
         users = list(STATE.get("users") or [])
         memberships = list(STATE.get("memberships") or [])
         tasks = list((STATE.get("tasks") or {}).values())
+        tasks.extend([local_browser_task_as_task(t) for t in (STATE.get("localBrowserTasks") or {}).values()])
         audits = list(STATE.get("auditLogs") or [])
         nodes = list((STATE.get("nodes") or {}).values())
         library = list(STATE.get("library") or [])
@@ -10693,11 +11196,13 @@ def task_type_key(path):
         return "finder"
     if "/outreach/" in path:
         return "outreach"
-    if "/douyin/download" in path:
+    if "/douyin/download" in path or "/xhs/download" in path:
         return "download"
-    if "/douyin/search" in path:
+    if "/douyin/search" in path or "/xhs/search" in path:
         return "search"
-    if "/douyin/comments" in path:
+    if "/douyin/comments" in path or "/xhs/comments" in path:
+        return "comments"
+    if "/comment/publish" in path:
         return "comments"
     return "other"
 
@@ -10769,6 +11274,35 @@ def queue_item_as_task(item):
         "waitSec": 0,
         "result": None,
         "error": q.get("lastError") or pf.get("error") or "",
+    }
+
+
+def local_browser_task_as_task(task):
+    t = task if isinstance(task, dict) else {}
+    ttype = str(t.get("type") or "").strip()
+    payload = t.get("payload") if isinstance(t.get("payload"), dict) else {}
+    body = dict(payload or {})
+    body.setdefault("localBrowserTaskId", t.get("id") or "")
+    body.setdefault("localBrowserType", ttype)
+    body.setdefault("accountId", payload.get("centralAccountId") or payload.get("accountId") or "")
+    return {
+        "id": t.get("id") or "",
+        "localBrowserTask": True,
+        "path": LOCAL_BROWSER_TASK_PATHS.get(ttype, "/api/local-browser/task"),
+        "method": "LOCAL_BROWSER",
+        "body": body,
+        "orgId": item_org_id(t),
+        "status": queue_task_status(t.get("status") or ""),
+        "nodeId": t.get("clientId") or body.get("clientId") or "",
+        "createdBy": t.get("createdBy") or t.get("createdByUserId") or "",
+        "createdByUserId": t.get("createdByUserId") or t.get("createdBy") or "",
+        "createdAt": t.get("createdAt") or t.get("updatedAt") or now(),
+        "startedAt": t.get("startedAt") or 0,
+        "finishedAt": t.get("finishedAt") or 0,
+        "updatedAt": t.get("updatedAt") or t.get("createdAt") or now(),
+        "waitSec": 0,
+        "result": t.get("result") if isinstance(t.get("result"), dict) else {},
+        "error": t.get("error") or "",
     }
 
 
@@ -11074,7 +11608,7 @@ def retry_blocked_reason_label(reason):
     return labels.get(reason, reason or "")
 
 
-def enterprise_task_center(org_id=None, limit=12):
+def enterprise_task_center(org_id=None, limit=12, user=None):
     org_id = normalize_org_id(org_id)
     try:
         limit = min(50, max(1, int(limit or 12)))
@@ -11082,7 +11616,15 @@ def enterprise_task_center(org_id=None, limit=12):
         limit = 12
     with LOCK:
         raw_tasks = [dict(t) for t in (STATE.get("tasks") or {}).values() if item_org_id(t) == org_id]
+        local_tasks = [
+            local_browser_task_as_task(t)
+            for t in (STATE.get("localBrowserTasks") or {}).values()
+            if item_org_id(t) == org_id
+        ]
         nodes = {nid: public_node(n) for nid, n in (STATE.get("nodes") or {}).items()}
+    if user is not None:
+        raw_tasks = filter_items_for_product_role(raw_tasks, user, org_id)
+        local_tasks = filter_items_for_product_role(local_tasks, user, org_id)
     account_assets = aggregate_accounts(org_id)
     accounts_by_id = {}
     for a in account_assets:
@@ -11090,8 +11632,10 @@ def enterprise_task_center(org_id=None, limit=12):
             if ak and str(ak) not in accounts_by_id:
                 accounts_by_id[str(ak)] = a
     queue_items = load_queue(org_id)
+    if user is not None:
+        queue_items = filter_items_for_product_role(queue_items, user, org_id)
     queue_tasks = [queue_item_as_task(x) for x in queue_items if not (x.get("centralTaskId") or "")]
-    rows = sorted(raw_tasks + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt") or 0, reverse=True)
+    rows = sorted(raw_tasks + local_tasks + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt") or 0, reverse=True)
     status_counts = {"total": len(rows), "queued": 0, "running": 0, "done": 0, "failed": 0, "canceled": 0, "other": 0}
     type_counts = {}
     for task in rows:
@@ -11268,11 +11812,13 @@ def task_center_candidate_rows(org_id=None, include_all=False):
     org_id = normalize_org_id(org_id) if org_id else None
     with LOCK:
         raw_tasks = [dict(t) for t in (STATE.get("tasks") or {}).values()]
+        local_tasks = [local_browser_task_as_task(t) for t in (STATE.get("localBrowserTasks") or {}).values()]
     if not include_all and org_id:
         raw_tasks = [t for t in raw_tasks if item_org_id(t) == org_id]
+        local_tasks = [t for t in local_tasks if item_org_id(t) == org_id]
     queue_items = load_queue(None if include_all else org_id)
     queue_tasks = [queue_item_as_task(x) for x in queue_items if not (x.get("centralTaskId") or "")]
-    return sorted(raw_tasks + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt") or 0, reverse=True)
+    return sorted(raw_tasks + local_tasks + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt") or 0, reverse=True)
 
 
 def task_ref_values(task):
@@ -12789,6 +13335,7 @@ LOCAL_BROWSER_TASK_PATHS = {
     "douyin.comments": "/api/douyin/comments",
     "douyin.comment.publish": "/api/douyin/comment/publish",
     "douyin.dm": "/api/douyin/dm",
+    "douyin.dm.inbox": "/api/douyin/dm/inbox",
     "douyin.download": "/api/douyin/download",
     "douyin.publish": "/api/publish/run",
     "xhs.search": "/api/xhs/search",
@@ -13064,8 +13611,36 @@ def local_browser_create_task(handler, body):
             payload["centralMaterialId"] = mid
     online = local_browser_online_clients(org_id, task_type, user.get("id"))
     if not online and not body.get("allowOffline"):
-        return {"ok": False, "error": "local_browser_offline", "orgId": org_id, "type": task_type,
-                "message": "本地浏览器客户端未在线,请先启动客户端并登录对应平台账号后重试。"}, 409
+        task_id = "lbt-" + uuid.uuid4().hex
+        ts = now()
+        err_payload = {
+            "ok": False,
+            "error": "local_browser_offline",
+            "orgId": org_id,
+            "type": task_type,
+            "message": "本地客户端未在线，请先启动客户端并登录对应平台账号后重试。",
+        }
+        task = {
+            "id": task_id,
+            "orgId": org_id,
+            "type": task_type,
+            "payload": payload,
+            "status": "failed",
+            "clientId": "",
+            "createdBy": user.get("id") or "",
+            "createdAt": ts,
+            "updatedAt": ts,
+            "finishedAt": ts,
+            "error": "local_browser_offline",
+            "result": dict(err_payload),
+        }
+        with LOCK:
+            STATE.setdefault("localBrowserTasks", {})[task_id] = task
+        persist()
+        add_audit(handler, "local_browser.task.create", "/api/local-browser/task", ok=False, meta={"orgId": org_id, "taskId": task_id, "type": task_type, "error": "local_browser_offline", "payload": safe_local_browser_payload(task_type, payload)})
+        err_payload["taskId"] = task_id
+        err_payload["task"] = public_local_browser_task(task)
+        return err_payload, 409
     task_id = "lbt-" + uuid.uuid4().hex
     ts = now()
     task = {
@@ -13084,7 +13659,7 @@ def local_browser_create_task(handler, body):
     with LOCK:
         STATE.setdefault("localBrowserTasks", {})[task_id] = task
     persist()
-    add_audit(handler, "local_browser.task.create", "/api/local-browser/task", ok=True, meta={"orgId": org_id, "taskId": task_id, "type": task_type, "payload": audit_safe_body(payload)})
+    add_audit(handler, "local_browser.task.create", "/api/local-browser/task", ok=True, meta={"orgId": org_id, "taskId": task_id, "type": task_type, "payload": safe_local_browser_payload(task_type, payload)})
     return {"ok": True, "taskId": task_id, "task": public_local_browser_task(task), "onlineClients": online}, 200
 
 
@@ -13283,9 +13858,10 @@ def local_browser_result(handler, body):
             return {"ok": False, "error": "local_browser_task_not_found", "taskId": task_id}, 404
         if task.get("clientId") and client_id and task.get("clientId") != client_id:
             return {"ok": False, "error": "local_browser_client_mismatch", "taskId": task_id}, 409
+        task_type = task.get("type") or ""
         task["status"] = "running" if ok else "failed"
         task["clientId"] = client_id or task.get("clientId") or ""
-        task["result"] = strip_large_payloads(result, max_inline=20000)
+        task["result"] = safe_local_browser_result(task_type, result)
         task["items"] = (_local_browser_list(result.get("items")) or _local_browser_list(body.get("items")))[:100]
         task["comments"] = _local_browser_comments_for_storage(result, body)[:500]
         task["leads"] = (_local_browser_list(result.get("leads")) or _local_browser_list(body.get("leads")))[:500]
@@ -13303,7 +13879,7 @@ def local_browser_result(handler, body):
         if side_effect_ok is False or result.get("ok") is False:
             ok = False
         with LOCK:
-            task_ref["result"] = strip_large_payloads(result, max_inline=20000)
+            task_ref["result"] = safe_local_browser_result(task_ref.get("type") or "", result)
             task_ref["leads"] = (_local_browser_list(result.get("leads")) or _local_browser_list(task_ref.get("leads")))[:500]
     if task_ref is not None:
         finished_at = now()
@@ -13549,6 +14125,7 @@ class Handler(BaseHTTPRequestHandler):
             "createdByUserId": (current_user(self) or {}).get("id") or "",
             "createdAt": now(),
         }
+        item.update(library_upload_metadata(fields))
         with LOCK:
             lib = list(STATE.get("library") or [])
             lib.insert(0, item)
@@ -13623,14 +14200,32 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
             return json_response(self, {"ok": True, "userId": u.get("id"),
                                         "phone": u.get("phone"), "balance": get_balance(u.get("id"))})
+        if path == "/api/billing/analytics":
+            u = current_user(self)
+            if not u:
+                return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
+            try:
+                payload = billing_dashboard_payload(u.get("id"), qs, analytics=True)
+            except Exception as exc:
+                payload, status = _billing_api_error(u.get("id"), exc)
+                return json_response(self, payload, status)
+            return json_response(self, payload)
         if path == "/api/billing/ledger":
             u = current_user(self)
             if not u:
                 return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
-            with LOCK:
-                rows = [dict(x) for x in (STATE.get("ledger") or []) if x.get("userId") == u.get("id")]
-            rows = list(reversed(rows))[:100]
-            return json_response(self, {"ok": True, "ledger": rows, "balance": get_balance(u.get("id"))})
+            new_params = ("startDate", "endDate", "type", "status", "page", "pageSize")
+            if not any(name in qs for name in new_params):
+                with LOCK:
+                    rows = [dict(x) for x in (STATE.get("ledger") or []) if x.get("userId") == u.get("id")]
+                rows = list(reversed(rows))[:100]
+                return json_response(self, {"ok": True, "ledger": rows, "balance": get_balance(u.get("id"))})
+            try:
+                payload = billing_dashboard_payload(u.get("id"), qs, analytics=False)
+            except Exception as exc:
+                payload, status = _billing_api_error(u.get("id"), exc)
+                return json_response(self, payload, status)
+            return json_response(self, payload)
         if path == "/api/billing/recharge/packages":
             if not require_platform_admin(self):
                 return
@@ -13642,7 +14237,7 @@ class Handler(BaseHTTPRequestHandler):
                                             "minYuan": RECHARGE_MIN_FEN // 100, "maxYuan": RECHARGE_MAX_FEN // 100,
                                             "enabled": wxpay().configured})
             return json_response(self, {"ok": True, "packages": RECHARGE_PACKAGES,
-                                        "rate": 100, "unit": "云豆", "minYuan": RECHARGE_MIN_FEN // 100,
+                                        "rate": YUNDOU_PER_YUAN, "unit": "云豆", "minYuan": RECHARGE_MIN_FEN // 100,
                                         "maxYuan": RECHARGE_MAX_FEN // 100,
                                         "enabled": wxpay().configured})
         if path == "/api/billing/recharge/status":
@@ -13712,7 +14307,7 @@ class Handler(BaseHTTPRequestHandler):
             if not require_role(self, org_id, "auditor"):
                 return
             limit = min(50, int((qs.get("limit") or ["12"])[0] or 12))
-            return json_response(self, enterprise_task_center(org_id, limit=limit))
+            return json_response(self, enterprise_task_center(org_id, limit=limit, user=current_user(self)))
         if path == "/api/central/tasks":
             limit = min(500, int((qs.get("limit") or ["100"])[0] or 100))
             org_id = request_org_id(self, qs=qs)
@@ -13726,14 +14321,17 @@ class Handler(BaseHTTPRequestHandler):
             include_all = bool(user and user.get("_authType") == "root-token" and (qs.get("all") or [""])[0] in ("1", "true", "yes"))
             with LOCK:
                 tasks = list((STATE.get("tasks") or {}).values())
+                local_tasks = [local_browser_task_as_task(t) for t in (STATE.get("localBrowserTasks") or {}).values()]
             if not include_all:
                 tasks = [t for t in tasks if item_org_id(t) == org_id]
+                local_tasks = [t for t in local_tasks if item_org_id(t) == org_id]
                 tasks = filter_items_for_product_role(tasks, user, org_id)
+                local_tasks = filter_items_for_product_role(local_tasks, user, org_id)
             queue_items = load_queue(None if include_all else org_id)
             if not include_all:
                 queue_items = filter_items_for_product_role(queue_items, user, org_id)
             queue_tasks = [queue_item_as_task(x) for x in queue_items if not (x.get("centralTaskId") or "")]
-            tasks = sorted(list(tasks) + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt", 0), reverse=True)
+            tasks = sorted(list(tasks) + local_tasks + queue_tasks, key=lambda x: x.get("updatedAt") or x.get("createdAt", 0), reverse=True)
             total = len(tasks)
             q_task_ids, q_queue_ids = queue_task_search_hits(q, org_id=org_id, include_all=include_all) if q else (set(), [])
             base_filtered = [t for t in tasks if task_matches_filters(t, q="", status_filter=status_filter, type_filter=type_filter)]
@@ -14156,6 +14754,59 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/shared-assets/add":
                 return shared_assets_add(self, body)
+
+            if path == "/api/comic/auth/ticket":
+                user = current_user(self)
+                if not user:
+                    return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
+                if not user_has_current_legal_consent(user):
+                    return json_response(self, legal_consent_error_response("legal_consent_required"), 428)
+                org_id = request_org_id(self, body)
+                if not require_role(self, org_id, "member"):
+                    return
+                try:
+                    payload = issue_comic_sso_ticket_for_user(user, org_id)
+                except ComicSsoIssueError as exc:
+                    error_id = "err-" + uuid.uuid4().hex[:16]
+                    json_log(
+                        logger,
+                        "comic_sso_ticket_issue_failed",
+                        level="warning",
+                        errorId=error_id,
+                        code=exc.code,
+                        matrixUserId=(user or {}).get("id"),
+                        comicUserId=COMIC_FIXED_USER_ID,
+                        orgId=org_id,
+                    )
+                    status = 503 if exc.code in (
+                        "comic_sso_disabled", "comic_sso_secret_missing", "comic_fixed_user_invalid",
+                    ) else 403
+                    add_audit(self, "comic.sso.ticket", path, ok=False, meta={
+                        "matrixUserId": (user or {}).get("id"),
+                        "comicUserId": COMIC_FIXED_USER_ID,
+                        "orgId": org_id,
+                        "error": exc.code,
+                        "errorId": error_id,
+                    })
+                    return json_response(self, {"ok": False, "error": exc.code, "errorId": error_id}, status)
+                json_log(
+                    logger,
+                    "comic_sso_ticket_issued",
+                    level="info",
+                    matrixUserId=(user or {}).get("id"),
+                    comicUserId=payload.get("comicUserId"),
+                    comicAccountMode=payload.get("comicAccountMode"),
+                    orgId=org_id,
+                    expiresAt=payload.get("expiresAt"),
+                )
+                add_audit(self, "comic.sso.ticket", path, ok=True, meta={
+                    "matrixUserId": (user or {}).get("id"),
+                    "comicUserId": payload.get("comicUserId"),
+                    "comicAccountMode": payload.get("comicAccountMode"),
+                    "orgId": org_id,
+                    "expiresAt": payload.get("expiresAt"),
+                })
+                return json_response(self, payload)
 
             if path == "/api/auth/login":
                 legal_consent, legal_error = validate_legal_consent(body)

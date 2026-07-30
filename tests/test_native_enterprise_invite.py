@@ -51,7 +51,8 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
                 self.assertTrue(view.tab_invite.isEnabled())
                 self.assertTrue(view.invite_code_row.isVisibleTo(view))
                 self.assertTrue(view.invite_name_in.isVisibleTo(view))
-                self.assertTrue(view.invite_email_in.isVisibleTo(view))
+                self.assertFalse(view.phone_in.isVisibleTo(view))
+                self.assertFalse(view.invite_email_in.isVisibleTo(view))
                 self.assertFalse(view.code_row.isVisibleTo(view))
                 self.assertEqual(view.btn.text(), "加入企业")
             finally:
@@ -59,6 +60,16 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
                     view.deleteLater()
                 self.client.BRIDGE = previous_bridge
                 app.processEvents()
+
+    def test_login_home_hides_register_tab_and_keeps_invite_tab(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        build_card = src[src.index("    def _build_card(self):"):src.index("    def _show_legal_document")]
+
+        self.assertIn('title = QtWidgets.QLabel("登录 / 加入企业")', build_card)
+        self.assertIn('tabrow.addWidget(self.tab_login, 1)', build_card)
+        self.assertIn('tabrow.addWidget(self.tab_invite, 1)', build_card)
+        self.assertIn('self.tab_reg.setVisible(False)', build_card)
+        self.assertNotIn('tabrow.addWidget(self.tab_reg, 1)', build_card)
 
     def test_entering_invite_mode_does_not_reuse_remembered_login_password(self):
         previous_bridge = self.client.BRIDGE
@@ -97,8 +108,8 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
                 self.assertTrue(view.rect().contains(card_rect))
                 visible = []
                 for name in (
-                    "invite_code_row", "invite_org", "invite_name_in", "phone_in",
-                    "invite_email_in", "pw_in", "pw2_in", "btn", "agree", "msg",
+                    "invite_code_row", "invite_org", "invite_name_in",
+                    "pw_in", "pw2_in", "btn", "agree", "msg",
                 ):
                     widget = getattr(view, name)
                     if widget.isVisibleTo(view):
@@ -144,8 +155,8 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             )
             self.assertEqual(view._invite_verified_code, code)
             self.assertEqual(view.invite_name_in.text(), "Invitee")
-            self.assertEqual(view.phone_in.text(), "13800000000")
-            self.assertEqual(view.invite_email_in.text(), "invitee@example.com")
+            self.assertEqual(view.phone_in.text(), "")
+            self.assertEqual(view.invite_email_in.text(), "")
             self.assertIn("Org A", view.invite_org.text())
         finally:
             if view is not None:
@@ -198,7 +209,6 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             view.invite_code_in.setText(code)
             view._invite_verified_code = code
             view.invite_name_in.setText("Invitee")
-            view.phone_in.setText("13800000000")
             view.pw_in.setText("replacement-password")
             view.pw2_in.setText("replacement-password")
             accepted = {
@@ -239,7 +249,6 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             view.invite_code_in.setText(code)
             view._invite_verified_code = code
             view.invite_name_in.setText("Invitee")
-            view.phone_in.setText("13800000000")
             view.pw_in.setText("replacement-password")
             view.pw2_in.setText("replacement-password")
             with mock.patch.object(self.client, "run_bg", side_effect=pending.append):
@@ -273,7 +282,6 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             view.invite_code_in.setText(code)
             view._invite_verified_code = code
             view.invite_name_in.setText("Invitee")
-            view.phone_in.setText("13800000000")
             view.pw_in.setText("replacement-password")
             view.pw2_in.setText("replacement-password")
             accepted = {
@@ -315,8 +323,6 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             view.invite_code_in.setText(code)
             view._invite_verified_code = code
             view.invite_name_in.setText("Invitee")
-            view.phone_in.setText("13800000000")
-            view.invite_email_in.setText("invitee@example.com")
             view.pw_in.setText("replacement-password")
             view.pw2_in.setText("replacement-password")
             with mock.patch.object(
@@ -346,12 +352,14 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
                     mock.patch.object(self.client, "set_session") as set_session_mock, \
                     mock.patch.object(self.client, "set_auth_context") as set_auth_context_mock, \
                     mock.patch.object(self.client, "save_auth_pref") as save_auth_pref_mock, \
-                    mock.patch.object(view, "_play_success_transition"):
+                    mock.patch.object(view.bg, "release"):
                 view.submit_enterprise_invite()
 
             body = api_mock.call_args.args[2]
             self.assertEqual(body["token"], code)
             self.assertEqual(body["currentPassword"], "current-password")
+            self.assertNotIn("phone", body)
+            self.assertNotIn("email", body)
             set_session_mock.assert_called_once_with("session-token", "org-a", account="user-a")
             set_auth_context_mock.assert_called_once_with(accepted)
             saved_pref = save_auth_pref_mock.call_args.args[0]

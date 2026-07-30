@@ -1,0 +1,50 @@
+# Environment and credentials
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Python bytecode and test caches
+__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+**/*.log
+logs/
+**/logs/
+
+# Runtime and user data
+central_data/
+**/central_data/
+datas/
+**/datas/
+uploads/
+**/uploads/
+user_data/
+**/user_data/
+userdata/
+**/userdata/
+
+# Backups
+backups/
+**/backups/
+backup/
+**/backup/
+*.bak
+**/*.bak
+*.backup
+**/*.backup
+*~

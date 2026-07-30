@@ -1,0 +1,1709 @@
+openapi: 3.1.0
+info:
+  title: MatrixShip Local Client and Central API
+  version: 1.1.16
+  description: Authentication, versioned legal consent, authenticated media download, health checks, and LK888 proxy contracts.
+servers:
+  - url: http://127.0.0.1:9081
+    description: Local execution engine
+  - url: http://127.0.0.1:9080
+    description: Central server
+paths:
+  /api/auth/login:
+    post:
+      summary: Log in with username or phone credentials and accept current legal documents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLoginRequest"
+      responses:
+        "200":
+          description: Login succeeded and legal consent was audited
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthSuccess"}
+        "400":
+          description: Phone verification code is invalid or expired
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "401":
+          description: Credentials are invalid or phone verification is required
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "428":
+          description: Legal consent is missing or does not match the current versions
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LegalConsentError"}
+  /api/auth/register:
+    post:
+      summary: Register a phone account and accept current legal documents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRegisterRequest"
+      responses:
+        "200":
+          description: Registration succeeded and legal consent was audited
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthSuccess"}
+        "400":
+          description: Input or verification code is invalid
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "409":
+          description: Phone account already exists
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "428":
+          description: Legal consent is missing or does not match the current versions
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LegalConsentError"}
+  /api/auth/refresh:
+    post:
+      summary: Refresh an authenticated session after checking current legal consent
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Session refreshed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthSuccess"}
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "428":
+          description: The account must accept current legal document versions again
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LegalConsentError"}
+  /api/health:
+    get:
+      summary: Service health
+      responses:
+        "200":
+          description: Health payload from the selected server
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {type: boolean}
+                  mode: {type: string}
+                  version: {type: string}
+                  agentReady: {type: boolean}
+                  authorized: {type: boolean}
+                  cookieReady: {type: boolean}
+                  onlineNodes: {type: integer, minimum: 0}
+                additionalProperties: true
+  /api/v1/comic-drama/storyboards/{storyboard_id}/generate-image:
+    post:
+      summary: Generate storyboard image frames, optionally selecting one keyframe
+      parameters:
+        - name: storyboard_id
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ComicStoryboardImageGenerateRequest"
+      responses:
+        "200":
+          description: One or more image generation tasks were accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComicStoryboardImageGenerateResponse"
+        '400':
+          description: The frame selector or frame-generation model is invalid for the selected workflow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComicStoryboardImageValidationError"
+  /api/accounts:
+    get:
+      summary: List local platform accounts and authorization capability status
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Local account list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LocalAccount"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/accounts/remove:
+    post:
+      summary: Remove a local account registry entry
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRemoveRequest"
+      responses:
+        "200":
+          description: Account entry was removed or was already absent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountRemoveSuccess"
+        "400":
+          description: Default account cannot be removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/library/update-title:
+    post:
+      summary: Update a local material title edited from the native publish table
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, title]
+              properties:
+                id: {type: string, minLength: 1}
+                title: {type: string}
+              additionalProperties: false
+      responses:
+        "200":
+          description: Material title was updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id, title]
+                properties:
+                  ok: {const: true}
+                  id: {type: string, minLength: 1}
+                  title: {type: string}
+                additionalProperties: false
+        "404":
+          description: Material was not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/publish/run:
+    post:
+      summary: Publish a local material with an optional title override from the native publish table
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [materialId]
+              properties:
+                materialId: {type: string, minLength: 1}
+                centralMaterialId: {type: string}
+                accountId: {type: string, default: douyin-self}
+                platform: {type: string, enum: [douyin, xhs]}
+                dryRun: {type: boolean, default: true}
+                publishTitle:
+                  type: string
+                  description: Title override from the editable publish table; formal publishing uses at most the first 30 characters, while the saved material title may be longer. When omitted, the material title is used.
+              additionalProperties: true
+      responses:
+        "200":
+          description: Publish task completed, filled, failed, or requires manual browser action
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, filled, published, dryRun]
+                properties:
+                  ok: {type: boolean}
+                  filled: {type: boolean}
+                  published: {type: boolean}
+                  dryRun: {type: boolean}
+                  error: {type: string}
+                  finalUrl: {type: string}
+                  steps:
+                    type: array
+                    items: {type: string}
+                  shot: {type: string}
+                additionalProperties: true
+        "409":
+          description: Another publish run is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/douyin/download:
+    post:
+      summary: Download and import a Douyin work
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DouyinDownloadRequest"
+      responses:
+        "200":
+          description: Download completed or dry-run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DouyinDownloadSuccess"
+        "403":
+          description: Authenticated media download was rejected twice
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Download or media validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Downloaded media could not be committed to the material library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/douyin/dm/inbox:
+    post:
+      summary: Read recent messages from one specified Douyin customer DM session through the local browser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DouyinDmInboxRequest"
+      responses:
+        "200":
+          description: Recent DM messages were read or the session is empty
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DouyinDmInboxResponse"
+        "400":
+          description: Target customer profile is missing or unsupported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Douyin login is required in the local browser profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Local browser could not open or parse the DM session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/xhs/download:
+    post:
+      summary: Download and import a Xiaohongshu note
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XhsDownloadRequest"
+      responses:
+        "200":
+          description: Download and material import completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XhsDownloadSuccess"
+        "500":
+          description: Downloaded media could not be committed to the material library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Upstream download or media validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/public-media/{materialId}/{fileName}:
+    get:
+      summary: Temporarily expose a material file through a signed HTTPS URL for remote AI providers
+      parameters:
+        - name: materialId
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: fileName
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: orgId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: expires
+          in: query
+          required: true
+          schema: {type: integer}
+        - name: token
+          in: query
+          required: true
+          schema: {type: string, minLength: 32}
+      responses:
+        "200":
+          description: Material bytes
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            video/*:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: Link is expired, unsigned, or has an invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Material or file does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/account/balance:
+    get:
+      summary: Return the authenticated account balance
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current account balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountBalance"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/billing/ledger:
+    get:
+      summary: Return legacy rows or filtered billing ledger rows for the authenticated account
+      description: Omitting every recognized dashboard parameter preserves the legacy reverse latest-100 ledger response. Supplying at least one recognized dashboard parameter (startDate, endDate, type, status, page, or pageSize) enables the validated, paginated dashboard response; unrelated query parameters leave the legacy response unchanged. The selected date range cannot exceed 366 calendar days.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          description: Inclusive China Standard Time start date. Defaults to 29 days before endDate.
+          schema: {type: string, format: date}
+        - name: endDate
+          in: query
+          description: Inclusive China Standard Time end date. Defaults to the current date.
+          schema: {type: string, format: date}
+        - name: type
+          in: query
+          schema: {type: string, enum: [video, image, voice, other, recharge, refund]}
+        - name: status
+          in: query
+          schema: {type: string, enum: [charged, refunded, recharged, failed]}
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 1, default: 1}
+        - name: pageSize
+          in: query
+          schema: {type: integer, enum: [20, 50, 100], maximum: 100, default: 20}
+      responses:
+        "200":
+          description: Legacy raw rows without recognized dashboard parameters, or strict normalized paginated rows when at least one recognized dashboard parameter is supplied
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/LegacyBillingLedgerResponse"
+                  - $ref: "#/components/schemas/BillingLedgerResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          description: Query parameters are invalid or the date range exceeds 366 days
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal billing response validation failed (internal_billing_response_error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: A configured billing data source is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/billing/analytics:
+    get:
+      summary: Return authenticated account billing analytics
+      description: Computes consumption by China Standard Time calendar date. The inclusive date range defaults to the latest 30 days and cannot exceed 366 calendar days.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          description: Inclusive China Standard Time start date. Defaults to 29 days before endDate.
+          schema: {type: string, format: date}
+        - name: endDate
+          in: query
+          description: Inclusive China Standard Time end date. Defaults to the current date.
+          schema: {type: string, format: date}
+        - name: groupBy
+          in: query
+          schema: {type: string, enum: [day, month], default: day}
+      responses:
+        "200":
+          description: Billing analytics for the authenticated account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingAnalytics"
+        "400":
+          description: Query parameters are invalid or the date range exceeds 366 days
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal billing response validation failed (internal_billing_response_error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: A configured billing data source is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/billing/charge:
+    post:
+      summary: Charge the authenticated account for a server-priced capability
+      description: Known capabilities are charged by server-owned prices. Cloud-bean wallet amounts use 1 cloud bean = 1 CNY.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BillingChargeRequest"
+      responses:
+        "200":
+          description: Charge accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingChargeResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "402":
+          description: Balance is insufficient
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingChargeResponse"
+  /api/billing/refund:
+    post:
+      summary: Refund a previous charge by idempotent reference
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BillingRefundRequest"
+      responses:
+        "200":
+          description: Refund completed or no refundable charge exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingRefundResponse"
+        "400":
+          description: Refund failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingRefundResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/local-browser/status:
+    get:
+      summary: Return paired local browser clients and recent local browser tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orgId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 30}
+      responses:
+        "200":
+          description: Local browser status for the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalBrowserStatus"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not a member of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/local-browser/task:
+    get:
+      summary: Return a local browser task detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: {type: string, minLength: 1}
+        - name: taskId
+          in: query
+          required: false
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: Local browser task detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalBrowserTask"
+        "400":
+          description: Missing or invalid task id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user cannot access this task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      summary: Create a local browser task for a paired desktop client
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalBrowserTaskCreateRequest"
+      responses:
+        "200":
+          description: Local browser task was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalBrowserTask"
+        "400":
+          description: Unsupported local browser task type or invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not a member of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/finder/discover:
+    post:
+      summary: Discover intent leads from Douyin or Xiaohongshu comments
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FinderDiscoverRequest"
+      responses:
+        "200":
+          description: Discovery completed or returned a platform-level recoverable failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinderDiscoverResponse"
+        "400":
+          description: Missing keyword or invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not a member of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/central/nodes:
+    get:
+      summary: Return online and registered central execution nodes
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orgId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: all
+          in: query
+          required: false
+          schema: {type: string, enum: ["1", "true", "yes"]}
+      responses:
+        "200":
+          description: Central node status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CentralNodes"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not an auditor of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/task-center:
+    get:
+      summary: Return enterprise task center summary and latest central, queue, and local-client tasks
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orgId
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 50, default: 12}
+      responses:
+        "200":
+          description: Enterprise task center payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseTaskCenter"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not an auditor of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/invites/create:
+    post:
+      summary: Create an enterprise invite code without requiring phone or email
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseInviteCreateRequest"
+      responses:
+        "200":
+          description: Invite code was created and returned once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseInviteCreateResponse"
+        "403":
+          description: The authenticated user cannot create invites for this organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/invites/verify:
+    post:
+      summary: Verify an enterprise invite code without exposing the secret in URLs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseInviteVerifyRequest"
+      responses:
+        "200":
+          description: Invite is valid and organization metadata is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseInviteVerifyResponse"
+        "410":
+          description: Invite is expired, revoked, accepted, or organization is inactive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/invites/accept:
+    post:
+      summary: Accept an enterprise invite code with name and password only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseInviteAcceptRequest"
+      responses:
+        "200":
+          description: User joined the invited organization and received a session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseInviteAcceptResponse"
+        "400":
+          description: Invite code, display name, or password is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Existing invited identifier requires current password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /lk888/v1beta/models/{model}:generateContent:
+    post:
+      summary: Proxy a Gemini native generateContent request
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiAudioRequest"
+      responses:
+        "200":
+          description: Upstream Gemini response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: Center session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: LK888 is not configured on the center server
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ComicStoryboardImageGenerateRequest:
+      type: object
+      properties:
+        workflow_mode: {type: string, enum: [action_flow, keyframes, multiframe]}
+        workflowMode: {type: string, enum: [action_flow, keyframes, multiframe]}
+        quantity: {type: integer, minimum: 1}
+        count: {type: integer, minimum: 1}
+        prompt: {type: string}
+        model: {type: string}
+        frameIndex: {type: integer, enum: [1, 2]}
+        frame_index: {type: integer, enum: [1, 2]}
+      additionalProperties: true
+    ComicStoryboardImageGenerateResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [task_id]
+          properties:
+            task_id: {type: string}
+            task_ids:
+              type: array
+              minItems: 1
+              items: {type: string}
+          additionalProperties: true
+      additionalProperties: true
+    ComicStoryboardImageValidationError:
+      type: object
+      required: [detail]
+      properties:
+        detail: {type: string}
+      additionalProperties: false
+    AccountBalance:
+      type: object
+      required: [ok, userId, balance]
+      properties:
+        ok: {const: true}
+        userId: {type: string}
+        phone: {type: string}
+        balance: {type: number}
+      additionalProperties: true
+    LegacyBillingLedgerResponse:
+      type: object
+      required: [ok, balance, ledger]
+      properties:
+        ok: {const: true}
+        ledger:
+          type: array
+          description: Historical raw ledger objects preserved for legacy clients.
+          items: {}
+        balance:
+          oneOf:
+            - {type: number}
+            - {const: inf}
+      additionalProperties: true
+      not:
+        required: [pagination]
+    BillingLedgerResponse:
+      type: object
+      required: [ok, balance, ledger, pagination]
+      additionalProperties: false
+      properties:
+        ok: {const: true}
+        balance:
+          oneOf:
+            - {type: number}
+            - {const: inf}
+        ledger:
+          type: array
+          items:
+            $ref: "#/components/schemas/BillingLedgerRow"
+        pagination:
+          $ref: "#/components/schemas/BillingPagination"
+    BillingAnalytics:
+      type: object
+      required: [ok, period, metrics, trend, distribution]
+      additionalProperties: false
+      properties:
+        ok: {const: true}
+        period:
+          type: object
+          required: [startDate, endDate, groupBy, timezone]
+          additionalProperties: false
+          properties:
+            startDate: {type: string, format: date}
+            endDate: {type: string, format: date}
+            groupBy: {type: string, enum: [day, month]}
+            timezone: {const: Asia/Shanghai}
+        metrics:
+          $ref: "#/components/schemas/BillingMetricSet"
+        trend:
+          type: array
+          items:
+            $ref: "#/components/schemas/BillingTrendBucket"
+        distribution:
+          type: array
+          items:
+            $ref: "#/components/schemas/BillingDistributionItem"
+    BillingMetricSet:
+      type: object
+      required: [balance, totalConsumption, activeConsumptionDays, dailyAverage, videoTaskCount, videoAverage]
+      additionalProperties: false
+      properties:
+        balance:
+          oneOf:
+            - {type: number}
+            - {const: inf}
+        totalConsumption: {type: number}
+        activeConsumptionDays: {type: integer, minimum: 0}
+        dailyAverage: {type: number}
+        videoTaskCount: {type: integer, minimum: 0}
+        videoAverage: {type: number}
+    BillingTrendBucket:
+      type: object
+      required: [bucket, amount]
+      additionalProperties: false
+      properties:
+        bucket: {type: string}
+        amount: {type: number}
+    BillingDistributionItem:
+      type: object
+      required: [type, label, amount, ratio]
+      additionalProperties: false
+      properties:
+        type: {type: string, enum: [video, image, voice, other]}
+        label: {type: string}
+        amount: {type: number}
+        ratio: {type: number}
+    BillingLedgerRow:
+      type: object
+      required: [id, createdAt, timestamp, type, typeLabel, modelId, taskId, requestId, detail, change, balanceAfter, status, statusLabel]
+      additionalProperties: false
+      properties:
+        id: {type: string}
+        createdAt: {type: string, format: date-time}
+        timestamp: {type: number}
+        type: {type: string, enum: [video, image, voice, other, recharge, refund]}
+        typeLabel: {type: string}
+        modelId: {type: string}
+        taskId: {type: string}
+        requestId: {type: string}
+        detail: {type: string}
+        change: {type: number}
+        balanceAfter: {type: [number, 'null']}
+        status: {type: string, enum: [charged, refunded, recharged, failed]}
+        statusLabel: {type: string}
+    BillingPagination:
+      type: object
+      required: [page, pageSize, total, totalPages]
+      additionalProperties: false
+      properties:
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, enum: [20, 50, 100], maximum: 100}
+        total: {type: integer, minimum: 0}
+        totalPages: {type: integer, minimum: 0}
+    BillingChargeRequest:
+      type: object
+      properties:
+        capability: {type: string}
+        amount: {type: number, minimum: 0}
+        reason: {type: string}
+        ref: {type: string}
+      additionalProperties: false
+    BillingChargeResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        balance: {type: number}
+        error: {type: string}
+      additionalProperties: true
+    BillingRefundRequest:
+      type: object
+      required: [ref]
+      properties:
+        ref: {type: string, minLength: 1}
+      additionalProperties: false
+    BillingRefundResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        balance: {type: number}
+        refunded: {type: number}
+        error: {type: string}
+      additionalProperties: true
+    LocalBrowserStatus:
+      type: object
+      required: [ok, orgId, online, clients, tasks]
+      properties:
+        ok: {const: true}
+        orgId: {type: string}
+        online: {type: boolean}
+        staleSec: {type: number}
+        clients:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tasks:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+    LocalBrowserTaskCreateRequest:
+      type: object
+      required: [orgId]
+      properties:
+        orgId: {type: string, minLength: 1}
+        type: {type: string, default: xhs.discover}
+        payload:
+          type: object
+          additionalProperties: true
+        clientId: {type: string}
+        allowOffline: {type: boolean}
+      additionalProperties: true
+    LocalBrowserTask:
+      type: object
+      required: [ok]
+      properties:
+        ok: {const: true}
+        id: {type: string}
+        taskId: {type: string}
+        orgId: {type: string}
+        status: {type: string}
+        type: {type: string}
+        result:
+          type: object
+          additionalProperties: true
+        error: {type: string}
+        errorId: {type: string, pattern: "^err-[A-Za-z0-9_-]+$"}
+        task:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    FinderDiscoverRequest:
+      type: object
+      required: [keyword]
+      properties:
+        keyword: {type: string, minLength: 1, maxLength: 120}
+        product: {type: string, maxLength: 120}
+        platform: {type: string, enum: [douyin, xhs, xiaohongshu, rednote, 小红书], default: douyin}
+        videoNum: {type: integer, minimum: 1, maximum: 20, default: 5}
+        num: {type: integer, minimum: 1, maximum: 20}
+        commentMode: {type: string, enum: [page, all], default: page}
+        accountId: {type: string}
+      additionalProperties: true
+    FinderLead:
+      type: object
+      properties:
+        id: {type: string}
+        user: {type: string}
+        u: {type: string}
+        text: {type: string}
+        c: {type: string}
+        intent: {type: string}
+        score: {type: number}
+        profileUrl: {type: string}
+        userUrl: {type: string}
+        sourceVideoUrl: {type: string}
+        sourceVideoTitle: {type: string}
+        noteId: {type: string}
+        awemeId: {type: string}
+        diggCount: {type: integer}
+        platform: {type: string}
+      additionalProperties: true
+    FinderDiscoverResponse:
+      type: object
+      required: [ok, platform, keyword, videoCount, commentCount, leadCount]
+      properties:
+        ok: {type: boolean}
+        platform: {type: string}
+        keyword: {type: string}
+        accountId: {type: string}
+        videos:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        videoCount: {type: integer, minimum: 0}
+        comments:
+          type: array
+          items:
+            $ref: "#/components/schemas/FinderLead"
+        commentCount: {type: integer, minimum: 0}
+        leads:
+          type: array
+          items:
+            $ref: "#/components/schemas/FinderLead"
+        leadCount: {type: integer, minimum: 0}
+        blocked: {type: boolean}
+        needLogin: {type: boolean}
+        riskCode: {type: string, enum: ["", "300012", "300031"]}
+        error: {type: string, enum: ["", "xhs_ip_risk", "xhs_login_required", "xhs_search_failed", "xhs_comment_collection_failed"]}
+        errorId: {type: string, pattern: "^err-[A-Za-z0-9_-]+$"}
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        leadSync:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    CentralNodes:
+      type: object
+      required: [ok, nodes, allNodes]
+      properties:
+        ok: {const: true}
+        nodes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        allNodes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+    EnterpriseTaskCenter:
+      type: object
+      required: [ok]
+      properties:
+        ok: {const: true}
+        orgId: {type: string}
+        tasks:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        queue:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        summary:
+          type: object
+          additionalProperties: true
+        statusCounts:
+          type: object
+          additionalProperties:
+            type: integer
+        typeCounts:
+          type: object
+          additionalProperties:
+            type: integer
+        failureGroups:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+    LegalConsent:
+      type: object
+      required: [accepted, termsVersion, privacyVersion, acceptedAt, clientVersion]
+      additionalProperties: false
+      properties:
+        accepted: {const: true}
+        termsVersion: {type: string, minLength: 1, maxLength: 40}
+        privacyVersion: {type: string, minLength: 1, maxLength: 40}
+        acceptedAt: {type: string, format: date-time}
+        clientVersion: {type: string, minLength: 1, maxLength: 40}
+    AuthLoginRequest:
+      type: object
+      required: [identifier, password, legalConsent]
+      additionalProperties: false
+      properties:
+        identifier: {type: string, minLength: 1, maxLength: 64}
+        password: {type: string, minLength: 1, maxLength: 256}
+        code: {type: string, maxLength: 6}
+        legalConsent: {$ref: "#/components/schemas/LegalConsent"}
+    AuthRegisterRequest:
+      type: object
+      required: [phone, password, code, legalConsent]
+      additionalProperties: false
+      properties:
+        phone: {type: string, pattern: "^[0-9]{11}$"}
+        password: {type: string, minLength: 6, maxLength: 256}
+        code: {type: string, minLength: 1, maxLength: 6}
+        name: {type: string, maxLength: 40}
+        legalConsent: {$ref: "#/components/schemas/LegalConsent"}
+    AuthSuccess:
+      type: object
+      required: [ok, token, user, organizations, appRole, roleScope]
+      properties:
+        ok: {const: true}
+        token: {type: string}
+        expiresAt: {type: number}
+        user: {type: object, additionalProperties: true}
+        organizations:
+          type: array
+          items: {type: object, additionalProperties: true}
+        appRole:
+          type: string
+          enum: [platform_admin, enterprise_admin, normal_user]
+        productRole:
+          type: string
+          enum: [platform_admin, enterprise_admin, normal_user]
+        roleScope:
+          type: string
+          enum: [all, org, self]
+        balance: {type: number}
+      additionalProperties: true
+    EnterpriseInvite:
+      type: object
+      required: [id, orgId, role, status, expiresAt]
+      properties:
+        id: {type: string, minLength: 1}
+        orgId: {type: string, minLength: 1}
+        role: {type: string, enum: [owner, admin, member, auditor]}
+        status: {type: string}
+        recipientName: {type: string}
+        recipientPhone: {type: string, description: Legacy optional field; new native invite flow leaves it empty.}
+        recipientEmail: {type: string, description: Legacy optional field; new native invite flow leaves it empty.}
+        expiresAt: {type: number}
+        createdAt: {type: number}
+        updatedAt: {type: number}
+      additionalProperties: true
+    EnterpriseInviteCreateRequest:
+      type: object
+      required: [orgId]
+      properties:
+        orgId: {type: string, minLength: 1}
+        recipientName: {type: string, maxLength: 80}
+        role: {type: string, enum: [admin, member], default: member}
+        ttlHours: {type: integer, minimum: 1, maximum: 720, default: 168}
+      additionalProperties: false
+    EnterpriseInviteCreateResponse:
+      type: object
+      required: [ok, orgId, inviteCode, invite]
+      properties:
+        ok: {const: true}
+        orgId: {type: string}
+        inviteCode: {type: string, pattern: "^[0-9a-f]{64}$"}
+        invite: {$ref: "#/components/schemas/EnterpriseInvite"}
+        message: {const: invite_created}
+      additionalProperties: false
+    EnterpriseInviteVerifyRequest:
+      type: object
+      required: [token]
+      properties:
+        token: {type: string, pattern: "^[0-9a-f]{64}$"}
+      additionalProperties: false
+    EnterpriseInviteVerifyResponse:
+      type: object
+      required: [ok, invite, organization]
+      properties:
+        ok: {const: true}
+        invite: {$ref: "#/components/schemas/EnterpriseInvite"}
+        organization:
+          type: object
+          required: [id, name]
+          properties:
+            id: {type: string}
+            name: {type: string}
+            plan: {type: string}
+          additionalProperties: true
+      additionalProperties: false
+    EnterpriseInviteAcceptRequest:
+      type: object
+      required: [token, name, password]
+      properties:
+        token: {type: string, pattern: "^[0-9a-f]{64}$"}
+        name: {type: string, minLength: 1, maxLength: 80}
+        password: {type: string, minLength: 8, maxLength: 256}
+        currentPassword: {type: string, description: Required only when accepting a legacy invite tied to an existing phone/email user.}
+      additionalProperties: false
+    EnterpriseInviteAcceptResponse:
+      allOf:
+        - $ref: "#/components/schemas/AuthSuccess"
+        - type: object
+          required: [ok, token, user, membership, memberships, organizations, orgId, appRole, roleScope]
+          properties:
+            ok: {const: true}
+            token: {type: string}
+            expiresAt: {type: number}
+            user: {type: object, additionalProperties: true}
+            membership: {type: object, additionalProperties: true}
+            memberships:
+              type: array
+              items: {type: object, additionalProperties: true}
+            organizations:
+              type: array
+              items: {type: object, additionalProperties: true}
+            orgId: {type: string}
+            appRole:
+              type: string
+              enum: [platform_admin, enterprise_admin, normal_user]
+            productRole:
+              type: string
+              enum: [platform_admin, enterprise_admin, normal_user]
+            roleScope:
+              type: string
+              enum: [all, org, self]
+            balance: {type: number}
+            message: {const: invite_accepted}
+          additionalProperties: true
+    LocalAccount:
+      type: object
+      required: [id, platform, cookieReady, usable]
+      properties:
+        id: {type: string, minLength: 1}
+        platform: {type: string, enum: [douyin, xhs]}
+        name: {type: string}
+        handle: {type: string}
+        avatar: {type: string}
+        profileDir: {type: string}
+        cookieReady: {type: boolean}
+        cookieCount: {type: integer, minimum: 0}
+        usable: {type: boolean}
+        online: {type: boolean}
+        status: {type: string}
+        needLogin: {type: boolean}
+        fans:
+          oneOf:
+            - {type: string}
+            - {type: integer, minimum: 0}
+        followers:
+          oneOf:
+            - {type: string}
+            - {type: integer, minimum: 0}
+          description: Last known follower count copied from account profile metadata when available.
+        todayPublish:
+          type: integer
+          minimum: 0
+          description: Successful publish count for this account on the current central-server day.
+        publishedToday:
+          type: integer
+          minimum: 0
+          description: Alias of todayPublish for native-client compatibility.
+        todayPublishDay: {type: string}
+        todayPublishUpdatedAt: {type: number}
+        capabilities:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    AccountRemoveRequest:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string, minLength: 1}
+        deleteFiles: {type: boolean, default: false}
+      additionalProperties: false
+    AccountRemoveSuccess:
+      type: object
+      required: [ok, removed, id]
+      properties:
+        ok: {const: true}
+        removed: {type: integer, minimum: 0}
+        id: {type: string}
+      additionalProperties: false
+    LegalConsentError:
+      type: object
+      required: [ok, error, requiredTermsVersion, requiredPrivacyVersion, effectiveDate]
+      properties:
+        ok: {const: false}
+        error: {type: string, enum: [legal_consent_required, legal_consent_outdated]}
+        requiredTermsVersion: {type: string}
+        requiredPrivacyVersion: {type: string}
+        effectiveDate: {type: string, format: date}
+      additionalProperties: false
+    DouyinDownloadRequest:
+      type: object
+      required: [url]
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: "^https?://([^/]+\\.)?douyin\\.com/"
+        save_choice:
+          type: string
+          default: all
+        dryRun:
+          type: boolean
+          default: false
+    DouyinDmInboxRequest:
+      type: object
+      required: [target]
+      properties:
+        target:
+          type: string
+          minLength: 1
+          description: Douyin customer profile URL or sec_uid. Numeric uid is rejected because the browser DM entry is not stable for it.
+        userUrl:
+          type: string
+          description: Compatibility alias for target.
+        secUid:
+          type: string
+          description: Compatibility alias for target when the caller stores Douyin sec_uid separately.
+        accountId:
+          type: string
+          description: Optional Account matrix ID whose local Douyin login profile and Cookie cache are used. When omitted, the latest usable Douyin account is selected.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 10
+        sinceFingerprint:
+          type: string
+          description: Last processed message fingerprint. When present, the response returns only messages after it if the marker is visible.
+      additionalProperties: false
+    DouyinDmInboxMessage:
+      type: object
+      required: [id, fingerprint, direction, kind, text, createdAtText]
+      properties:
+        id: {type: string}
+        fingerprint:
+          type: string
+          description: Stable, non-reversible message fingerprint for duplicate detection and audit correlation.
+        direction:
+          type: string
+          enum: [customer, me, unknown]
+        kind:
+          type: string
+          enum: [text, image, voice, video, card, emoji, unknown]
+        text:
+          type: string
+          maxLength: 1000
+          description: Present only in the local-engine response for text messages. Non-text messages return an empty string; center task persistence redacts this field and stores only textFingerprint.
+        createdAtText: {type: string}
+      additionalProperties: true
+    DouyinDmInboxResponse:
+      type: object
+      required: [ok, messages, nonTextCount]
+      properties:
+        ok: {type: boolean}
+        platform: {type: string, enum: [douyin]}
+        target:
+          type: string
+          description: Local-engine response only. Center task persistence stores targetFingerprint instead of the raw target.
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/DouyinDmInboxMessage"
+        nonTextCount:
+          type: integer
+          minimum: 0
+        sinceFingerprint: {type: string}
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+        needLogin: {type: boolean}
+        empty: {type: boolean}
+        error:
+          type: string
+          enum: ["", "missing_target", "numeric_uid_unsupported_in_browser_dm", "not_authenticated", "dm_inbox_button_not_found", "dm_inbox_messages_not_found", "dm_inbox_child_failed", "dm_inbox_child_exception", "dm_inbox_invalid_result"]
+      additionalProperties: true
+    XhsDownloadRequest:
+      type: object
+      anyOf:
+        - required: [url]
+        - required: [noteUrl]
+      properties:
+        url: {type: string, format: uri}
+        noteUrl: {type: string, format: uri}
+      additionalProperties: false
+    DownloadFile:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string}
+        kind: {type: string, enum: [video, image, file]}
+      additionalProperties: true
+    Material:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+        repaired: {type: boolean}
+        repairedAt: {type: number}
+        duration: {type: number, minimum: 0}
+        width: {type: integer, minimum: 0}
+        height: {type: integer, minimum: 0}
+        urls:
+          type: array
+          items: {type: string}
+        publicUrls:
+          type: array
+          items:
+            type: string
+            format: uri
+      additionalProperties: true
+    DouyinDownloadSuccess:
+      type: object
+      required: [ok]
+      properties:
+        ok: {const: true}
+        dryRun: {type: boolean}
+        savePath: {type: string}
+        files:
+          type: array
+          items: {$ref: "#/components/schemas/DownloadFile"}
+        materialId: {type: string}
+        material: {$ref: "#/components/schemas/Material"}
+      additionalProperties: true
+    XhsDownloadSuccess:
+      type: object
+      required: [ok, materialId, material]
+      properties:
+        ok: {const: true}
+        savePath: {type: string}
+        note:
+          type: object
+          properties:
+            title: {type: string}
+            body: {type: string}
+            tags:
+              type: array
+              items: {type: string}
+          additionalProperties: true
+        title: {type: string}
+        body: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+        files:
+          type: array
+          items: {$ref: "#/components/schemas/DownloadFile"}
+        materialId: {type: string, minLength: 1}
+        material: {$ref: "#/components/schemas/Material"}
+      additionalProperties: true
+    ErrorResponse:
+      type: object
+      required: [ok, error]
+      properties:
+        ok: {const: false}
+        error: {type: string}
+        stage: {type: string}
+        errorId: {type: string, pattern: "^err-[A-Za-z0-9_-]+$"}
+        context:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    GeminiAudioRequest:
+      type: object
+      required: [contents]
+      properties:
+        contents:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [parts]
+            properties:
+              role: {type: string}
+              parts:
+                type: array
+                minItems: 1
+                items:
+                  oneOf:
+                    - type: object
+                      required: [text]
+                      properties:
+                        text: {type: string}
+                      additionalProperties: false
+                    - type: object
+                      required: [inline_data]
+                      properties:
+                        inline_data:
+                          type: object
+                          required: [mime_type, data]
+                          properties:
+                            mime_type: {const: audio/mpeg}
+                            data: {type: string, contentEncoding: base64}
+                          additionalProperties: false
+                      additionalProperties: false
+            additionalProperties: false
+        generationConfig:
+          type: object
+          additionalProperties: true
+      additionalProperties: false

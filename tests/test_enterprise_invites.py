@@ -85,6 +85,26 @@ class EnterpriseInviteContractTest(unittest.TestCase):
         self.assertEqual(payload["roleScope"], "self")
         self.assertEqual(payload["memberships"][0]["orgId"], "org-a")
 
+    def test_invite_acceptance_does_not_require_phone_or_email(self):
+        code = self.create_invite(phone="", email="")["inviteCode"]
+
+        payload, status = self.server.accept_enterprise_invite({
+            "token": code,
+            "name": "Invitee Without Phone",
+            "password": "new-password-1",
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["orgId"], "org-a")
+        self.assertEqual(payload["membership"]["role"], "member")
+        self.assertEqual(payload["user"]["name"], "Invitee Without Phone")
+        self.assertEqual(payload["user"].get("phone") or "", "")
+        self.assertEqual(payload["user"].get("email") or "", "")
+        membership = self.state["memberships"][0]
+        self.assertEqual(membership["orgId"], "org-a")
+        self.assertEqual(membership["userId"], payload["user"]["id"])
+
     def test_existing_user_requires_current_password_then_joins(self):
         user = {
             "id": "user-existing",

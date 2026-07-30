@@ -5,6 +5,7 @@ from typing import Mapping, Optional
 
 FEATURE_ENV = "XHS_NOTE_REPLACEMENT_ENABLED"
 PUBLISH_FEATURE_ENV = "XHS_NOTE_PUBLISH_ENABLED"
+XHS_TITLE_LIMIT = 20
 
 
 def feature_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -72,6 +73,7 @@ def build_template(material: dict, source_note: Optional[dict] = None) -> dict:
         "sourcePlatform": material.get("platform") or "xhs",
         "sourceNoteId": source_note.get("noteId") or material.get("noteId") or _note_id_from_url(source_url),
         "sourceMaterialId": material.get("id") or "",
+        "sourceDownloadPath": material.get("sourceDownloadPath") or source_note.get("sourceDownloadPath") or source_note.get("savePath") or "",
         "sourceUrl": source_url,
         "imageSlots": slots,
         "copyStructure": {
@@ -95,6 +97,19 @@ def _asset_for_role(role: str, assets: list[dict]) -> Optional[dict]:
     return None
 
 
+def _asset_for_slot(slot: dict, assets: list[dict]) -> Optional[dict]:
+    slot_index = str((slot or {}).get("index") or "")
+    for asset in assets or []:
+        if slot_index and str(asset.get("slotIndex") or "") == slot_index:
+            return asset
+    return _asset_for_role((slot or {}).get("role") or "detail", assets)
+
+
+def _xhs_title(text: str) -> str:
+    title = re.sub(r"\s+", "", str(text or "").strip())
+    return (title or "同款图文笔记")[:XHS_TITLE_LIMIT]
+
+
 def copy_candidates(template: dict, business_input: dict) -> list[dict]:
     business_input = business_input or {}
     name = business_input.get("name") or "\u4f60\u7684\u4e1a\u52a1"
@@ -103,20 +118,21 @@ def copy_candidates(template: dict, business_input: dict) -> list[dict]:
     first = selling[0] if selling else "\u6838\u5fc3\u5356\u70b9"
     audience = business_input.get("audience") or "\u76ee\u6807\u5ba2\u6237"
     selling_text = "\u3001".join(selling) or first
+    selling_focus = selling_text[:80]
     return [
         {
-            "title": "%s\uff5c%s\u4e5f\u80fd\u8f7b\u677e\u9009" % (region, first),
-            "body": "\u5982\u679c\u4f60\u6b63\u5728\u5173\u6ce8%s\uff0c\u8fd9\u7ec4\u56fe\u6587\u6309\u771f\u5b9e\u4f53\u9a8c\u6574\u7406\uff1a%s\u3002\u9002\u5408%s\u5148\u6536\u85cf\u518d\u5bf9\u6bd4\u3002" % (name, selling_text, audience),
+            "title": _xhs_title("%s\uff5c%s\u600e\u4e48\u9009\u66f4\u7a33" % (region, name)),
+            "body": "最近很多%s会问%s怎么选。我的建议是先把%s这几件事看清楚，再结合每天通勤、家庭乘坐和预算去判断。不要只看一个参数，也不要被单一优惠带着走；在%s看车时，可以把这些点逐项问清楚，现场试驾后再决定更稳，也更踏实。" % (audience, name, selling_focus, region),
             "tags": ["#%s" % region, "#%s" % name, "#\u540c\u57ce\u79cd\u8349"],
         },
         {
-            "title": "\u4e3a\u4ec0\u4e48\u5927\u5bb6\u90fd\u5728\u770b%s" % name,
-            "body": "\u8fd9\u6b21\u628a\u91cd\u70b9\u653e\u5728%s\uff1a%s\u3002\u56fe\u7247\u91cc\u6309\u5c01\u9762\u3001\u7ec6\u8282\u548c\u884c\u52a8\u5f15\u5bfc\u6574\u7406\uff0c\u65b9\u4fbf\u4f60\u5feb\u901f\u5224\u65ad\u662f\u5426\u9002\u5408\u3002" % (name, selling_text),
+            "title": _xhs_title("%s\u503c\u4e0d\u503c\u5f97\u770b\uff1f\u5148\u770b%s" % (name, first)),
+            "body": "看%s不用只盯配置表，%s这些点更容易影响后面的使用感受。适合%s先把需求列清楚：平时几个人坐、主要跑市区还是高速、能不能接受后期保养成本。这样再去试驾或现场看实车，沟通会更有方向，也更容易避开不适合自己的选择。" % (name, selling_focus, audience),
             "tags": ["#\u5c0f\u7ea2\u4e66\u56fe\u6587", "#%s" % first, "#%s" % region],
         },
         {
-            "title": "%s\u907f\u5751\u6e05\u5355\uff1a\u5148\u770b\u8fd9\u51e0\u70b9" % name,
-            "body": "\u522b\u53ea\u770b\u8868\u9762\uff0c\u91cd\u70b9\u770b%s\u3002\u6211\u4eec\u6309\u771f\u5b9e\u4f7f\u7528\u573a\u666f\u62c6\u6210\u51e0\u5f20\u56fe\uff0c\u9002\u5408%s\u505a\u51b3\u7b56\u524d\u53c2\u8003\u3002" % (selling_text, audience),
+            "title": _xhs_title("%s\u770b%s\uff0c\u8fd9\u51e0\u70b9\u5148\u95ee\u6e05\u695a" % (region, name)),
+            "body": "如果你在%s准备看%s，可以先把%s问清楚。到店前确定好预算、用途和能接受的取舍，现场沟通会高效很多。尤其是第一次了解的人，建议把关心的问题提前写下来，逐项确认后再做决定；有不确定的地方，也可以先留给顾问帮你对比后再推进。" % (region, name, selling_focus),
             "tags": ["#\u907f\u5751", "#%s" % name, "#%s" % region],
         },
     ]
@@ -127,7 +143,7 @@ def build_replacement_preview(template: dict, business_input: dict, provided_ass
     ai_count = 0
     for slot in template.get("imageSlots") or []:
         role = slot.get("role") or "detail"
-        asset = _asset_for_role(role, provided_assets)
+        asset = _asset_for_slot(slot, provided_assets)
         if asset:
             mappings.append({
                 "slotIndex": slot.get("index"),
@@ -154,6 +170,17 @@ def build_replacement_preview(template: dict, business_input: dict, provided_ass
         "selectedCopyIndex": 0,
         "aiSlotCount": ai_count,
     }
+
+
+def replacement_material_error(job: dict) -> str:
+    job = job or {}
+    slots = job.get("template", {}).get("imageSlots") or []
+    if not slots:
+        return "xhs_note_no_template"
+    for mapping in job.get("slotMappings") or []:
+        if not str(mapping.get("filePath") or "").strip():
+            return "xhs_note_replacement_missing_images"
+    return ""
 
 _JOB_ID_RE = re.compile(r"^xnr_[0-9a-f]{24}$")
 
@@ -210,6 +237,9 @@ def build_draft_material_payload(job: dict, saved_files: list[str]) -> dict:
         "title": copy.get("title") or "",
         "body": copy.get("body") or "",
         "tags": copy.get("tags") or [],
+        "sourceTitle": (job.get("template") or {}).get("originalCopy", {}).get("title") or "",
+        "sourceBody": (job.get("template") or {}).get("originalCopy", {}).get("body") or "",
+        "sourceTags": (job.get("template") or {}).get("originalCopy", {}).get("tags") or [],
         "files": list(saved_files or []),
         "status": "draft",
         "published": 0,
