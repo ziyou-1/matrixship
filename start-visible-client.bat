@@ -8,6 +8,8 @@ set "PYTHONW=%ROOT%\.venv-win\Scripts\pythonw.exe"
 set "MATRIX_CENTRAL=http://127.0.0.1:9080"
 set "CENTRAL_HOST=127.0.0.1"
 set "CENTRAL_PORT=9080"
+set "LOCAL_API_PORT=9081"
+set "API_PORT=%LOCAL_API_PORT%"
 set "CENTRAL_DATA_DIR=%BACKEND%\central_data"
 set "CENTRAL_ADMIN_PASSWORD=test123456"
 set "MATRIX_AGENT_DATA_DIR=%AGENT_DATA%"
@@ -28,6 +30,8 @@ if not exist "%PYTHONW%" (
 
 cd /d "%BACKEND%"
 
+call :restart_central
+
 call :check_central
 if errorlevel 1 (
   echo Starting MatrixShip central server on %MATRIX_CENTRAL% ...
@@ -46,6 +50,7 @@ pause
 exit /b 1
 
 :central_ready
+call :restart_local_executor
 echo Starting MatrixShip client ...
 "%PYTHONW%" matrix_native_client.py
 exit /b 0
@@ -53,3 +58,25 @@ exit /b 0
 :check_central
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:9080/api/health' -TimeoutSec 2; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { exit 0 } } catch { }; exit 1"
 exit /b %errorlevel%
+
+:restart_central
+echo Restarting MatrixShip central server on %MATRIX_CENTRAL% ...
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%CENTRAL_PORT% .*LISTENING"') do (
+  if not "%%P"=="0" (
+    echo Stopping existing central server PID %%P ...
+    taskkill /F /PID %%P >nul 2>nul
+  )
+)
+timeout /t 1 /nobreak >nul
+exit /b 0
+
+:restart_local_executor
+echo Restarting MatrixShip local executor on 127.0.0.1:%LOCAL_API_PORT% ...
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%LOCAL_API_PORT% .*LISTENING"') do (
+  if not "%%P"=="0" (
+    echo Stopping existing local executor PID %%P ...
+    taskkill /F /PID %%P >nul 2>nul
+  )
+)
+timeout /t 1 /nobreak >nul
+exit /b 0

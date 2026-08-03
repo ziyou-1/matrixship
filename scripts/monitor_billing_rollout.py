@@ -27,6 +27,14 @@ ROLLBACK_COMMAND = [
 ]
 
 
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_RejectRedirectHandler())
+
+
 def _required_env(name):
     value = os.getenv(name, "").strip()
     if not value:
@@ -84,7 +92,7 @@ def sample_statuses(base_url, token):
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with _NO_REDIRECT_OPENER.open(request, timeout=10) as response:
                 statuses.append(response.status)
         except urllib.error.HTTPError as exc:
             statuses.append(exc.code)

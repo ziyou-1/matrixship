@@ -159,6 +159,18 @@ def get_balance(uid):
     return float(u.get("computing_power") or 0)
 
 
+def get_balance_strict(uid):
+    """Read the current balance without converting query failures to zero."""
+    user = _q(
+        "SELECT computing_power FROM users WHERE id=%s LIMIT 1",
+        (int(uid),),
+        one=True,
+    )
+    if not user:
+        return 0.0
+    return float(user.get("computing_power") or 0)
+
+
 def _to_dec(x):
     try:
         return Decimal(str(x))

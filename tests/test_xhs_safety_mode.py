@@ -1,6 +1,7 @@
 import importlib
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -27,6 +28,9 @@ class XhsSafetyModeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.env_patch = mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         self.old_config = self.api.RISK_CONFIG_JSON
         self.old_state = self.api.XHS_SAFETY_STATE_JSON
         self.api.RISK_CONFIG_JSON = str(Path(self.tmp.name) / "risk_config.json")

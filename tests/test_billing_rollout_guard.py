@@ -1,13 +1,54 @@
 import json
 import os
 import subprocess
+import threading
 import unittest
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from unittest import mock
 
 from scripts import monitor_billing_rollout as rollout
 
 
 class BillingRolloutGuardTest(unittest.TestCase):
+    def test_redirect_is_counted_as_error_without_following_or_forwarding_authorization(self):
+        observed = {"redirect": 0, "target": 0, "targetAuthorization": None}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/api/billing/analytics":
+                    observed["redirect"] += 1
+                    self.send_response(302)
+                    self.send_header("Location", "/redirect-target")
+                    self.end_headers()
+                    return
+                observed["target"] += 1
+                observed["targetAuthorization"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            statuses = rollout.sample_statuses(
+                f"http://127.0.0.1:{server.server_port}",
+                "redirect-regression-token",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(statuses, [302] * rollout.WINDOW_SIZE)
+        self.assertEqual(observed["redirect"], rollout.WINDOW_SIZE)
+        self.assertEqual(observed["target"], 0)
+        self.assertIsNone(observed["targetAuthorization"])
+
     def test_more_than_one_percent_errors_requests_rollback(self):
         decision = rollout.evaluate_window([200] * 98 + [503] * 2, threshold=0.01)
         self.assertTrue(decision["rollback"])
@@ -57,6 +98,23 @@ class BillingRolloutGuardTest(unittest.TestCase):
         rendered = json.dumps(result)
         self.assertNotIn("BILLING_MONITOR_TOKEN", rendered)
         self.assertNotIn("Authorization", rendered)
+        self.assertFalse(result["executed"])
+
+    def test_cli_fixture_dry_run_invokes_neither_network_nor_subprocess(self):
+        output = StringIO()
+        with mock.patch.dict(os.environ, {"PREVIOUS_IMAGE_TAG": "stable-previous"}, clear=False):
+            with mock.patch.object(rollout, "sample_statuses") as sample_statuses:
+                with mock.patch("urllib.request.OpenerDirector.open") as network_open:
+                    with mock.patch("subprocess.run") as run:
+                        with redirect_stdout(output):
+                            exit_code = rollout.main(["--dry-run", "--fixture-error-rate", "0.02"])
+
+        self.assertEqual(exit_code, 0)
+        sample_statuses.assert_not_called()
+        network_open.assert_not_called()
+        run.assert_not_called()
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["rollback"])
         self.assertFalse(result["executed"])
 
     def test_evaluate_window_requires_exactly_one_hundred_statuses(self):

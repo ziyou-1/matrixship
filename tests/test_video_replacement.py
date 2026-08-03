@@ -25,24 +25,10 @@ class VideoReplacementHelpersTest(unittest.TestCase):
     def setUp(self):
         self.try_charge_patch = mock.patch.object(self.client, "try_charge", return_value=(True, None))
         self.refund_cap_patch = mock.patch.object(self.client, "refund_cap", return_value=(True, None))
-        original_video_charge = self.client._charge_comic_video_attempt
-
-        def charge_with_legacy_adapter_support(adapter, job, segment):
-            if not callable(getattr(adapter, "model_prices", None)):
-                return {}
-            return original_video_charge(adapter, job, segment)
-
-        self.comic_video_charge_patch = mock.patch.object(
-            self.client,
-            "_charge_comic_video_attempt",
-            side_effect=charge_with_legacy_adapter_support,
-        )
         self.try_charge_patch.start()
         self.refund_cap_patch.start()
-        self.comic_video_charge_patch.start()
         self.addCleanup(self.try_charge_patch.stop)
         self.addCleanup(self.refund_cap_patch.stop)
-        self.addCleanup(self.comic_video_charge_patch.stop)
 
     def test_comic_extract_task_ids_keeps_start_and_end_order(self):
         payload = {"data": {"task_ids": ["frame-start", "frame-end"]}}
@@ -90,7 +76,11 @@ class VideoReplacementHelpersTest(unittest.TestCase):
                 adapter.submit_storyboard_image(201, job, segment, frame_index=frame_index)
 
                 body = adapter.comic_json.call_args.args[2]
-                self.assertEqual(body["prompt"], self.client._comic_visual_prompt_text(segment, job=job))
+                self.assertTrue(body["prompt"].startswith(
+                    self.client._comic_visual_prompt_text(segment, job=job)
+                ))
+                self.assertIn("gpt-image-2", body["prompt"])
+                self.assertIn("彩铅", body["prompt"])
                 self.assertIn("https://cdn.example/start.png", body["reference_image_urls"])
                 self.assertIn("https://cdn.example/reference.png", body["image_urls"])
                 self.assertFalse(contains_audio_field(body))
@@ -167,7 +157,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "project_id": 88,
             "projectId": 88,
             "description": prompt,
-            "camera_movement": prompt,
+            "camera_movement": "静态镜头",
             "frameIndex": 2,
             "frame_index": 2,
         })
@@ -234,6 +224,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
                 "scene_reference_images": [],
                 "prop_reference_images": [],
                 "subject_reference_images": [],
+                "negative_prompt": "不要生成字幕、对白文字、台词文字、促销文字；不要复刻原视频人物外观、原视频产品、原视频道具或原视频场景。",
                 "audio_prompt": {"dialogue": {"text": "current dialogue", "voice": "current-voice"}},
                 "project_id": 88,
                 "projectId": 88,
@@ -708,7 +699,208 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertIn("最新口播稿", serialized)
         self.assertEqual(payload["audio_mode"], "tts")
 
-    def test_comic_video_payload_preserves_generated_sound_in_auto_mode(self):
+    def test_comic_video_prompt_does_not_claim_lk888_receives_source_video_motion(self):
+        job = {
+            "modelFaceUrl": "https://cdn.example/person.png",
+            "sceneImageUrl": "https://cdn.example/scene.png",
+            "productImageUrls": ["https://cdn.example/product.png"],
+        }
+        segment = {
+            "prompt": (
+                "人物：男销售，白衬衫黑领带，动作和站位沿用原片\n"
+                "画面：展厅中景，保留原片动作、原片站位和镜头关系"
+            ),
+            "startFrameUrl": "https://cdn.example/start.png",
+            "endFrameUrl": "https://cdn.example/end.png",
+        }
+
+        payload = self.client._comic_storyboard_video_payload(job, segment)
+        prompt = payload["prompt"]
+
+        for forbidden in ("沿用原片", "原视频只提供", "保留原片动作", "原片站位"):
+            self.assertNotIn(forbidden, prompt)
+        self.assertIn("参考分镜拆解文本", prompt)
+        self.assertNotIn("sourceVideoUrl", payload)
+        self.assertNotIn("source_video_url", payload)
+
+    def test_seedance_comic_image_payload_uses_gpt_image_colored_pencil_style(self):
+        job = {
+            "model": "doubao-seedance-2-0-260128",
+            "modelFaceUrl": "https://cdn.example/person.png",
+            "sceneImageUrl": "https://cdn.example/scene.png",
+            "productImageUrls": ["https://cdn.example/product.png"],
+        }
+        segment = {
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start.png",
+            "endFrameUrl": "https://cdn.example/end.png",
+        }
+
+        image_payload = self.client._comic_storyboard_image_payload(job, segment)
+        prompt = image_payload["prompt"]
+
+        self.assertEqual(image_payload["image_model"], "gpt-image-2")
+        self.assertEqual(image_payload["imageModel"], "gpt-image-2")
+        self.assertEqual(image_payload["frame_style_mode"], "colored_pencil")
+        self.assertEqual(image_payload["frameStyleMode"], "colored_pencil")
+        self.assertIn("\u5f69\u94c5", prompt)
+        self.assertIn("\u624b\u7ed8", prompt)
+        self.assertNotIn("\u771f\u4eba\u5199\u5b9e", prompt)
+
+    def test_seedance_comic_video_payload_requests_realistic_style_after_colored_pencil_frames(self):
+        seedance_job = {
+            "model": "doubao-seedance-2-0-260128",
+            "modelFaceUrl": "https://cdn.example/person.png",
+        }
+        non_seedance_job = {
+            "model": "viduq3-cankaosheng",
+            "modelFaceUrl": "https://cdn.example/person.png",
+        }
+        segment = {
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start.png",
+            "endFrameUrl": "https://cdn.example/end.png",
+        }
+
+        seedance_payload = self.client._comic_storyboard_video_payload(seedance_job, segment)
+        non_seedance_payload = self.client._comic_storyboard_video_payload(non_seedance_job, segment)
+
+        self.assertIn("\u771f\u4eba\u5199\u5b9e", seedance_payload["prompt"])
+        self.assertIn("\u771f\u4eba\u5199\u5b9e", seedance_payload["keyframes_video_prompt"])
+        self.assertNotIn("\u5f69\u94c5", seedance_payload["prompt"])
+        self.assertNotIn("\u771f\u4eba\u5199\u5b9e", non_seedance_payload["prompt"])
+
+    def test_sd20_all_reference_comic_payload_uses_colored_pencil_chain(self):
+        job = {
+            "model": "kwvideo-v2-quannengcankao",
+            "modelFaceUrl": "https://cdn.example/person.png",
+            "sceneImageUrl": "https://cdn.example/scene.png",
+            "productImageUrls": ["https://cdn.example/product.png"],
+        }
+        segment = {
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start.png",
+            "endFrameUrl": "https://cdn.example/end.png",
+        }
+
+        image_payload = self.client._comic_storyboard_image_payload(job, segment)
+        video_payload = self.client._comic_storyboard_video_payload(job, segment)
+
+        self.assertEqual(image_payload["image_model"], "gpt-image-2")
+        self.assertEqual(image_payload["frame_style_mode"], "colored_pencil")
+        self.assertIn("\u5f69\u94c5", image_payload["prompt"])
+        self.assertIn("\u771f\u4eba\u5199\u5b9e", video_payload["prompt"])
+
+    def test_comic_video_payload_prefers_hidden_colored_pencil_references(self):
+        job = {
+            "model": "kwvideo-v2-quannengcankao",
+            "modelFaceUrl": "https://cdn.example/person-original.png",
+            "sceneImageUrl": "https://cdn.example/scene-original.png",
+            "productImageUrls": ["https://cdn.example/product-original.png"],
+        }
+        segment = {
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start-original.png",
+            "endFrameUrl": "https://cdn.example/end-original.png",
+            "coloredPencilStartFrameUrl": "https://cdn.example/start-pencil.png",
+            "coloredPencilEndFrameUrl": "https://cdn.example/end-pencil.png",
+            "coloredPencilReferenceImageUrls": [
+                "https://cdn.example/person-pencil.png",
+                "https://cdn.example/scene-pencil.png",
+                "https://cdn.example/product-pencil.png",
+            ],
+        }
+
+        payload = self.client._comic_storyboard_video_payload(job, segment)
+
+        self.assertEqual(payload["reference_image_urls"], [
+            "https://cdn.example/start-pencil.png",
+            "https://cdn.example/end-pencil.png",
+            "https://cdn.example/person-pencil.png",
+            "https://cdn.example/scene-pencil.png",
+            "https://cdn.example/product-pencil.png",
+        ])
+        self.assertEqual(payload["image_urls"], payload["reference_image_urls"])
+        self.assertEqual(payload["character_reference_images"], [])
+        self.assertEqual(payload["scene_reference_images"], [])
+        self.assertEqual(payload["prop_reference_images"], [])
+        self.assertNotIn("https://cdn.example/start-original.png", payload["reference_image_urls"])
+        self.assertNotIn("https://cdn.example/person-original.png", payload["subject_reference_images"])
+
+    def test_prepare_colored_pencil_references_calls_gpt_image_without_replacing_visible_frames(self):
+        job = {
+            "model": "kwvideo-v2-quannengcankao",
+            "modelFaceUrl": "https://cdn.example/person-original.png",
+            "sceneImageUrl": "https://cdn.example/scene-original.png",
+            "productImageUrls": ["https://cdn.example/product-original.png"],
+        }
+        segment = {
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start-original.png",
+            "endFrameUrl": "https://cdn.example/end-original.png",
+        }
+        generated = [
+            (b"start", "https://cdn.example/start-pencil.png"),
+            (b"end", "https://cdn.example/end-pencil.png"),
+            (b"person", "https://cdn.example/person-pencil.png"),
+            (b"scene", "https://cdn.example/scene-pencil.png"),
+            (b"product", "https://cdn.example/product-pencil.png"),
+        ]
+
+        with mock.patch.object(
+                self.client, "_lk888_image_result_download", side_effect=generated
+        ) as image_result:
+            self.client._prepare_comic_colored_pencil_references(job, segment)
+
+        self.assertEqual(image_result.call_count, 5)
+        for call in image_result.call_args_list:
+            self.assertEqual(call.kwargs.get("model"), "gpt-image-2")
+            self.assertIn("\u5f69\u94c5", call.args[0])
+            self.assertEqual(len(call.kwargs.get("image_urls") or []), 1)
+        self.assertEqual(segment["startFrameUrl"], "https://cdn.example/start-original.png")
+        self.assertEqual(segment["endFrameUrl"], "https://cdn.example/end-original.png")
+        self.assertEqual(segment["coloredPencilStartFrameUrl"], "https://cdn.example/start-pencil.png")
+        self.assertEqual(segment["coloredPencilEndFrameUrl"], "https://cdn.example/end-pencil.png")
+        self.assertEqual(segment["coloredPencilReferenceImageUrls"], [
+            "https://cdn.example/person-pencil.png",
+            "https://cdn.example/scene-pencil.png",
+            "https://cdn.example/product-pencil.png",
+        ])
+
+    def test_prepare_colored_pencil_references_blocks_video_when_keyframes_missing(self):
+        job = {"model": "kwvideo-v2-quannengcankao"}
+        segment = {
+            "index": 3,
+            "prompt": "\u4e3b\u89d2\u5728\u5c55\u5385\u5c55\u793a\u4ea7\u54c1",
+            "startFrameUrl": "https://cdn.example/start-original.png",
+            "endFrameUrl": "https://cdn.example/end-original.png",
+        }
+
+        def fake_image_result(_prompt, **kwargs):
+            source_url = (kwargs.get("image_urls") or [""])[0]
+            if "start-original" in source_url:
+                return b"start", "https://cdn.example/start-pencil.png"
+            raise RuntimeError("lk888 image failed")
+
+        with mock.patch.object(
+                self.client, "_lk888_image_result_download", side_effect=fake_image_result
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client._prepare_comic_colored_pencil_references(job, segment)
+
+        self.assertEqual(segment["coloredPencilStatus"], "failed")
+        self.assertEqual(segment["coloredPencilStartFrameUrl"], "https://cdn.example/start-pencil.png")
+        self.assertNotIn("coloredPencilEndFrameUrl", segment)
+
+    def test_comic_project_video_model_candidates_keep_user_selected_model_only(self):
+        candidates = self.client._comic_project_video_model_candidates({
+            "comicVideoModel": "doubao-seedance-2-0-260128",
+            "model": "doubao-seedance-2-0-260128",
+        })
+
+        self.assertEqual(candidates, ["doubao-seedance-2-0-260128"])
+
+    def test_comic_video_payload_auto_mode_preserves_provider_audio(self):
         for legacy_mode in ("auto", "source", "origin", "original", "source_audio"):
             with self.subTest(audio_mode=legacy_mode):
                 payload = self.client._comic_storyboard_video_payload(
@@ -732,6 +924,15 @@ class VideoReplacementHelpersTest(unittest.TestCase):
                 self.assertNotIn("audio_prompt", payload)
                 self.assertEqual(update_payload["audio_mode"], "auto")
                 self.assertNotIn("audio_prompt", update_payload)
+
+    def test_comic_video_payload_without_dialogue_requests_no_environment_audio(self):
+        payload = self.client._comic_storyboard_video_payload(
+            {"audioMode": "auto"},
+            {"script": "", "startFrameUrl": "start.png", "endFrameUrl": "end.png"},
+        )
+
+        self.assertEqual(payload["audio_mode"], "auto")
+        self.assertNotIn("audio_prompt", payload)
 
     def test_comic_video_payload_enables_tts_only_for_tts_mode(self):
         payload = self.client._comic_storyboard_video_payload(
@@ -1140,6 +1341,30 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(segment["status"], "download_failed")
         self.assertEqual(segment["stage"], "download_failed")
 
+    def test_comic_video_recovery_rejects_storyboard_image_url(self):
+        adapter = mock.Mock()
+        adapter.get_project.return_value = {
+            "data": {
+                "id": 314,
+                "storyboards": [{
+                    "id": 314001,
+                    "startFrameUrl": "/uploads/start.png",
+                    "endFrameUrl": "/uploads/end.png",
+                    "resultUrl": "/uploads/end.png",
+                    "url": "/uploads/end.png",
+                }],
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "comic_video_recovery_missing:storyboard_314001"):
+            self.client._comic_recover_storyboard_media(
+                adapter,
+                314,
+                314001,
+                "video",
+                RuntimeError("Read timed out"),
+            )
+
     def test_comic_download_failure_preserves_existing_audio_status(self):
         class FailingDownloadAdapter:
             def get_project(self, project_id):
@@ -1199,7 +1424,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(segment["status"], "done")
         adapter.submit_storyboard_video.assert_not_called()
 
-    def test_comic_task_progress_reports_real_person_model_fallback(self):
+    def test_comic_task_progress_keeps_default_message_without_model_fallback(self):
         payload = {
             "data": {
                 "status": "pending",
@@ -1212,9 +1437,9 @@ class VideoReplacementHelpersTest(unittest.TestCase):
 
         message = self.client._comic_task_progress_message(payload, "视频生成中…")
 
-        self.assertEqual(message, "Seedance 拒绝真人参考图，已切换 Kling Avatar，正在生成视频")
+        self.assertEqual(message, "视频生成中…")
 
-    def test_comic_task_progress_reports_policy_violation_model_fallback(self):
+    def test_comic_task_progress_keeps_default_message_for_policy_violation_without_model_fallback(self):
         payload = {
             "data": {
                 "status": "pending",
@@ -1227,7 +1452,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
 
         message = self.client._comic_task_progress_message(payload, "视频生成中…")
 
-        self.assertEqual(message, "Seedance 拒绝素材版权/品牌风险，已切换备用模型，正在生成视频")
+        self.assertEqual(message, "视频生成中…")
 
     def test_comic_task_failure_keeps_fallback_reason(self):
         payload = {
@@ -1294,6 +1519,79 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "InputImageSensitiveContentDetected.PolicyViolation",
         )
 
+    def test_comic_project_video_wait_policy_violation_fails_without_model_fallback(self):
+        class PolicyFailureAdapter:
+            submitted_models = []
+            waited_tasks = []
+
+            def get_project(self, project_id):
+                return {"data": {"id": project_id, "storyboards": [{"id": 201, "sequence": 1}]}}
+
+            def update_storyboard(self, *_args, **_kwargs):
+                return {"ok": True}
+
+            def submit_storyboard_image(self, *_args, **_kwargs):
+                return {"data": {"task_ids": ["start-frame-task", "end-frame-task"]}}
+
+            def submit_storyboard_video(self, _storyboard_id, job, _segment):
+                model = str(job.get("comicVideoModel") or job.get("model") or "")
+                self.__class__.submitted_models.append(model)
+                return {"data": {"task_id": "video-task-%s" % model}}
+
+            def wait_task_result(self, task_id, **_kwargs):
+                self.__class__.waited_tasks.append(task_id)
+                if str(task_id).startswith("start-frame") or str(task_id).startswith("end-frame"):
+                    return "https://example.test/%s.png" % task_id, {"data": {"status": "completed"}}
+                raise RuntimeError(
+                    "comic_task_failed:ark 400 Bad Request: "
+                    "{\"error\":{\"code\":\"InputImageSensitiveContentDetected.PolicyViolation\","
+                    "\"message\":\"The request failed because the input image 'content[1]' "
+                    "may be related to copyright restrictions.\"}}"
+                )
+
+            def download_media(self, _url, path, **_kwargs):
+                Path(path).write_bytes(b"video")
+                return path
+
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._cancel_requested = False
+        segment = {"index": 1, "status": "pending", "script": "test script", "comicStoryboardId": 201, "duration": 8.0}
+        job = {
+            "id": "job-policy-fallback",
+            "replacementMode": "comic_project",
+            "comicProjectId": 88,
+            "comicAssets": {},
+            "comicVideoModel": "doubao-seedance-2-0-260128",
+            "model": "doubao-seedance-2-0-260128",
+            "outDir": "/tmp",
+            "segments": [segment],
+        }
+        bridge = type("BridgeStub", (), {
+            "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
+        })()
+
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(self.client, "ComicProjectAdapter", PolicyFailureAdapter), \
+                mock.patch.object(self.client, "try_charge", return_value=(True, None)) as precharge_call, \
+                mock.patch.object(self.client, "refund_cap") as refund_call, \
+                mock.patch.object(self.client, "_prepare_comic_colored_pencil_references", lambda _job, _segment: _segment), \
+                mock.patch.object(self.client, "_comic_download_frame_image", return_value="frame.local"), \
+                mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
+                mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
+                mock.patch.object(self.client, "BRIDGE", bridge):
+            job["outDir"] = td
+            page._run_comic_project_segments(job, [segment], lambda *_args, **_kwargs: None)
+
+        self.assertEqual(segment["status"], "failed")
+        self.assertEqual(PolicyFailureAdapter.submitted_models, ["doubao-seedance-2-0-260128"])
+        precharge_call.assert_not_called()
+        refund_call.assert_not_called()
+        self.assertEqual(job["comicVideoModel"], "doubao-seedance-2-0-260128")
+        self.assertEqual(job["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(segment["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(segment["comicVideoFallbacks"][0]["fallbackReason"], "InputImageSensitiveContentDetected.PolicyViolation")
+        self.assertIn("Seedance 生成失败：素材版权/品牌风险", segment["error"])
+
     def test_build_replacement_segments_follow_original_duration(self):
         segments = self.client._build_replacement_segments(
             {"meta": {"duration": 20.5}},
@@ -1309,6 +1607,44 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(segments[2]["start"], 16.0)
         self.assertEqual(segments[2]["end"], 20.5)
         self.assertEqual([s["status"] for s in segments], ["pending", "pending", "pending"])
+
+    def test_hybrid_plan_removes_script_overlap_between_adjacent_segments(self):
+        first_repeat = "就这个法汀妮的粉底液啊，我自用三四年了，真的巨好用。"
+        second_repeat = "这个粉底液之前都是要卖79块9一瓶的，它现在这个价格啊，还送了个气垫粉扑和试用装，并且有运费险啊。"
+        plan = self.client._build_hybrid_replacement_plan(
+            {
+                "meta": {"duration": 24.0},
+                "transcript": {
+                    "segments": [
+                        {
+                            "startSec": 0.0,
+                            "endSec": 8.0,
+                            "text": "我想过它会卖69、59、49啊，但是没想到它居然能便宜到这个价格。" + first_repeat,
+                        },
+                        {
+                            "startSec": 8.0,
+                            "endSec": 16.0,
+                            "text": first_repeat + "你们看它上脸这个流动性啊，特别的水润。" + second_repeat,
+                        },
+                        {
+                            "startSec": 16.0,
+                            "endSec": 24.0,
+                            "text": second_repeat + "你到了可以先试用那个试用装。",
+                        },
+                    ]
+                },
+            },
+            24.0,
+            segment_seconds=8,
+        )
+
+        self.assertNotIn(first_repeat, plan[1]["script"])
+        self.assertNotIn(second_repeat, plan[2]["script"])
+        combined = "\n".join(item["script"] for item in plan)
+        self.assertEqual(combined.count(first_repeat), 1)
+        self.assertEqual(combined.count(second_repeat), 1)
+        self.assertTrue(plan[1]["script"].startswith("你们看它上脸"))
+        self.assertTrue(plan[2]["script"].startswith("你到了可以先试用"))
 
     def test_replacement_prompt_preserves_product_and_model_identity(self):
         segment = {"index": 1, "start": 0.0, "end": 8.0}
@@ -1483,9 +1819,74 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(payload["storyboards"][0]["sequence"], 1)
         self.assertEqual(payload["storyboards"][0]["audio_prompt"]["dialogue"]["text"], "第一句台词")
         self.assertEqual(payload["storyboards"][1]["description"], "镜头二")
-        self.assertIn("对白：第一句台词", payload["source_text"])
+        self.assertNotIn("第一句台词", payload["source_text"])
         self.assertNotIn("口播：", payload["source_text"])
         self.assertIn("镜头二", payload["source_text"])
+
+    def test_comic_project_markdown_motion_prompt_keeps_only_motion_contract(self):
+        segment = {
+            "index": 1,
+            "script": "我想过它会卖69、59、49啊",
+            "continuationPrompt": "与同组相邻片段保持连续；这是连续口播的第1/2段。",
+            "prompt": (
+                "生成一段新的电商短视频片段：匹配原视频的节奏。\n"
+                "片段：0.0-15.0 秒，竖屏 9:16，720p。\n"
+                "当前片段原片镜头约束：\n"
+                "- ### 0s-4.8s - **画面：** 主观自拍近景，年轻女性对镜头口播，手持粉底液/开始展示产品。 "
+                "- **人物：** 年轻女性，长发，浅绿色吊带，彩色美甲。 "
+                "- **产品：** 粉底液。 "
+                "- **动作：** 挤出粉底液到面颊，进入产品讲解。 "
+                "- **字幕：** “它居然能便宜到这个价格” "
+                "- **道具：** 粉底液瓶。 "
+                "- **场景：** 卧室/衣帽间，浅色衣柜背景。 "
+                "- **节奏：** 开场钩子快切，直接抛价格反差。\n"
+                "- ### 4.8s-9s - **画面：** 近景展示粉底液瓶身，镜头聚焦产品。 "
+                "- **人物：** 女主继续对镜头讲解。 "
+                "- **产品：** 粉底液瓶。 "
+                "- **动作：** 举瓶强调“自用三四年”。 "
+                "- **道具：** 粉底液瓶盖、瓶身。 "
+                "- **场景：** 原卧室背景。 "
+                "- **节奏：** 稳定口播，建立信任。\n"
+                "- ### 9s-14s - **画面：** 促销海报全屏贴图，信息密集。 "
+                "- **人物：** 人物被信息覆盖。 "
+                "- **产品：** 粉底液。 "
+                "- **动作：** 讲活动价格、赠品、运费险。 "
+                "- **道具：** 海报贴图、活动信息卡。 "
+                "- **场景：** 原场景。 "
+                "- **节奏：** 强信息点输出，形成价格锚定。\n"
+                "以下是按要求精简提取的逐帧关键信息：\n"
+                "| 帧数 | 动作 | 产品/道具 | 字幕 | 镜头节奏 |\n"
+                "| 图1 | 将粉底液挤在左侧面颊。 | 粉底液 | 它居然能便宜到这个价格 | 近景，平视，静态。 |"
+            ),
+        }
+        job = {
+            "segments": [segment],
+            "personReferenceUrls": ["https://cdn.example/person.png"],
+            "productImageUrls": ["https://cdn.example/prop.png"],
+        }
+
+        payload = self.client._comic_project_create_payload(job)
+        source_text = payload["source_text"]
+        video_payload = self.client._comic_storyboard_video_payload(job, segment)
+
+        for text in (source_text, video_payload["prompt"]):
+            self.assertIn("镜头1：", text)
+            self.assertIn("人物=项目库角色“主角”", text)
+            self.assertIn("道具=项目库道具“道具1”", text)
+            self.assertIn("动作=挤出上传道具到面颊", text)
+            self.assertIn("节奏=开场钩子快切", text)
+            self.assertNotIn("粉底液", text)
+            self.assertNotIn("自用三四年", text)
+            self.assertNotIn("活动价格", text)
+            self.assertNotIn("运费险", text)
+            self.assertNotIn("信息点", text)
+            self.assertNotIn("价格锚定", text)
+            self.assertNotIn("浅绿色吊带", text)
+            self.assertNotIn("卧室", text)
+            self.assertNotIn("口播", text)
+            self.assertNotIn("它居然能便宜到这个价格", text)
+            self.assertNotIn("| 帧数 |", text)
+            self.assertNotIn(segment["script"], text)
 
     def test_comic_script_planner_keeps_15_second_boundary(self):
         segment = {
@@ -1508,6 +1909,9 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(planned[0]["speechDurationSec"], 15.0)
         self.assertEqual(planned[0]["videoDurationSec"], 15)
         self.assertEqual(planned[0]["index"], 1)
+        self.assertEqual(planned[0]["sourceStart"], 0.0)
+        self.assertEqual(planned[0]["sourceEnd"], 8.0)
+        self.assertEqual(planned[0]["sourceDuration"], 8.0)
 
     def test_comic_script_planner_recursively_splits_without_text_loss(self):
         script = "".join(
@@ -1538,8 +1942,11 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             planned[pos]["start"] == planned[pos - 1]["end"]
             for pos in range(1, len(planned))
         ))
+        self.assertTrue(all(item["sourceStart"] == 24.0 for item in planned))
+        self.assertTrue(all(item["sourceEnd"] == 32.0 for item in planned))
+        self.assertTrue(all(item["sourceDuration"] == 8.0 for item in planned))
 
-    def test_comic_duration_payload_uses_upper_supported_slot_and_auto_has_no_tts(self):
+    def test_comic_duration_payload_uses_upper_supported_slot_and_auto_script_uses_tts(self):
         job = {
             "audioMode": "auto",
             "model": "doubao-seedance-2-0-260128",
@@ -1563,6 +1970,27 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertEqual(video_payload["video_duration"], 15)
         self.assertEqual(video_payload["audio_mode"], "auto")
         self.assertNotIn("audio_prompt", video_payload)
+
+    def test_hybrid_plan_assigns_each_transcript_segment_by_midpoint_once(self):
+        analysis = {
+            "meta": {"duration": 20.03},
+            "transcript": {"segments": [
+                {"startSec": 0.0, "endSec": 3.0, "text": "第一句"},
+                {"startSec": 7.5, "endSec": 8.5, "text": "跨边界但属于第二段"},
+                {"startSec": 15.0, "endSec": 19.0, "text": "最后一句"},
+            ]},
+        }
+
+        planned = self.client._build_hybrid_replacement_plan(
+            analysis, duration=20.03, segment_seconds=8
+        )
+
+        self.assertEqual(len(planned), 3)
+        self.assertEqual(planned[0]["script"], "第一句")
+        self.assertEqual(planned[1]["script"], "跨边界但属于第二段")
+        self.assertEqual(planned[2]["script"], "最后一句")
+        combined = " ".join(item["script"] for item in planned)
+        self.assertEqual(combined.count("跨边界但属于第二段"), 1)
 
     def test_comic_project_source_text_strips_lk888_prompt_boilerplate(self):
         job = {
@@ -1590,13 +2018,69 @@ class VideoReplacementHelpersTest(unittest.TestCase):
 
         self.assertIn("分镜 1", source_text)
         self.assertIn("画面：主播站在展厅车旁", source_text)
-        self.assertIn("对白：用户最终确认的台词", source_text)
+        self.assertNotIn("用户最终确认的台词", source_text)
         self.assertNotIn("源视频锁定", source_text)
         self.assertNotIn("原片拆解证据", source_text)
         self.assertNotIn("字幕安全", source_text)
         self.assertNotIn("人物参考图只用于", source_text)
         self.assertNotIn("生成一段新的电商短视频片段", source_text)
         self.assertNotIn("用户最终确认的台词", update_payload["description"])
+        self.assertEqual(update_payload["dialogue"], "用户最终确认的台词")
+
+    def test_comic_project_remote_prompt_uses_uploaded_assets_and_motion_only(self):
+        segment = {
+            "index": 1,
+            "script": "这段最终口播稿只用于配音，不能写进画面提示词。",
+            "prompt": "\n".join([
+                "当前片段原片镜头约束：",
+                "- 时间=0:00-0:04；画面=汽车展厅中景，男销售站在白色凯美瑞旁；人物=男销售，白衬衫黑领带；产品=白色丰田凯美瑞；动作=人物从正面中景转身，右手扶车门并指向车头；道具=汽车宣传牌；场景=广汽丰田4S店展厅；节奏=开场直接亮相，动作连贯流畅",
+                "- 时间=0:04-0:08；画面=继续展示凯美瑞车头；人物=男销售；动作=向前一步并自然抬手展示重点位置；场景=汽车展厅；节奏=稳定讲解",
+                "原片拆解证据：这是一条凯美瑞汽车销售视频，字幕 OCR 有优惠政策。",
+            ]),
+        }
+        job = {
+            "audioMode": "tts",
+            "voiceId": "xiaosi",
+            "personReferenceUrls": ["https://cdn.example/person.png"],
+            "sceneImageUrl": "https://cdn.example/scene.png",
+            "productImageUrls": ["https://cdn.example/prop.png"],
+            "segments": [segment],
+        }
+
+        project_payload = self.client._comic_project_create_payload(job)
+        image_payload = self.client._comic_storyboard_image_payload(job, segment)
+        video_payload = self.client._comic_storyboard_video_payload(job, segment)
+        generated_texts = [
+            project_payload["source_text"],
+            project_payload["storyboards"][0]["description"],
+            image_payload["description"],
+            image_payload["prompt"],
+            video_payload["prompt"],
+            video_payload["keyframes_video_prompt"],
+        ]
+
+        for text in generated_texts:
+            self.assertIn("项目库角色“主角”", text)
+            self.assertIn("项目库场景“场景1”", text)
+            self.assertIn("项目库道具“道具1”", text)
+            self.assertIn("动作连贯流畅", text)
+            self.assertIn("向前一步并自然抬手", text)
+            self.assertNotIn("这段最终口播稿", text)
+            self.assertNotIn("男销售", text)
+            self.assertNotIn("白衬衫", text)
+            self.assertNotIn("黑领带", text)
+            self.assertNotIn("凯美瑞", text)
+            self.assertNotIn("丰田", text)
+            self.assertNotIn("汽车展厅", text)
+            self.assertNotIn("4S店", text)
+            self.assertNotIn("汽车宣传牌", text)
+            self.assertNotIn("OCR", text)
+            self.assertNotIn("原片拆解证据", text)
+
+        self.assertEqual(
+            project_payload["storyboards"][0]["audio_prompt"]["dialogue"]["text"],
+            "这段最终口播稿只用于配音，不能写进画面提示词。",
+        )
 
     def test_comic_uploaded_assets_replace_old_entities_in_visual_contract(self):
         segment = {
@@ -1632,7 +2116,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         for forbidden in ("凯美瑞", "汽车展厅", "男销售", "OCR", "| 帧数"):
             self.assertNotIn(forbidden, visual)
         self.assertIn("开场直接怼脸", visual)
-        self.assertIn("稳定讲解", visual)
+        self.assertIn("稳定展示", visual)
 
         self.assertEqual(
             image_payload["character_reference_images"],
@@ -1646,19 +2130,18 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             image_payload["prop_reference_images"],
             ["https://cdn.example/uploaded-prop.png"],
         )
-        for payload in (video_payload,):
-            self.assertEqual(
-                payload["character_reference_images"],
-                [],
-            )
-            self.assertEqual(
-                payload["scene_reference_images"],
-                [],
-            )
-            self.assertEqual(
-                payload["prop_reference_images"],
-                [],
-            )
+        self.assertEqual(
+            video_payload["character_reference_images"],
+            ["https://cdn.example/uploaded-person.png"],
+        )
+        self.assertEqual(
+            video_payload["scene_reference_images"],
+            ["https://cdn.example/uploaded-scene.png"],
+        )
+        self.assertEqual(
+            video_payload["prop_reference_images"],
+            ["https://cdn.example/uploaded-prop.png"],
+        )
         self.assertEqual(video_payload["reference_image_urls"][:2], [
             "https://cdn.example/start.png",
             "https://cdn.example/end.png",
@@ -2079,6 +2562,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-recover-storyboard",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
@@ -2153,6 +2638,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-dual-frame",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
@@ -2189,7 +2676,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         ])
         self.assertEqual(segment["status"], "done")
 
-    def test_comic_project_charges_each_generated_keyframe_before_submit(self):
+    def test_comic_project_charges_only_after_remote_actual_cost_is_returned(self):
         events = []
 
         class BillingComicAdapter:
@@ -2213,7 +2700,23 @@ class VideoReplacementHelpersTest(unittest.TestCase):
                 return {"data": {"task_id": "video-task"}}
 
             def wait_task_result(self, task_id, **_kwargs):
-                return "https://example.test/%s.mp4" % task_id, {"data": {"status": "completed"}}
+                if task_id in ("start-task", "end-task"):
+                    return "https://example.test/%s.png" % task_id, {
+                        "data": {
+                            "status": "completed",
+                            "task_id": task_id,
+                            "actual_model": "gpt-image-2",
+                            "cost": 0.0371,
+                        }
+                    }
+                return "https://example.test/%s.mp4" % task_id, {
+                    "data": {
+                        "status": "completed",
+                        "task_id": task_id,
+                        "actual_model": "vidu/viduq3-mix_reference2video",
+                        "cost": 10.898,
+                    }
+                }
 
             def download_media(self, _url, path, **_kwargs):
                 Path(path).write_bytes(b"video")
@@ -2226,6 +2729,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-frame-billing",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
@@ -2235,14 +2740,15 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
         })()
 
-        def fake_try_charge(capability, ref):
-            charged.append((capability, ref))
-            events.append("charge:%s" % ref.rsplit(":", 1)[-1])
-            return True, None
+        def fake_charge(amount, **kwargs):
+            charged.append((amount, dict(kwargs)))
+            events.append("charge:%s" % kwargs.get("capability"))
+            return True, 88.0, None
 
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(self.client, "ComicProjectAdapter", BillingComicAdapter), \
-                mock.patch.object(self.client, "try_charge", side_effect=fake_try_charge), \
+                mock.patch.object(self.client, "try_charge", return_value=(True, None)) as precharge_call, \
+                mock.patch.object(self.client, "charge", side_effect=fake_charge), \
                 mock.patch.object(self.client, "refund_cap") as refund_cap, \
                 mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
                 mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
@@ -2250,16 +2756,23 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             job["outDir"] = td
             page._run_comic_project_segments(job, [segment], lambda *_args, **_kwargs: None)
 
-        self.assertEqual([item[0] for item in charged], [
+        precharge_call.assert_not_called()
+        self.assertEqual([item[1]["capability"] for item in charged], [
             "comic_keyframe_image",
             "comic_keyframe_image",
+            "comic_video_generation",
         ])
-        self.assertTrue(charged[0][1].endswith(":frame:1"))
-        self.assertTrue(charged[1][1].endswith(":frame:2"))
-        self.assertEqual(events[:3], ["charge:1", "charge:2", "submit:image"])
+        self.assertEqual([item[0] for item in charged], [0.0371, 0.0371, 10.898])
+        self.assertTrue(charged[0][1]["ref"].endswith(":frame:1:actual"))
+        self.assertTrue(charged[1][1]["ref"].endswith(":frame:2:actual"))
+        self.assertEqual(events[:3], [
+            "submit:image",
+            "charge:comic_keyframe_image",
+            "charge:comic_keyframe_image",
+        ])
         refund_cap.assert_not_called()
 
-    def test_comic_project_refunds_charged_keyframes_when_frame_wait_fails(self):
+    def test_comic_project_frame_failure_keeps_only_lk888_successful_frame_charge(self):
         class FailingFrameComicAdapter:
             def get_project(self, project_id):
                 return {"data": {"id": project_id, "storyboards": [{"id": 201, "sequence": 1}]}}
@@ -2276,7 +2789,14 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             def wait_task_result(self, task_id, **_kwargs):
                 if task_id == "end-task":
                     raise RuntimeError("end frame failed")
-                return "https://example.test/start.png", {"data": {"status": "completed"}}
+                return "https://example.test/start.png", {
+                    "data": {
+                        "status": "completed",
+                        "task_id": "start-task",
+                        "actual_model": "gpt-image-2",
+                        "cost": 0.0371,
+                    }
+                }
 
         page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
         page._cancel_requested = False
@@ -2285,28 +2805,26 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-frame-refund",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
         }
         charged = []
-        refunded = []
         bridge = type("BridgeStub", (), {
             "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
         })()
 
-        def fake_try_charge(capability, ref):
-            charged.append((capability, ref))
-            return True, None
-
-        def fake_refund_cap(capability, ref):
-            refunded.append((capability, ref))
-            return True, None
+        def fake_charge(amount, **kwargs):
+            charged.append((amount, dict(kwargs)))
+            return True, 88.0, None
 
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(self.client, "ComicProjectAdapter", FailingFrameComicAdapter), \
-                mock.patch.object(self.client, "try_charge", side_effect=fake_try_charge), \
-                mock.patch.object(self.client, "refund_cap", side_effect=fake_refund_cap), \
+                mock.patch.object(self.client, "try_charge", return_value=(True, None)) as precharge_call, \
+                mock.patch.object(self.client, "charge", side_effect=fake_charge), \
+                mock.patch.object(self.client, "refund_cap") as refund_cap, \
                 mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
                 mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
                 mock.patch.object(self.client, "BRIDGE", bridge):
@@ -2314,8 +2832,11 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             page._run_comic_project_segments(job, [segment], lambda *_args, **_kwargs: None)
 
         self.assertEqual(segment["status"], "failed")
-        self.assertEqual([item[0] for item in charged], ["comic_keyframe_image", "comic_keyframe_image"])
-        self.assertEqual(refunded, list(reversed(charged)))
+        precharge_call.assert_not_called()
+        self.assertEqual(len(charged), 1)
+        self.assertEqual(charged[0][0], 0.0371)
+        self.assertEqual(charged[0][1]["capability"], "comic_keyframe_image")
+        refund_cap.assert_not_called()
 
     def test_comic_project_reuses_saved_remote_video_without_resubmit(self):
         class ExistingVideoComicAdapter:
@@ -2421,6 +2942,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-remote-auto-duration",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
@@ -2496,6 +3019,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "id": "job-comic-duplicate-billing",
             "replacementMode": "comic_project",
             "comicProjectId": 88,
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "outDir": "/tmp",
             "segments": [segment],
@@ -2629,6 +3154,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         job = {
             "id": "job-comic-async-storyboard",
             "replacementMode": "comic_project",
+            "comicVideoModel": "viduq3-cankaosheng",
+            "model": "viduq3-cankaosheng",
             "sourceVideoPath": "source.mp4",
             "segments": [segment],
         }
@@ -2724,6 +3251,8 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertIn('"principal_video_edit"', src)
         self.assertIn('self.b_virtual = QtWidgets.QPushButton("生成虚拟模特")', src)
         self.assertIn('self.b_retry_failed = QtWidgets.QPushButton("重试失败片段")', src)
+        self.assertIn('"audioValidation": "disabled"', src)
+        self.assertNotIn('"audioCheck": _replacement_audio_qc', src)
 
     def test_video_replacement_uses_one_person_reference_in_every_mode(self):
         src = CLIENT.read_text(encoding="utf-8")
@@ -2747,82 +3276,64 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertIn('start_button.setText("开始替换生成")', src)
         self.assertIn("QtWidgets.QMessageBox.warning(self, \"替换生成\"", src)
         self.assertIn("QtWidgets.QMessageBox.information(self, \"替换生成\"", src)
-    def test_comic_video_billing_quote_matches_remote_per_second_and_per_call_rules(self):
-        prices = [
-            {
-                "model_id": "viduq3-cankaosheng",
-                "model_type": "video",
-                "billing_method": "per_second",
-                "price_per_call": 0.4541,
-            },
-            {
-                "model_id": "pixverse-v6-shouweizhen",
-                "model_type": "video",
-                "billing_method": "per_call",
-                "price_per_call": 0.2639,
-            },
-        ]
-
-        per_second = self.client._comic_video_billing_quote(
-            prices, "viduq3-cankaosheng", 8
-        )
-        per_call = self.client._comic_video_billing_quote(
-            prices, "pixverse-v6-shouweizhen", 12
-        )
-
-        self.assertEqual(per_second["billingMethod"], "per_second")
-        self.assertAlmostEqual(per_second["amount"], 3.6328, places=6)
-        self.assertEqual(per_call["billingMethod"], "per_call")
-        self.assertAlmostEqual(per_call["amount"], 0.2639, places=6)
-
-    def test_comic_video_charge_records_project_segment_model_and_duration(self):
-        adapter = mock.Mock()
-        adapter.model_prices.return_value = {
-            "success": True,
-            "prices": [{
-                "model_id": "doubao-seedance-2-0-260128",
-                "model_type": "video",
-                "provider": "ark",
-                "billing_method": "per_second",
-                "price_per_call": 0.35,
-            }],
-        }
-        job = {
-            "id": "job-billing",
-            "comicProjectId": 303,
-            "comicVideoModel": "doubao-seedance-2-0-260128",
-        }
-        segment = {"index": 2, "videoDurationSec": 8}
-
-        with mock.patch.object(self.client, "try_charge", return_value=(True, None)) as charge_call:
-            billing = self.client._charge_comic_video_attempt(adapter, job, segment)
-
-        self.assertAlmostEqual(billing["amount"], 2.8, places=6)
-        kwargs = charge_call.call_args.kwargs
-        self.assertAlmostEqual(kwargs["amount"], 2.8, places=6)
-        self.assertIn("项目303", kwargs["reason"])
-        self.assertIn("片段2", kwargs["reason"])
-        self.assertIn("doubao-seedance-2-0-260128", kwargs["reason"])
-        self.assertIn("8秒", kwargs["reason"])
-        self.assertIn("comic_video:job-billing:project:303:seg:2", billing["ref"])
-
-    def test_comic_video_failed_attempt_refunds_same_charge_reference(self):
-        billing = {
-            "capability": "comic_video_generation",
-            "ref": "comic_video:job:project:8:seg:1:attempt",
-            "amount": 2.8,
+    def test_comic_video_actual_billing_uses_only_remote_cost_and_model(self):
+        job = {"id": "job-actual", "comicProjectId": 9}
+        segment = {"index": 4, "comicVideoTaskId": "task-vidu-q3"}
+        payload = {
+            "data": {
+                "status": "completed",
+                "task_id": "task-vidu-q3",
+                "requested_model": "doubao-seedance-2-0-260128",
+                "actual_model": "vidu/viduq3-mix_reference2video",
+                "cost": 10.898,
+            }
         }
 
-        with mock.patch.object(self.client, "refund_cap", return_value=(True, None)) as refund_call:
-            self.client._refund_comic_video_attempt(billing)
+        with mock.patch.object(self.client, "refund_cap", return_value=(True, None)) as refund_call, \
+                mock.patch.object(self.client, "charge", return_value=(True, 88.0, None)) as charge_call:
+            settled = self.client._settle_comic_video_actual_billing({}, job, segment, payload)
 
-        refund_call.assert_called_once_with(
-            "comic_video_generation",
-            "comic_video:job:project:8:seg:1:attempt",
-            amount=2.8,
-        )
+        refund_call.assert_not_called()
+        charge_call.assert_called_once()
+        self.assertEqual(charge_call.call_args.args[0], 10.898)
+        self.assertEqual(charge_call.call_args.kwargs["capability"], "comic_video_generation")
+        self.assertTrue(charge_call.call_args.kwargs["allow_arrears"])
+        self.assertEqual(charge_call.call_args.kwargs["meta"]["modelId"], "viduq3-cankaosheng")
+        self.assertIn("viduq3-cankaosheng", charge_call.call_args.kwargs["reason"])
+        self.assertNotIn("prechargedAmount", charge_call.call_args.kwargs["meta"])
+        self.assertNotIn("prechargedRef", charge_call.call_args.kwargs["meta"])
+        self.assertEqual(settled["model"], "viduq3-cankaosheng")
+        self.assertEqual(settled["actualAmount"], 10.898)
+        self.assertNotIn("prechargedAmount", settled)
+        self.assertNotIn("prechargedRef", settled)
 
-    def test_comic_video_regeneration_submit_failure_refunds_local_charge(self):
+    def test_comic_keyframe_actual_billing_uses_remote_cost_and_model(self):
+        self.assertTrue(hasattr(self.client, "_settle_comic_keyframe_actual_billing"))
+        job = {"id": "job-frame-actual", "comicProjectId": 9}
+        segment = {"index": 4}
+        payload = {
+            "data": {
+                "status": "completed",
+                "task_id": "task-image-1",
+                "actual_model": "gpt-image-2",
+                "cost": 0.0371,
+            }
+        }
+
+        with mock.patch.object(self.client, "charge", return_value=(True, 88.0, None)) as charge_call:
+            settled = self.client._settle_comic_keyframe_actual_billing(
+                job, segment, payload, frame_index=1, task_id="task-image-1"
+            )
+
+        charge_call.assert_called_once()
+        self.assertEqual(charge_call.call_args.args[0], 0.0371)
+        self.assertEqual(charge_call.call_args.kwargs["meta"]["modelId"], "gpt-image-2")
+        self.assertEqual(charge_call.call_args.kwargs["meta"]["actualAmount"], 0.0371)
+        self.assertTrue(charge_call.call_args.kwargs["allow_arrears"])
+        self.assertEqual(settled["status"], "settled")
+        self.assertEqual(settled["model"], "gpt-image-2")
+
+    def test_comic_video_regeneration_submit_failure_never_charges_or_refunds(self):
         class SubmitFailureAdapter:
             def model_prices(self):
                 return {
@@ -2864,14 +3375,14 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         with mock.patch.object(self.client, "ComicProjectAdapter", return_value=SubmitFailureAdapter()), \
                 mock.patch.object(self.client, "_save_replacement_job"), \
                 mock.patch.object(self.client, "_replacement_error_id", return_value="err-submit"), \
+                mock.patch.object(self.client, "try_charge", return_value=(True, None)) as precharge_call, \
                 mock.patch.object(self.client, "refund_cap", return_value=(True, None)) as refund_call, \
                 mock.patch.object(self.client, "BRIDGE", bridge):
             page._run_comic_video_regeneration(job, [segment])
 
         self.assertEqual(segment["status"], "failed")
-        refund_call.assert_called_once()
-        self.assertEqual(refund_call.call_args.args[0], "comic_video_generation")
-        self.assertAlmostEqual(refund_call.call_args.kwargs["amount"], 0.2639, places=6)
+        precharge_call.assert_not_called()
+        refund_call.assert_not_called()
 
     def test_comic_video_download_recovery_never_charges_again(self):
         page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
@@ -2900,7 +3411,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             candidate.update({"status": "done", "videoPath": "recovered.mp4"})
 
         with mock.patch.object(self.client, "ComicProjectAdapter", return_value=mock.Mock()), \
-                mock.patch.object(self.client, "_charge_comic_video_attempt") as charge_call, \
+                mock.patch.object(self.client, "charge") as charge_call, \
                 mock.patch.object(
                     self.client, "_comic_download_segment_video", side_effect=complete_download
                 ), \
@@ -2922,7 +3433,7 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertIn("片段 2", detail)
         self.assertNotIn("1712345678_abcd1234", detail)
 
-    def test_comic_auto_audio_final_gate_uses_playable_media_audio_and_manual_approval(self):
+    def test_comic_auto_final_gate_ignores_audio_and_legacy_qc_status(self):
         job = {"replacementMode": "comic_project", "audioMode": "auto"}
         segment = {
             "index": 1,
@@ -2935,13 +3446,13 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         with mock.patch.object(
             self.client,
             "_comic_local_video_validation",
-            return_value={"ok": True, "hasAudio": True},
+            return_value={"ok": True},
         ):
             self.assertTrue(
                 self.client._replacement_segments_ready_for_final([segment], job=job)
             )
 
-    def test_comic_auto_audio_final_gate_still_blocks_missing_audio_or_invalid_video(self):
+    def test_comic_auto_final_gate_allows_missing_audio_but_blocks_invalid_video(self):
         job = {"replacementMode": "comic_project", "audioMode": "auto"}
         segment = {
             "index": 1,
@@ -2949,18 +3460,22 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "videoPath": "segment.mp4",
             "reviewApproved": True,
         }
-        for validation in (
-            {"ok": True, "hasAudio": False},
-            {"ok": False, "hasAudio": True, "code": "media_decode_failed"},
+        with mock.patch.object(
+            self.client,
+            "_comic_local_video_validation",
+            return_value={"ok": True, "hasAudio": False},
         ):
-            with self.subTest(validation=validation), mock.patch.object(
-                self.client,
-                "_comic_local_video_validation",
-                return_value=validation,
-            ):
-                self.assertFalse(
-                    self.client._replacement_segments_ready_for_final([segment], job=job)
-                )
+            self.assertTrue(
+                self.client._replacement_segments_ready_for_final([segment], job=job)
+            )
+        with mock.patch.object(
+            self.client,
+            "_comic_local_video_validation",
+            return_value={"ok": False, "hasAudio": True, "code": "media_decode_failed"},
+        ):
+            self.assertFalse(
+                self.client._replacement_segments_ready_for_final([segment], job=job)
+            )
 
 
 if __name__ == "__main__":

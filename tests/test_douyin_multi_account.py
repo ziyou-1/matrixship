@@ -64,6 +64,11 @@ class DouyinMultiAccountTest(unittest.TestCase):
         self.assertTrue(Path(first["profileDir"], "marker.txt").exists())
         self.assertTrue(Path(second["profileDir"], "marker.txt").exists())
 
+    def test_current_accounts_hides_default_douyin_placeholder_without_login_cookie(self):
+        accounts = [a for a in self.api.current_accounts() if a.get("platform") == "douyin"]
+
+        self.assertEqual(accounts, [])
+
     def test_load_douyin_accounts_recovers_from_profile_dirs_when_registry_json_is_corrupt(self):
         account_dir = self.data_dir / "douyin_accounts" / "douyin-recovered123456"
         profile_dir = account_dir / "dy_profile"
@@ -108,6 +113,28 @@ class DouyinMultiAccountTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(observed["cookie"].get("sessionid"), "selected-session")
         self.assertEqual(os.path.abspath(observed["profile"]), os.path.abspath(account["profileDir"]))
+
+    def test_douyin_publish_blocks_multi_file_material_before_browser_upload(self):
+        profile = self.data_dir / "selected_profile"
+        profile.mkdir()
+        account = self.api.register_douyin_account(
+            "sessionid=selected-session; uid_tt=uid-selected; LOGIN_STATUS=1",
+            profile_dir=str(profile),
+            source="test",
+        )
+        material = {"id": "mat-1", "title": "title", "type": "video"}
+        video_paths = [str(self.data_dir / "first.mp4"), str(self.data_dir / "second.mp4")]
+        for video_path in video_paths:
+            Path(video_path).write_bytes(b"fake")
+
+        with mock.patch.object(self.api, "material_files", return_value=video_paths), \
+                mock.patch.object(self.api, "publish_to_douyin") as publish_mock:
+            result = self.api.run_publish(material, account["id"], dry_run=False, platform="douyin")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "douyin_single_video_required")
+        self.assertEqual(result["fileCount"], 2)
+        publish_mock.assert_not_called()
 
     def test_require_auth_rejects_ms_token_only_cookie(self):
         auth = self.api.DouyinAuth()
@@ -157,20 +184,31 @@ class DouyinMultiAccountTest(unittest.TestCase):
         self.assertNotIn("cookie", json.dumps(result))
 
     def test_remove_xhs_account_hides_saved_profile_until_relogin(self):
+        materials_dir = self.data_dir / "materials"
+        materials_dir.mkdir(parents=True, exist_ok=True)
+        material_marker = materials_dir / "keep.txt"
+        material_marker.write_text("keep", encoding="utf-8")
+        xhs_profile = self.data_dir / "xhs_profile"
+        xhs_profile.mkdir(parents=True, exist_ok=True)
+        profile_marker = xhs_profile / "profile.txt"
+        profile_marker.write_text("profile", encoding="utf-8")
+        cookie_file = xhs_profile / "Default" / "Network" / "Cookies"
+        cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        cookie_file.write_text("cookie-db", encoding="utf-8")
         self.api._save_json(str(self.data_dir / "xhs_auth_state.json"), {
             "loggedIn": True,
             "cookieCount": 2,
-            "profileDir": str(self.data_dir / "xhs_profile"),
+            "profileDir": str(xhs_profile),
         })
-        before = [a for a in self.api.current_accounts() if a.get("platform") == "xhs"]
-        self.assertEqual(len(before), 1)
 
         result = self.api.remove_local_account("xhs-self")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["id"], "xhs-self")
-        after = [a for a in self.api.current_accounts() if a.get("platform") == "xhs"]
-        self.assertEqual(after, [])
+        self.assertFalse((self.data_dir / "xhs_auth_state.json").exists())
+        self.assertFalse(cookie_file.exists())
+        self.assertTrue(profile_marker.exists())
+        self.assertTrue(material_marker.exists())
 
     def test_remove_default_douyin_account_hides_saved_auth_until_relogin(self):
         self.api.save_cookie_cache(

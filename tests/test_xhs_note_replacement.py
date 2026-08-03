@@ -237,6 +237,11 @@ class XhsNoteSaveDraftApiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.api = importlib.import_module("backend.api_server")
 
+    def setUp(self):
+        self.xhs_enabled_patch = mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"})
+        self.xhs_enabled_patch.start()
+        self.addCleanup(self.xhs_enabled_patch.stop)
+
     def make_handler(self, payload):
         body = json.dumps(payload).encode("utf-8")
         handler = object.__new__(self.api.Handler)
@@ -548,7 +553,7 @@ class XhsNotePublishGateTests(unittest.TestCase):
         }
         self.assertNotEqual(note.image_note_publish_blocker(material), "xhs_note_publish_not_supported")
 class XhsNoteNativeUiTests(unittest.TestCase):
-    def test_native_client_has_note_replacement_nav_and_asset_template_filter(self):
+    def test_native_client_keeps_note_page_but_gates_nav_and_asset_filter(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "backend", "matrix_native_client.py"), encoding="utf-8") as f:
             src = f.read()
@@ -557,8 +562,16 @@ class XhsNoteNativeUiTests(unittest.TestCase):
         self.assertNotIn("generate_missing_images", src)
         self.assertNotIn("ai_fill", src)
         self.assertNotIn("AI \u5360\u4f4d\u56fe", src)
-        self.assertIn('(" 图文同款", lambda: XhsNoteReplacementPage())'.replace("\u0001", "🧩"), src)
-        self.assertIn('("", "图文模板"'.replace("\u0001", "note_template"), src)
+        self.assertIn("XHS_NOTE_NAV_ITEM", src)
+        self.assertIn("if xhs_enabled() else []", src)
+        asset_start = src.index("class AssetLibraryPage")
+        asset_end = src.index("class ", asset_start + 1)
+        asset_block = src[asset_start:asset_end]
+        filter_start = asset_block.index("# 本地过滤")
+        filter_end = asset_block.index("self.scroll = QtWidgets.QScrollArea()", filter_start)
+        filter_block = asset_block[filter_start:filter_end]
+        self.assertNotIn('"note_template"', filter_block)
+        self.assertIn('elif kind == "note_template":', asset_block)
 class XhsNoteFourImageSmokeTests(unittest.TestCase):
     def test_four_image_note_replacement_smoke_builds_draft_and_blocks_publish(self):
         self.assertTrue(hasattr(note, "smoke_four_image_replacement"), "missing four-image smoke helper")
@@ -574,12 +587,12 @@ class XhsNoteFourImageSmokeTests(unittest.TestCase):
 
 
 class XhsNoteNativeFlowTests(unittest.TestCase):
-    def test_native_collection_has_one_click_note_replace_and_timeout_errors(self):
+    def test_native_collection_hides_note_replace_button_but_keeps_handoff_handler(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "backend", "matrix_native_client.py"), encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("self.b_note_replace", src)
-        self.assertIn("def note_replace", src)
+        self.assertNotIn("b_note_replace", src)
+        self.assertNotIn("def note_replace", src)
         self.assertIn('"c_note_replace"', src)
         self.assertIn('elif tag == "c_note_replace"', src)
         self.assertIn('BRIDGE.payload.emit("goto_nav", "🧩 图文同款")', src)
@@ -598,6 +611,17 @@ class XhsNoteNativeDisplayTests(unittest.TestCase):
 
     def setUp(self):
         self.client.BRIDGE = self.client.Bridge()
+
+    def test_content_page_hides_note_replacement_button(self):
+        page = self.client.ContentPage()
+        try:
+            button_texts = [
+                button.text()
+                for button in page.findChildren(self.client.QtWidgets.QPushButton)
+            ]
+            self.assertNotIn("\u56fe\u6587\u540c\u6b3e", button_texts)
+        finally:
+            page.deleteLater()
 
     def test_source_image_entries_filter_media_and_resolve_central_urls(self):
         self.assertTrue(

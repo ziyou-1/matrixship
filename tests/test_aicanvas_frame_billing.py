@@ -31,9 +31,15 @@ def load_server():
             "_comic_storyboard_image_generation_workflow_mode",
             "_comic_storyboard_batch_payload",
             "_expand_comic_storyboard_image_submit_kwargs",
+            "_apply_strict_storyboard_references_to_params",
+            "_merge_reference_urls_into_params",
+            "_dedupe_urls",
+            "_apimart_publicize_ref",
+            "_extend_url_list",
             "_set_url_at_index",
             "_apply_comic_frame_task_overlays",
             "_normalize_comic_storyboard_audio_mode",
+            "_is_matrix_video_replacement_project",
             "_find_recent_duplicate_storyboard_video_task",
             "_apply_comic_storyboard_audio_mode_metadata",
             "_comic_storyboard_video_params_with_dialogue_audio",
@@ -43,6 +49,8 @@ def load_server():
             "_handle_ai_comic_api_request",
             "_handle_comic_frame_generate_image_proxy",
             "_handle_platform_api_proxy",
+            "_is_file_descriptor_exhaustion_error",
+            "_platform_json_request",
         }
     ]
     module = types.ModuleType("aicanvas_frame_billing_under_test")
@@ -55,17 +63,20 @@ def load_server():
         "urllib": urllib,
         "secrets": secrets,
         "PLATFORM_API_PROXY_TIMEOUT_SECONDS": 120,
+        "AICANVAS_INTERNAL_SECRET": "",
         "COMIC_DEFAULT_IMAGE_MODEL": "gpt-image-2-guan",
         "_normalize_comic_storyboard_workflow_mode": lambda value: value,
         "_comic_storyboard_workflow_mode": lambda project, payload: "",
         "_first_non_empty": lambda *values: next((value for value in values if value), ""),
         "_comic_proxy_task_id_from_response": lambda value: value.get("data", {}).get("task_id", ""),
         "LOCAL_COMIC_TASKS": {},
+        "LOCAL_COMIC_PROJECTS": {},
         "_json_log": lambda *args, **kwargs: None,
         "_comic_frame_image_model_error": lambda *args, **kwargs: "",
         "_comic_storyboard_frame_prompt_source": lambda *args, **kwargs: "",
         "_comic_storyboard_image_frame_prompts": lambda *args, **kwargs: [],
         "_platform_api_proxy_headers": lambda *args, **kwargs: {},
+        "_platform_url": lambda path: "https://platform.example" + path,
         "_register_comic_frame_task_overlay": lambda *args, **kwargs: None,
         "_load_comic_frame_task_overlays": lambda: {},
         "_send_json_with_headers": lambda *args, **kwargs: None,
@@ -105,6 +116,7 @@ def load_storyboard_video_submit_server():
     tree = ast.parse(source, filename=str(SERVER))
     names = {
         "_normalize_comic_storyboard_audio_mode",
+        "_is_matrix_video_replacement_project",
         "_comic_storyboard_video_params_with_dialogue_audio",
         "_find_recent_duplicate_storyboard_video_task",
         "_submit_ai_comic_media_task",
@@ -165,6 +177,7 @@ def load_storyboard_video_submit_server():
         "_register_ai_comic_failed_task": lambda **kwargs: {},
         "_refund_canvas_model_call": lambda *args, **kwargs: None,
         "_comic_real_person_video_fallback_models": lambda: [],
+        "_is_minimax_h3_comic_model": lambda model: str(model or "").strip().lower() == "minimax-h3",
         "_ark_storyboard_video_fallback_reason": lambda error: "",
         "_save_local_comic_state": lambda: None,
         "_json_log": lambda *args, **kwargs: None,
@@ -203,6 +216,32 @@ class ComicFrameBillingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = load_server()
+
+    def test_platform_json_request_reports_file_descriptor_exhaustion_without_python_detail(self):
+        logs = []
+
+        with mock.patch.object(
+                self.server.urllib.request,
+                "urlopen",
+                side_effect=urllib.error.URLError(OSError(24, "Too many open files")),
+        ), mock.patch.object(
+                self.server,
+                "_json_log",
+                side_effect=lambda event, **fields: logs.append({"event": event, **fields}),
+        ):
+            status, data = self.server._platform_json_request(
+                "/aicanvas/billing/charge",
+                {"request_id": "req-1"},
+                timeout=30,
+            )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data["code"], "platform_fd_exhausted")
+        self.assertIn("远程平台连接资源耗尽", data["detail"])
+        self.assertNotIn("URLError", data["detail"])
+        self.assertNotIn("Too many open files", data["detail"])
+        self.assertEqual(logs[-1]["event"], "platform_json_request_fd_exhausted")
+        self.assertEqual(logs[-1]["path"], "/aicanvas/billing/charge")
 
     def _storyboard_video_params(self, params):
         return self.server._comic_storyboard_video_params_with_dialogue_audio(
@@ -247,6 +286,28 @@ class ComicFrameBillingTest(unittest.TestCase):
         self.assertNotIn("secret-token", serialized_logs)
         self.assertNotIn("authorization", serialized_logs)
         self.assertNotIn("headers", serialized_logs)
+
+    def test_matrix_replacement_auto_with_dialogue_prepares_storyboard_tts(self):
+        project = {"id": 293, "source_mode": "matrix_video_replacement"}
+        storyboard = {"id": 293001, "dialogue": "用户最终口播稿"}
+
+        with mock.patch.object(
+                self.server,
+                "_submit_comic_storyboard_dialogue_audio",
+                return_value="https://media.example/matrix-tts.mp3",
+        ) as submit_tts:
+            result = self.server._comic_storyboard_video_params_with_dialogue_audio(
+                {"audio_mode": "auto", "duration": 5},
+                project,
+                storyboard,
+                "digital-human-video-model",
+                293,
+                293001,
+            )
+
+        submit_tts.assert_called_once()
+        self.assertNotIn("audio_mode", result)
+        self.assertEqual(result["sound_file"], "https://media.example/matrix-tts.mp3")
 
     def test_explicit_tts_prepares_storyboard_audio_and_removes_internal_audio_mode(self):
         with mock.patch.object(
@@ -418,6 +479,15 @@ class ComicFrameBillingTest(unittest.TestCase):
                                 self.assertIsNot(result, existing)
                                 self.assertEqual(len(module.gateway_calls), 1)
 
+    def test_storyboard_video_submission_persists_project_source_mode(self):
+        module = load_storyboard_video_submit_server()
+        module.LOCAL_COMIC_PROJECTS[293] = {"id": 293, "source_mode": "matrix_video_replacement"}
+
+        result = self._submit_storyboard_video(module, "generate_video", "auto")
+
+        self.assertEqual(result.get("project_source_mode"), "matrix_video_replacement")
+        self.assertEqual(result.get("projectSourceMode"), "matrix_video_replacement")
+
     def test_tts_duplicate_short_circuit_and_submission_share_storyboard_video_family(self):
         task_types = ("generate_video", "batch_storyboard_videos")
         module = load_storyboard_video_submit_server()
@@ -557,6 +627,79 @@ class ComicFrameBillingTest(unittest.TestCase):
             "video_duration_seconds": 5.0,
             "audio_duration_seconds": 6.0,
             "final_duration_seconds": 6.0,
+        }
+
+        with mock.patch.object(
+                self.server,
+                "_comic_remux_video_with_storyboard_tts",
+                return_value=mix_result,
+        ) as remux:
+            result = self.server._finalize_ai_comic_fallback_video_audio(task)
+
+        self.assertIs(result, task)
+        remux.assert_called_once_with(provider_url, tts_url, 293, 293001)
+        self.assertEqual(task["result_url"], mix_result["url"])
+        self.assertEqual(task["audio_source"], "storyboard_tts")
+        self.assertEqual(task["audio_mix_status"], "completed")
+
+    def test_matrix_primary_video_replaces_provider_audio_with_storyboard_tts(self):
+        provider_url = "https://private.example/provider-result.mp4"
+        tts_url = "https://private.example/tts.mp3"
+        self.server.LOCAL_COMIC_PROJECTS = {
+            293: {"id": 293, "source_mode": "matrix_video_replacement"}
+        }
+        task = {
+            "id": "ai-matrix-primary-tts",
+            "status": "completed",
+            "state": "completed",
+            "project_id": 293,
+            "target_id": 293001,
+            "target_type": "storyboard",
+            "task_type": "generate_video",
+            "result_url": provider_url,
+            "params": {"audio_mode": "tts", "sound_file": tts_url},
+        }
+        mix_result = {
+            "url": "/data/uploads/comic-drama/matrix-remuxed.mp4",
+            "video_duration_seconds": 5.0,
+            "audio_duration_seconds": 5.0,
+            "final_duration_seconds": 5.0,
+        }
+
+        with mock.patch.object(
+                self.server,
+                "_comic_remux_video_with_storyboard_tts",
+                return_value=mix_result,
+        ) as remux:
+            result = self.server._finalize_ai_comic_fallback_video_audio(task)
+
+        self.assertIs(result, task)
+        remux.assert_called_once_with(provider_url, tts_url, 293, 293001)
+        self.assertEqual(task["result_url"], mix_result["url"])
+        self.assertEqual(task["audio_source"], "storyboard_tts")
+        self.assertEqual(task["audio_mix_status"], "completed")
+
+    def test_matrix_primary_video_uses_task_source_mode_after_project_cache_miss(self):
+        provider_url = "https://private.example/provider-result.mp4"
+        tts_url = "https://private.example/tts.mp3"
+        self.server.LOCAL_COMIC_PROJECTS = {}
+        task = {
+            "id": "ai-matrix-primary-cache-miss",
+            "status": "completed",
+            "state": "completed",
+            "project_id": 293,
+            "target_id": 293001,
+            "target_type": "storyboard",
+            "task_type": "generate_video",
+            "result_url": provider_url,
+            "project_source_mode": "matrix_video_replacement",
+            "params": {"audio_mode": "tts", "sound_file": tts_url},
+        }
+        mix_result = {
+            "url": "/data/uploads/comic-drama/matrix-cache-miss-remuxed.mp4",
+            "video_duration_seconds": 5.0,
+            "audio_duration_seconds": 5.0,
+            "final_duration_seconds": 5.0,
         }
 
         with mock.patch.object(
@@ -1117,6 +1260,43 @@ class ComicFrameBillingTest(unittest.TestCase):
         self.assertNotIn("frameIndex", batch_payload)
         self.assertNotIn("frame_index", batch_payload)
         self.assertEqual([item["_task_metadata"]["frame_index"] for item in expanded], [1, 2])
+
+    def test_colored_pencil_keyframes_do_not_inject_realistic_reference_lock(self):
+        payload = {
+            "workflow_mode": "keyframes",
+            "frame_style_mode": "colored_pencil",
+        }
+        base_kwargs = {
+            "params": {
+                "_strict_typed_reference_bundle": {
+                    "all": ["https://media.example/person.png"],
+                    "characters": ["https://media.example/person.png"],
+                },
+            },
+            "task_name": "batch",
+            "_frame_prompt_source": "shot",
+        }
+
+        with mock.patch.object(
+            self.server,
+            "_comic_storyboard_image_frame_prompts",
+            return_value=["彩铅手绘风格首帧", "彩铅手绘风格尾帧"],
+        ), mock.patch.object(
+            self.server,
+            "_apply_strict_storyboard_references_to_params",
+            side_effect=lambda params, _refs: dict(params),
+        ):
+            expanded = self.server._expand_comic_storyboard_image_submit_kwargs(
+                base_kwargs, "keyframes", payload, "shot",
+            )
+
+        self.assertEqual(len(expanded), 2)
+        for item in expanded:
+            prompt = item["prompt"]
+            self.assertIn("彩铅", prompt)
+            self.assertIn("手绘", prompt)
+            self.assertNotIn("禁止动漫", prompt)
+            self.assertNotIn("禁止手绘", prompt)
 
     def test_local_overlay_updates_only_selected_keyframe(self):
         payload = {

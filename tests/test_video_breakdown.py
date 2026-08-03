@@ -75,6 +75,12 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
             self.client._localize_download_task_error("'s_v_web_id'"),
         )
 
+    def test_douyin_detail_network_error_is_localized_for_breakdown_status(self):
+        self.assertEqual(
+            self.client._video_breakdown_download_failure_text("douyin_detail_network_failed"),
+            "抖音连接暂时失败，请重试",
+        )
+
     def test_video_breakdown_markdown_contains_source_and_report(self):
         md = self.client._video_breakdown_markdown({
             "platform": "douyin",
@@ -111,7 +117,7 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
             "report": "## 内容总览\n测试",
         })
 
-        self.assertIn("仅分析前 10 分钟", md)
+        self.assertIn("VIDEO_TRANSCRIBE_MAX_SEC", md)
         self.assertIn("60.0-120.0s", md)
         self.assertIn("remote_timeout", md)
         self.assertIn("err-test-1", md)
@@ -864,6 +870,72 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
                 self.client.BRIDGE = previous_bridge
                 del app
 
+    def test_retry_transcription_falls_back_to_full_video_when_failed_ranges_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            video = Path(td) / "video.mp4"
+            video.write_bytes(b"fake-video")
+            previous_bridge = self.client.BRIDGE
+            app = self.client.QtWidgets.QApplication.instance()
+            if app is None:
+                app = self.client.QtWidgets.QApplication([])
+            self.client.BRIDGE = self.client.Bridge()
+            page = self.client.VideoBreakdownPage()
+            page._video_path = str(video)
+            page._analysis = {
+                "validation": {"ok": True},
+                "meta": {"duration": 120.0},
+                "transcript": {
+                    "status": "failed",
+                    "retryCount": 0,
+                    "chunks": [],
+                    "failedRanges": [],
+                    "errors": [],
+                },
+            }
+            page._markdown = "# previous"
+            retried = {
+                "status": "ok",
+                "chunks": [{
+                    "start": 0.0,
+                    "end": 120.0,
+                    "language": "zh-CN",
+                    "segments": [{"startSec": 0.0, "endSec": 1.0, "text": "整段重试成功"}],
+                }],
+                "failedRanges": [],
+                "errors": [],
+                "duration": 120.0,
+                "truncated": False,
+            }
+            try:
+                with mock.patch.object(page.status, "setText", wraps=page.status.setText) as set_text, \
+                        mock.patch.object(self.client, "run_bg", side_effect=lambda fn: fn()), \
+                        mock.patch.object(self.client, "data_dir", return_value=td), \
+                        mock.patch.object(self.client, "write_video_breakdown_job_owner",
+                                          create=True) as write_owner, \
+                        mock.patch.object(self.client, "_transcribe_breakdown_audio",
+                                          return_value=retried) as transcribe_audio, \
+                        mock.patch.object(self.client, "_generate_video_breakdown_report",
+                                          return_value=("## updated", "分析完成")):
+                    page.retry_transcription()
+
+                args, kwargs = transcribe_audio.call_args
+                self.assertEqual(kwargs.get("only_ranges"), [{
+                    "start": 0.0,
+                    "end": 120.0,
+                    "code": "transcription_retry_full",
+                    "errorId": "",
+                }])
+                self.assertTrue(any("整段视频重试" in str(call.args[0]) for call in set_text.call_args_list))
+                self.assertFalse(page._busy)
+                self.assertTrue(write_owner.called)
+                self.assertEqual(page._analysis["transcript"]["status"], "ok")
+                self.assertIn("整段重试成功", page._analysis["transcript"]["text"])
+            finally:
+                if page is not None:
+                    page.deleteLater()
+                self.client.BRIDGE = previous_bridge
+                del app
+
     def test_theme_toggle_waits_for_video_breakdown_done_signal(self):
         previous_bridge = self.client.BRIDGE
         page = None
@@ -883,6 +955,7 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
             window._page_widgets = [page]
             window._toast = mock.Mock()
             window._rebuild_pages = mock.Mock()
+            window._refresh_theme_ui = mock.Mock()
             window._theme_btn = self.client.QtWidgets.QPushButton()
             window.conn_name = self.client.QtWidgets.QLabel()
             window._logout_btn = None
@@ -894,6 +967,7 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
                     apply_theme.assert_not_called()
                     save_theme.assert_not_called()
                     window._rebuild_pages.assert_not_called()
+                    window._refresh_theme_ui.assert_not_called()
                     window._toast.assert_called_once()
 
                     self.client.BRIDGE.payload.emit("video_breakdown_done", {
@@ -912,7 +986,8 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
 
                     apply_theme.assert_called_once()
                     save_theme.assert_called_once()
-                    window._rebuild_pages.assert_called_once()
+                    window._rebuild_pages.assert_not_called()
+                    window._refresh_theme_ui.assert_called_once()
             finally:
                 if page is not None:
                     page.deleteLater()
@@ -997,6 +1072,48 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         self.assertIn('self.b_break = QtWidgets.QPushButton("分解")', src)
         self.assertIn('("🔬 分解视频", lambda: VideoBreakdownPage())', src)
         self.assertIn('"video_breakdown_start"', src)
+
+    def test_breakdown_page_accepts_direct_video_link_for_download_and_analysis(self):
+        src = CLIENT.read_text(encoding="utf-8")
+
+        self.assertIn('self.link_input.setPlaceholderText("粘贴抖音/小红书视频链接，下载后自动分解")', src)
+        self.assertIn('self.b_link_breakdown = QtWidgets.QPushButton("下载并分解")', src)
+        self.assertIn("def start_link_breakdown(self):", src)
+        self.assertIn('submit_local_task(pf + ".download"', src)
+        self.assertIn('"video_breakdown_link_download"', src)
+        self.assertIn('"video_breakdown_start"', src)
+
+    def test_breakdown_link_platform_detection_respects_xhs_feature_gate(self):
+        self.assertEqual(
+            self.client._video_breakdown_platform_from_url("https://www.douyin.com/video/123"),
+            "douyin",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"MATRIX_XHS_ENABLED": "0"},
+            clear=False,
+        ):
+            self.assertEqual(
+                self.client._video_breakdown_platform_from_url(
+                    "https://www.xiaohongshu.com/explore/abc"
+                ),
+                "douyin",
+            )
+        with mock.patch.dict(
+            os.environ,
+            {"MATRIX_XHS_ENABLED": "1"},
+            clear=False,
+        ):
+            self.assertEqual(
+                self.client._video_breakdown_platform_from_url(
+                    "https://www.xiaohongshu.com/explore/abc"
+                ),
+                "xhs",
+            )
+            self.assertEqual(
+                self.client._video_breakdown_platform_from_url("https://xhslink.com/a/b"),
+                "xhs",
+            )
 
     def test_native_ui_has_transcription_retry_and_temp_cleanup(self):
         src = CLIENT.read_text(encoding="utf-8")

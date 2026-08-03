@@ -34,6 +34,9 @@ class ApiDownloadContractTest(unittest.TestCase):
             cls.adapters = importlib.import_module("platform_adapters")
 
     def setUp(self):
+        self.xhs_enabled_patch = mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"})
+        self.xhs_enabled_patch.start()
+        self.addCleanup(self.xhs_enabled_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self._old_xhs_safety_state = getattr(self.api, "XHS_SAFETY_STATE_JSON", "")
@@ -82,9 +85,56 @@ class ApiDownloadContractTest(unittest.TestCase):
                 self.assertEqual(payload["stage"], "library")
                 self.assertEqual(payload["error"], "library_import_failed")
 
+    def test_douyin_detail_network_failure_returns_stable_redacted_contract(self):
+        handler = self.make_api_handler({
+            "url": "https://www.douyin.com/video/7664121621367812857"
+        })
+        cause = requests.ConnectionError(
+            "HTTPSConnectionPool(host='www.douyin.com'): "
+            "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+            "?a_bogus=signed-secret&msToken=token-secret Cookie=cookie-secret"
+        )
+        error = self.api.DouyinDetailNetworkError(
+            "7664121621367812857", attempts=4, cause=cause
+        )
+        logged = []
+
+        with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "require_auth", return_value=object()), \
+                mock.patch.object(
+                    self.api, "download_douyin_work_with_refresh", side_effect=error
+                ), mock.patch.object(
+                    self.api.logger, "error", side_effect=lambda raw: logged.append(raw)
+                ), mock.patch.object(
+                    self.api, "json_response",
+                    side_effect=lambda _handler, payload, status=200: (status, payload),
+                ):
+            status, payload = handler.do_POST()
+
+        self.assertEqual(status, 502)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "douyin_detail_network_failed")
+        self.assertEqual(payload["stage"], "detail")
+        self.assertTrue(str(payload.get("errorId") or "").startswith("err-"))
+        self.assertNotIn("trace", payload)
+        self.assertEqual(len(logged), 1)
+        log_payload = json.loads(logged[0])
+        self.assertEqual(log_payload["event"], "douyin_detail_network_failed")
+        self.assertEqual(log_payload["attempt"], 4)
+        self.assertEqual(log_payload["maxAttempts"], 4)
+        self.assertEqual(log_payload["causeType"], "ConnectionError")
+        self.assertEqual(log_payload["host"], "www.douyin.com")
+        self.assertNotIn("7664121621367812857", logged[0])
+        self.assertNotIn("signed-secret", logged[0])
+        self.assertNotIn("token-secret", logged[0])
+        self.assertNotIn("cookie-secret", logged[0])
+
     def test_xhs_download_returns_library_failure_when_material_has_no_id(self):
         handler = self.make_api_handler(
-            {"url": "https://www.xiaohongshu.com/explore/note-1"},
+            {
+                "url": "https://www.xiaohongshu.com/explore/note-1",
+                "accountCollectionConfirmed": True,
+            },
             path="/api/xhs/download",
         )
         upstream = {
@@ -93,6 +143,7 @@ class ApiDownloadContractTest(unittest.TestCase):
             "note": {"title": "note"},
         }
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
                 mock.patch.object(self.api, "xhs_download_note", return_value=upstream), \
                 mock.patch.object(self.api, "import_download_to_library", return_value=None), \
                 mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
@@ -103,7 +154,7 @@ class ApiDownloadContractTest(unittest.TestCase):
         self.assertEqual(payload.get("stage"), "library")
         self.assertEqual(payload.get("error"), "library_import_failed")
 
-    def test_xhs_search_defaults_to_guest_mode(self):
+    def test_xhs_search_default_requires_account_confirmation(self):
         handler = self.make_api_handler(
             {"query": "\u4e30\u7530", "num": 3},
             path="/api/xhs/search",
@@ -114,9 +165,33 @@ class ApiDownloadContractTest(unittest.TestCase):
                 mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
             status, payload = handler.do_POST()
 
+        self.assertEqual(status, 429)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "xhs_account_collection_unconfirmed")
+        search.assert_not_called()
+
+    def test_xhs_confirmed_search_uses_account_mode(self):
+        handler = self.make_api_handler(
+            {
+                "query": "\u4e30\u7530",
+                "num": 3,
+                "accountCollectionConfirmed": True,
+            },
+            path="/api/xhs/search",
+        )
+
+        with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
+                mock.patch.object(self.api, "xhs_safety_preflight", return_value={"ok": True, "safety": {}}) as preflight, \
+                mock.patch.object(self.api, "xhs_safety_record", return_value={"ok": True, "safety": {}}), \
+                mock.patch.object(self.api, "xhs_search_notes", return_value={"ok": True, "items": []}) as search, \
+                mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
+            status, payload = handler.do_POST()
+
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
-        self.assertTrue(search.call_args.kwargs["guest_mode"])
+        preflight.assert_called()
+        self.assertFalse(search.call_args.kwargs["guest_mode"])
 
     def test_xhs_account_collection_requires_explicit_confirmation(self):
         handler = self.make_api_handler(
@@ -145,6 +220,7 @@ class ApiDownloadContractTest(unittest.TestCase):
         )
 
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
                 mock.patch.object(self.api, "xhs_safety_preflight", return_value={"ok": True, "safety": {}}) as preflight, \
                 mock.patch.object(self.api, "xhs_safety_record", return_value={"ok": True, "safety": {}}), \
                 mock.patch.object(self.api, "xhs_search_notes", return_value={"ok": True, "items": []}) as search, \
@@ -182,6 +258,7 @@ class ApiDownloadContractTest(unittest.TestCase):
         )
 
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
                 mock.patch.object(self.api, "xhs_safety_preflight", return_value={"ok": True, "safety": {}}) as preflight, \
                 mock.patch.object(self.api, "xhs_safety_record", return_value={"ok": True, "safety": {}}), \
                 mock.patch.object(self.api, "xhs_get_comments", return_value={"ok": True, "items": []}) as comments, \
@@ -220,6 +297,7 @@ class ApiDownloadContractTest(unittest.TestCase):
         )
 
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
                 mock.patch.object(self.api, "xhs_safety_preflight", return_value={"ok": True, "safety": {}}) as preflight, \
                 mock.patch.object(self.api, "xhs_safety_record", return_value={"ok": True, "safety": {}}), \
                 mock.patch.object(self.api, "discover_leads_by_keyword_platform", return_value={"ok": True, "leads": []}) as discover, \
@@ -308,7 +386,10 @@ class ApiDownloadContractTest(unittest.TestCase):
 
     def test_xhs_download_import_receives_note_copy_and_source_path(self):
         handler = self.make_api_handler(
-            {"url": "https://www.xiaohongshu.com/explore/note-copy"},
+            {
+                "url": "https://www.xiaohongshu.com/explore/note-copy",
+                "accountCollectionConfirmed": True,
+            },
             path="/api/xhs/download",
         )
         upstream = {
@@ -335,6 +416,7 @@ class ApiDownloadContractTest(unittest.TestCase):
             }
 
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
                 mock.patch.object(self.api, "xhs_download_note", return_value=dict(upstream)), \
                 mock.patch.object(self.api, "import_download_to_library", side_effect=import_download), \
                 mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
@@ -807,6 +889,619 @@ class ApiDownloadContractTest(unittest.TestCase):
         self.assertEqual(handler.status, 200)
         self.assertNotIn(secret.encode("utf-8"), handler.wfile.getvalue())
         self.assertIn(b"[REDACTED]", handler.wfile.getvalue())
+
+    def test_lk888_chat_completion_without_cost_does_not_charge_usage_tokens(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/chat/completions"
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 2000},
+                }).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        body = json.dumps({"model": "gpt-5.4-xhigh", "messages": []}).encode("utf-8")
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(handler, "POST", urlparse("/lk888/v1/chat/completions"))
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["ledger"], [])
+        self.assertEqual(state["users"][0]["balance"], 1.0)
+        pending = state.get("lk888_pending_charges") or {}
+        self.assertEqual(len(pending), 1)
+        item = next(iter(pending.values()))
+        self.assertEqual(item["userId"], "u1")
+        self.assertEqual(item["model"], "gpt-5.4-xhigh")
+        self.assertEqual(item["status"], "awaiting_lk888_usage_cost")
+        self.assertEqual(item["source"], "chat_usage_reconcile")
+
+    def test_lk888_generate_content_audio_transcription_registers_pending_actual_charge(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1beta/models/gemini-3.1-pro-preview:generateContent"
+
+            def read(self):
+                return json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Matrix-Billing-Scenario": "video_breakdown",
+                    "X-Matrix-Billing-Stage": "audio_transcription",
+                    "X-Matrix-Billing-Detail": "audio chunk 0.000-60.000",
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        body = json.dumps({"contents": []}).encode("utf-8")
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(
+                handler,
+                "POST",
+                urlparse("/lk888/v1beta/models/gemini-3.1-pro-preview:generateContent"),
+            )
+
+        self.assertEqual(handler.status, 200)
+        pending = state.get("lk888_pending_charges") or {}
+        self.assertEqual(len(pending), 1)
+        item = next(iter(pending.values()))
+        self.assertEqual(item["userId"], "u1")
+        self.assertEqual(item["model"], "gemini-3.1-pro-preview")
+        self.assertEqual(item["source"], "chat_usage_reconcile")
+        self.assertEqual(item["billingScenario"], "video_breakdown")
+        self.assertEqual(item["billingStage"], "audio_transcription")
+        self.assertEqual(item["billingDetail"], "audio chunk 0.000-60.000")
+
+    def test_lk888_usage_detail_settles_pending_chat_cost_by_model_and_time(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/skills/usage?days=1&detail=1"
+
+            def read(self):
+                return json.dumps({
+                    "records": [
+                        {
+                            "task_id": 90109143,
+                            "model": "gpt-5.4-xhigh",
+                            "state": "success",
+                            "cost": 0.0282,
+                            "created_at": "2026-07-31T14:51:47+08:00",
+                        }
+                    ]
+                }).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self):
+                self.headers = {}
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+            "lk888_pending_charges": {
+                "chat-local-1": {
+                    "userId": "u1",
+                    "model": "gpt-5.4-xhigh",
+                    "ref": "lk888-chat:chat-local-1",
+                    "status": "awaiting_lk888_usage_cost",
+                    "source": "chat_usage_reconcile",
+                    "createdAt": 1785480706.0,
+                    "ts": 1785480706.0,
+                }
+            },
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler()
+            self.central.lk888_proxy(handler, "GET", urlparse("/lk888/v1/skills/usage?days=1&detail=1"))
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["users"][0]["balance"], 0.9718)
+        self.assertEqual(state["ledger"][0]["delta"], -0.0282)
+        self.assertEqual(state["ledger"][0]["ref"], "lk888:90109143")
+        self.assertEqual(state["ledger"][0]["taskId"], "90109143")
+        self.assertEqual(state["lk888_pending_charges"], {})
+
+    def test_lk888_usage_detail_preserves_pending_billing_context_on_ledger(self):
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+            "lk888_pending_charges": {
+                "chat-local-breakdown": {
+                    "userId": "u1",
+                    "model": "gemini-3.1-pro-preview",
+                    "ref": "lk888-chat:chat-local-breakdown",
+                    "status": "awaiting_lk888_usage_cost",
+                    "source": "chat_usage_reconcile",
+                    "billingScenario": "video_breakdown",
+                    "billingStage": "visual_analysis",
+                    "billingDetail": "key frame analysis",
+                    "createdAt": 1785480682.0,
+                    "ts": 1785480682.0,
+                }
+            },
+        }
+        payload = {"records": [{
+            "task_id": "usage-breakdown-1",
+            "model": "gemini-3.1-pro-preview",
+            "state": "success",
+            "cost": 0.0019,
+        }]}
+        with mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False):
+            settled = self.central.settle_lk888_pending_chat_usage_records(payload, user_id="u1")
+
+        self.assertEqual(settled, 1)
+        self.assertEqual(state["ledger"][0]["ref"], "lk888:usage-breakdown-1")
+        self.assertEqual(state["ledger"][0]["billingScenario"], "video_breakdown")
+        self.assertEqual(state["ledger"][0]["billingStage"], "visual_analysis")
+        self.assertEqual(state["ledger"][0]["billingDetail"], "key frame analysis")
+        self.assertEqual(state["lk888_pending_charges"], {})
+
+    def test_billing_dashboard_reconciles_pending_lk888_chat_usage_before_rows(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "records": [
+                        {
+                            "task_id": 90108406,
+                            "model": "gemini-3.1-pro-preview",
+                            "state": "success",
+                            "cost": 0.0019,
+                            "created_at": "2026-07-31T14:51:21+08:00",
+                        }
+                    ]
+                }).encode("utf-8")
+
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+            "lk888_pending_charges": {
+                "chat-local-2": {
+                    "userId": "u1",
+                    "model": "gemini-3.1-pro-preview",
+                    "ref": "lk888-chat:chat-local-2",
+                    "status": "awaiting_lk888_usage_cost",
+                    "source": "chat_usage_reconcile",
+                    "createdAt": 1785480682.0,
+                    "ts": 1785480682.0,
+                }
+            },
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            payload = self.central.billing_dashboard_payload(
+                "u1",
+                {"startDate": "2026-07-31", "endDate": "2026-07-31", "page": 1, "pageSize": 20},
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(state["users"][0]["balance"], 0.9981)
+        self.assertEqual(payload["ledger"][0]["change"], -0.0019)
+        self.assertEqual(payload["ledger"][0]["modelId"], "gemini-3.1-pro-preview")
+        self.assertEqual(state["lk888_pending_charges"], {})
+
+    def test_lk888_actual_charge_can_create_arrears_after_success(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/chat/completions"
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "ok"}}],
+                    "billing": {"amount": 0.05},
+                }).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        body = json.dumps({"model": "gpt-5.4-xhigh", "messages": []}).encode("utf-8")
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 0.01}],
+            "ledger": [],
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(handler, "POST", urlparse("/lk888/v1/chat/completions"))
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["users"][0]["balance"], -0.04)
+        self.assertTrue(state["users"][0]["arrears"])
+        self.assertEqual(state["ledger"][0]["delta"], -0.05)
+        self.assertTrue(state["ledger"][0]["arrears"])
+
+    def test_lk888_proxy_blocks_new_calls_when_user_is_already_in_arrears(self):
+        body = json.dumps({"model": "gpt-5.4-xhigh", "messages": []}).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": -0.01, "arrears": True}],
+            "ledger": [],
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open") as upstream:
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(handler, "POST", urlparse("/lk888/v1/chat/completions"))
+
+        self.assertEqual(handler.status, 402)
+        self.assertIn(b"account_in_arrears", handler.wfile.getvalue())
+        upstream.assert_not_called()
+
+    def test_lk888_async_generate_registers_pending_without_precharge(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/media/generate"
+
+            def read(self):
+                return json.dumps({"data": {"task_id": "task-actual-1"}}).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        body = json.dumps({"model": "doubao-seedance-1-5-pro-251215", "params": {}}).encode("utf-8")
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(handler, "POST", urlparse("/lk888/v1/media/generate"))
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["users"][0]["balance"], 1.0)
+        self.assertEqual(state["ledger"], [])
+        pending = state.get("lk888_pending_charges") or {}
+        self.assertEqual(pending["task-actual-1"]["userId"], "u1")
+        self.assertEqual(pending["task-actual-1"]["model"], "doubao-seedance-1-5-pro-251215")
+
+    def test_lk888_async_submit_cost_field_and_legacy_env_cannot_trigger_precharge(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/media/generate"
+
+            def read(self):
+                return json.dumps({
+                    "data": {"task_id": "task-legacy-1"},
+                    "billing": {"amount": 10.898},
+                }).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self, body):
+                self.headers = {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                }
+                self.rfile = io.BytesIO(body)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        body = json.dumps({"model": "doubao-seedance-1-5-pro-251215", "params": {}}).encode("utf-8")
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 20.0}],
+            "ledger": [],
+            "gen_charges": {},
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+            "LK888_LEGACY_PRECHARGE_ENABLED": "1",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler(body)
+            self.central.lk888_proxy(handler, "POST", urlparse("/lk888/v1/media/generate"))
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["users"][0]["balance"], 20.0)
+        self.assertEqual(state["ledger"], [])
+        self.assertNotIn("task-legacy-1", state.get("gen_charges") or {})
+        pending = state.get("lk888_pending_charges") or {}
+        self.assertEqual(pending["task-legacy-1"]["status"], "pending")
+        self.assertEqual(pending["task-legacy-1"]["model"], "doubao-seedance-1-5-pro-251215")
+
+    def test_lk888_task_status_settles_pending_with_actual_cost(self):
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return False
+
+            def geturl(self):
+                return "https://api.lk888.ai/v1/skills/task-status?task_id=task-actual-1"
+
+            def read(self):
+                return json.dumps({
+                    "data": {
+                        "task_id": "task-actual-1",
+                        "status": "success",
+                        "cost": 5.57,
+                        "requested_model": "doubao-seedance-1-5-pro-251215",
+                        "actual_model": "vidu/viduq3-mix_reference2video",
+                    }
+                }).encode("utf-8")
+
+        class FakeHandler:
+            def __init__(self):
+                self.headers = {}
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _name, _value):
+                return None
+
+            def end_headers(self):
+                return None
+
+        state = {
+            "users": [{"id": "u1", "name": "User", "status": "active", "balance": 1.0}],
+            "ledger": [],
+            "lk888_pending_charges": {
+                "task-actual-1": {
+                    "userId": "u1",
+                    "ref": "lk888:task-actual-1",
+                    "model": "doubao-seedance-1-5-pro-251215",
+                    "ts": 1,
+                }
+            },
+        }
+        with mock.patch.dict(os.environ, {
+            "LK888_API_KEY": "test-key",
+            "LK888_BASE_URL": "https://api.lk888.ai",
+        }, clear=False), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "u1"}), \
+                mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "persist", lambda: None), \
+                mock.patch.object(self.central, "maindb_on", return_value=False), \
+                mock.patch.object(self.central, "_lk888_open", return_value=FakeResponse()):
+            handler = FakeHandler()
+            self.central.lk888_proxy(
+                handler, "GET", urlparse("/lk888/v1/skills/task-status?task_id=task-actual-1")
+            )
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(state["users"][0]["balance"], -4.57)
+        self.assertTrue(state["users"][0]["arrears"])
+        self.assertEqual(state["ledger"][0]["delta"], -5.57)
+        self.assertEqual(state["ledger"][0]["ref"], "lk888:task-actual-1")
+        self.assertEqual(state["ledger"][0]["modelId"], "viduq3-cankaosheng")
+        self.assertTrue(state["ledger"][0]["arrears"])
+        self.assertEqual(state["lk888_pending_charges"], {})
 
     def test_lk888_redirect_handler_never_issues_second_request(self):
         secret = "lk888-redirect-secret"

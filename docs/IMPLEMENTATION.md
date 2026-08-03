@@ -1,23 +1,399 @@
+﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+- `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
+- `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
+- `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。
+- `backend/matrix_native_client.py#L6356-L6362`：账号矩阵登录按钮改为调用 `submit_account_login_direct(platform, mode=mode, timeout_poll=300)`，`acct_login` 返回结构保持原页面消费格式。
+- `start-visible-client.bat#L11-L12`、`start-visible-client.bat#L53-L80`：双击启动脚本显式设置 `LOCAL_API_PORT/API_PORT=9081`，并在启动客户端前用 `netstat` + `taskkill` 清理旧本地执行器监听，防止新用户会话打到上一轮 token 的残留 `9081`。
+- `tests/test_douyin_dm_auto_reply.py#L42-L112`：新增两条 RED/GREEN 回归，分别覆盖环境变量 token 从旧值切换到新值、`agent_token.txt` 从旧值刷新到新值后，`douyin.login` 转发 `/api/login/start` 必须携带最新 `X-Matrix-Agent-Token`。
+- `tests/test_auth_login_modes.py#L74-L86`、`tests/test_start_visible_client_script.py#L21-L30`：回归覆盖账号矩阵登录直连本机执行器，以及启动脚本在客户端启动前清理旧 `9081`。
+- 验证与影响：定向 token、账号矩阵登录链路、启动脚本回归和 `py_compile` 通过；本次影响本地浏览器 worker、本地客户端账号矩阵和本地启动脚本，不放宽 token 鉴权，不改变中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。退出后用 `start-visible-client.bat` 重启生效；回滚 `backend/local_browser_worker.py`、`backend/matrix_native_client.py`、`start-visible-client.bat`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-08-03 Asset Library note-template filter visibility
+- `backend/matrix_native_client.py#L27428-L27436`: `AssetLibraryPage` local filter tuple now exposes only All, Image, Video, and Collected Reference Video; `note_template` is intentionally omitted so the note-template button is hidden from the Asset Library filter row.
+- `backend/matrix_native_client.py#L27659-L27698`: note-template card handling remains in `_asset_card()`, preserving historical note-template assets with folder and delete actions while avoiding direct JSON opening.
+- `tests/test_asset_library_shared_button.py#L89-L100` and `tests/test_xhs_note_replacement.py#L551-L569`: regression coverage asserts the filter row hides `note_template` while the compatibility card branch remains.
+- Verification and operations: focused native-client tests passed; restart the local client before checking the UI. No OpenAPI, database schema, Docker, environment variable, remote service, or `migration.sql` impact. Roll back the files listed in `CHANGELOG.md` to restore the old button.
+## 2026-08-03 账户中心分解视频扣费文案与明细居中
+- `backend/matrix_native_client.py#L1074-L1091`：`_billing_video_breakdown_detail_text()` 命中 `billingScenario=video_breakdown`、`video_breakdown` 引用或原始详情里的“分解视频”后直接返回“分解视频调用”，退款流水返回“分解视频调用退款”，让分解视频页产生的模型扣费先于通用 chat/workflow 兜底被识别。
+- `backend/matrix_native_client.py#L28734-L28743`：账户中心扣费明细表头设置 `QtCore.Qt.AlignCenter`，保持现有列宽、详情列拉伸、横向滚动和 tooltip 清空策略。
+- `backend/matrix_native_client.py#L29008-L29023`：新增 `_ledger_table_item()`，加载占位行和空白占位列统一居中，并继续用 muted 颜色显示“正在读取扣费明细…”。
+- `backend/matrix_native_client.py#L29476-L29500`：真实账单流水渲染改用 `_ledger_table_item()`，时间、类型、模型、任务详情、实扣/变动、扣后余额、状态全部居中；负数红色、正数绿色和任务详情无原生 tooltip 行为保持不变。
+- `tests/test_account_billing_dashboard.py#L148-L187`、`tests/test_account_billing_dashboard.py#L472-L506`：RED/GREEN 覆盖分解视频文案、退款文案、工作流助手边界，以及表头、加载行、真实流水单元格居中。
+- 验证与影响：`tests.test_account_billing_dashboard` 30/30 通过，`py_compile` 通过。本次只影响本地客户端展示层、测试和文档；不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效，回滚 `backend/matrix_native_client.py`、`tests/test_account_billing_dashboard.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧展示。
+
+## 2026-08-03 素材发布浏览器关闭错误中文化
+- `backend/matrix_native_client.py#L18296-L18327`：新增 `_publish_error_text()`，在 `_publish_result_message()` 最终展示前识别 `set_input_files` 与 `Target page, context or browser has been closed` 组合错误，改为中文提示“发布页面或浏览器已关闭，请重新点击发布，并在上传完成前不要关闭抖音发布窗口。”
+- `tests/test_native_publish.py#L640-L656`：新增回归测试，先验证旧实现会裸露 Playwright 英文异常，再锁定中文提示和英文隐藏。
+- 影响与回滚：仅本地客户端错误展示层变更，不改变抖音发布、浏览器保留、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/TROUBLESHOOTING.md` 和本条记录即可。
+
+## 2026-08-03 临时 UI 开关与 XHS 能力元数据过滤
+- `backend/platform_features.py#L11-L51`：统一解析 `1/true/yes/on`，新增同款替换、待发布队列、数字人 TTS 上传三个默认关闭开关，并提供可逆、保序的 `xhs.*` 能力过滤。
+- `backend/local_browser_worker.py#L36-L70`、`backend/local_browser_worker.py#L204-L221`：本地浏览器执行器注册与轮询动态上报当前允许能力；关闭 XHS 时不再传出 `xhs.*`，开启并重启后使用保留的原任务映射恢复。
+- `backend/central_server.py#L79-L87`、`backend/central_server.py#L14357-L14371`、`backend/central_server.py#L14406-L14424`、`backend/central_server.py#L14639-L14669`、`backend/central_server.py#L14759-L14791`：中心服过滤允许任务、新上报、内存存储、轮询匹配和公开响应中的 XHS 能力；历史记录读取时过滤，不做数据迁移。
+- `backend/matrix_native_client.py#L44-L88`、`backend/matrix_native_client.py#L6368-L6406`：账号矩阵默认只保留抖音账号、KPI 和平台卡片；`MATRIX_XHS_ENABLED=1` 后恢复 XHS 分组。
+- `backend/matrix_native_client.py#L7850-L7853`、`backend/matrix_native_client.py#L18638-L18648`、`backend/matrix_native_client.py#L27761-L27763`：分解视频、工作流助手和资产库的同款替换跳转按钮由 `MATRIX_VIDEO_REPLACEMENT_ENABLED` 控制可见性。
+- `backend/matrix_native_client.py#L10018-L10114`：数字人口播在 TTS 上传开关关闭时隐藏上传按钮和声音预览，调整可见说明；自动 TTS、已有上传处理器和持久化字段不变。
+- `backend/matrix_native_client.py#L29651-L29659`、`backend/matrix_native_client.py#L31132-L31139`、`backend/matrix_native_client.py#L31215-L31224`、`backend/matrix_native_client.py#L31226-L31231`：待发布队列标签和导航别名按开关构建；同款替换侧栏保持可见但禁用，挂载“功能完善中，敬请期待”悬浮说明，并在事件跳转和直接导航两层阻断绕过。
+- `tests/test_ui_feature_visibility.py#L1-L213`、`tests/test_xhs_platform_disable.py#L119-L152`、`tests/test_digital_human_navigation.py#L73-L119`、`tests/test_video_breakdown.py#L1086-L1112`：RED/GREEN 覆盖默认关闭、显式恢复、账号矩阵、队列标签、侧栏状态、程序化跳转、TTS 控件、执行器/中心服能力过滤和 XHS 链接识别恢复。
+- 配置：`backend/.env.example#L90-L96`、`backend/.env.dev#L11-L14`、`backend/.env.prod#L10-L13`、`docker-compose.prod.yml#L13-L16` 均显式默认关闭四个开关；不包含密钥。
+- 文档：`docs/ARCHITECTURE.md#L19-L37`、`docs/ARCHITECTURE.md#L100-L106`、`docs/DEPLOYMENT.md#L15-L47`、`docs/TROUBLESHOOTING.md#L30-L50`、`CHANGELOG.md#L134-L155` 同步架构边界、风控实际覆盖、部署回滚和旧进程排障。
+- 验证：定向回归 170/170 通过；四个生产模块 `py_compile` 和 `git diff --check` 退出 0。Qt 离屏属性、像素和人工截图检查通过。重启后 9080/9081 均为 200，中心服 1 个在线客户端公开 `xhs.*=0`，本地抖音账号能力 3/4，评论写入因 `comment_login_required` 未就绪；本地和中心 XHS 搜索均为 404 `platform_disabled`；清理前中心状态备份 SHA-256 为 `ca1b0d85a7101048857c2de159318e13de78ae70101876239e92ee1e26a650ae`，实际移除 1 条 XHS 账号记录，重启后 dry-run 复查为 0。
+- 影响与回滚：不改 API 路径或 JSON Schema、OpenAPI、数据库、Docker 镜像结构和 `migration.sql`。UI 回滚把对应开关恢复为 `0` 并重启客户端；恢复 XHS 设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服。
+
+## 2026-08-03 小红书平台默认禁用，仅保留抖音
+- `backend/platform_features.py#L11-L111`：新增统一平台开关，`MATRIX_XHS_ENABLED` 默认关闭；`payload_uses_xhs()` 递归识别路由 payload、嵌套 `payload`、素材平台、账号和任务类型中的 XHS 标记；`platform_disabled_result()` 与 `log_platform_disabled()` 输出稳定且脱敏的 `platform_disabled` 契约。
+- `backend/platform_adapters.py#L60-L63`、`backend/platform_adapters.py#L243-L2000`：小红书登录、搜索、评论、获客、下载、评论发布和素材发布入口在浏览器导入/自动化前统一返回 `platform_disabled`。
+- `backend/api_server.py#L58-L72`、`backend/api_server.py#L1058-L1140`、`backend/api_server.py#L3852-L5558`、`backend/api_server.py#L7146-L7292`：本地执行器隐藏 XHS 账号，阻断 `/api/xhs/*`、`/api/xhs-note-replacement/*`、XHS publish/finder/outreach/login 服务入口和携带 XHS payload 的 POST 请求。
+- `backend/central_server.py#L79-L87`、`backend/central_server.py#L153-L158`、`backend/central_server.py#L5159-L5482`、`backend/central_server.py#L7224-L7260`、`backend/central_server.py#L14677-L14683`、`backend/central_server.py#L15251-L15854`：中心服过滤 XHS 账号汇总，阻断 XHS 路由、`xhs.*` 本地浏览器任务和嵌套 XHS payload，且在节点选择前返回 404。
+- `backend/matrix_native_client.py#L44-L91`、`backend/matrix_native_client.py#L6368-L6406`、`backend/matrix_native_client.py#L8267-L8282`、`backend/matrix_native_client.py#L18965-L18971`、`backend/matrix_native_client.py#L20603-L20607`、`backend/matrix_native_client.py#L29682-L29699`：本地客户端平台下拉默认只展示抖音；发布页标题、工作流发布平台、视频链接平台识别和图文同款导航均由 `xhs_enabled()` 控制恢复。
+- `scripts/disable_xhs_accounts.py#L55-L106`：新增小红书账号状态清理脚本，支持 `--dry-run`，只删除 XHS profile/auth/safety state 和 JSON 账号行，保留抖音账号与素材。
+- `tests/test_xhs_platform_disable.py#L44-L176`、`tests/test_openapi_contract.py#L159-L176`：回归覆盖默认禁用/开关恢复、脱敏错误契约、本地/中心/适配器阻断、客户端入口隐藏、嵌套 payload 检测、清理脚本和 OpenAPI 文档门禁。
+- 配置与文档：`backend/.env.example#L90-L90`、`backend/.env.dev#L11-L11`、`backend/.env.prod#L10-L10`、`docker-compose.prod.yml#L13-L13` 默认 `MATRIX_XHS_ENABLED=0`；`docs/API_REFERENCE.md#L12-L17`、`docs/ARCHITECTURE.md#L21-L23`、`docs/DEPLOYMENT.md#L15-L27`、`docs/TROUBLESHOOTING.md#L30-L35`、`docs/openapi.yaml#L399-L2096`、`CHANGELOG.md#L134-L143` 同步发布与回滚说明；`migration.sql#L18-L20` 为 no-op 迁移记录。
+- 验证：新增测试先在旧实现下失败；当前聚焦验证见最终交付记录。未执行真实小红书浏览器登录/采集/发布，因为默认禁用路径应在浏览器前被阻断。
+- 回滚：配置级设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服；代码级回滚恢复上述源文件、测试、配置和文档。数据库无结构变更，历史 XHS 清理若已执行，需要从清理前备份或账号重新登录恢复。
+
+## 2026-08-03 抖音私信转人工后继续收件并恢复全自动
+- `backend/matrix_native_client.py#L8764-L8804`：新增人工接管消息记录辅助逻辑；转人工时保留收件定时器，只清空自动发送状态并关闭复选框。结构化日志仅记录客户消息指纹、消息类型和接管原因类别。
+- `backend/matrix_native_client.py#L8868-L8912`：人工接管状态下继续处理收件结果，将后续客户消息写入当前客户会话并标记 `manual_required`，不进入 `_auto_pending_texts`，不调用 `gen_reply`。
+- `backend/matrix_native_client.py#L9082-L9110`、`#L9163-L9284`：再次勾选全自动时清除 `_auto_manual_required` 和一次性提醒状态，保留已处理指纹并从后续新消息恢复自动回复。
+- `tests/test_douyin_dm_auto_reply.py#L652-L779`：覆盖转人工关闭自动发送但保持轮询、后续消息显示且不调用 AI，以及人工处理后重新开启全自动继续回复。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_dm_auto_reply -v` 通过 84/84；本次未执行真实抖音私信发送。
+- 运行与回滚：需重启本地客户端后生效；不涉及 OpenAPI、数据库、Docker、环境变量、远程服务或 `migration.sql`。回滚本次涉及的本地客户端、专项测试和文档即可恢复旧行为。
+
+## 2026-08-03 工作流助手聊天与分析结果按账号恢复
+- `backend/matrix_native_client.py#L17238-L17344`：新增工作流助手账号级历史文件 `workflow_assistant_history.json`，保留最近 100 轮用户/助手消息，使用临时文件加 `os.replace` 原子写入；JSON 损坏、版本不支持或写入失败时只记录脱敏结构化日志，不阻断当前页面。
+- `backend/matrix_native_client.py#L18268-L18480`：`AgentChatPage` 创建时恢复历史，用户消息和助手最终回复实时保存；切换账号后按新的 `data_dir()` 清理并重载，助手回复中的 `replacementPayloads` 会恢复“按这条改造生成”卡片。采集/转写进度消息保持临时显示，不在重开页面后伪造“运行中”状态。
+- `tests/test_workflow_assistant_history.py#L1-L207`：覆盖账号路径、100 轮裁剪、原子写入、payload 保留、损坏 JSON 降级和页面恢复契约。
+- 验证：工作流助手历史与既有直接模式/拆解 helper 专项通过；需要重启本地客户端后生效。本次不涉及 OpenAPI、数据库、Docker、环境变量、远程服务或 `migration.sql`。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_workflow_assistant_history.py` 及本条文档变更；删除 `workflow_assistant_history.json` 不影响资产库视频、拆解文本和结构化分析 sidecar。
+
+## 2026-08-01 Agent LK888 online-only video menu rows
+- `backend/matrix_native_client.py#L3001-L3009`: `_lk888_grouped_models()` now accepts an optional already-loaded row list. This keeps family grouping on the same LK888 catalog snapshot that the page is currently validating.
+- `backend/matrix_native_client.py#L26306-L26335`: `ProductGenPage._pick_model()` passes `self._model_rows()` into `_lk888_grouped_models()`, so online-only LK888 video models under `Omni` or `Other` are selected from the same row set that `_sync_model_ui()` uses to decide whether the current model is still valid.
+- `tests/test_agent_video_duration.py#L751-L773`: regression coverage locks the menu source contract and verifies loaded online-only rows can still be grouped into `Omni` and `Other`.
+- Verification: focused RED/GREEN tests passed. Full `tests.test_agent_video_duration` is still blocked by existing HappyHorse canonical-rule failures unrelated to this menu data-source fix.
+- Operations and rollback: native-client-only change; restart the local client to refresh the Agent model selector. No OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` impact. Revert `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the previous grouping path.
+## 2026-08-03 账户中心范围错误文案与 INFO 成功日志
+- `backend/matrix_native_client.py#L28788-L28803`: `AccountPage._request_error()` 对 `date_range_too_large` 单独显示“查询范围最多366天，请重试”，不把 `错误编号 err-*` 渲染到扣费明细前台；内部 `json_log()` 仍记录 `errorId` 和 `code`，保留追踪能力。
+- `backend/utils/structured_log.py#L149-L162`: `json_log()` 改为只有调用方显式传入 `errorId`、日志级别为 warning/error/critical/exception，或传入异常 `exc` 时才写入 `errorId`；普通 `level="info"` 成功事件不再自动生成错误编号。
+- `tests/test_account_billing_dashboard.py#L392-L410`: 新增扣费明细范围错误展示回归，锁定 `date_range_too_large` 前台文案不含“错误编号”和具体 `err-*`。
+- `tests/test_structured_log.py#L159-L169`: 新增 INFO 成功日志回归，锁定 `billing_analytics_completed` 这类成功事件不再自动带 `errorId`。
+- 验证与回滚：新增用例先在旧实现下失败，修复后 `tests.test_account_billing_dashboard` 28/28、`tests.test_structured_log` 13/13 通过。本次不改变中心服 API 形状、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；本地客户端和使用 `json_log()` 的长驻服务重启后生效。回滚上述代码、测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-08-01 SD2.0 全能参考隐藏彩铅预处理
+- `backend/matrix_native_client.py#L12668-L12681`: `_comic_model_is_seedance()` 除 `seedance` 字符串外，也把 `kwvideo-v2-quannengcankao` 和 SD2.0 全能参考类模型识别为隐藏彩铅链路，修复 `SD 2.0 全能参考` 不触发 `gpt-image-2` 的根因。
+- `backend/matrix_native_client.py#L12690-L12752`: `_comic_storyboard_video_payload()` 优先读取 `coloredPencilStartFrameUrl`、`coloredPencilEndFrameUrl`、`coloredPencilReferenceImageUrls`，并在存在隐藏彩铅参考时清空普通 typed reference arrays，确保最终视频只拿到隐藏彩铅 URL，同时 prompt 仍追加“真人写实风格”。
+- `backend/matrix_native_client.py#L12818-L12924`: `_prepare_comic_colored_pencil_references()` 在首尾帧生成后、视频提交前调用 `gpt-image-2` 转换首帧、尾帧、人物、场景和产品参考图；前端可见的 `startFrameUrl/endFrameUrl` 不被覆盖。缺少隐藏彩铅首帧或尾帧时记录 `video_replace_colored_pencil_keyframes_missing` 结构化日志并抛中文错误，阻断视频提交。
+- `backend/matrix_native_client.py#L15322-L15325`: `_run_comic_project_segments()` 在 `comic_colored_pencil_refs` 阶段完成隐藏彩铅预处理后，才进入 `submit_storyboard_video()`。
+- `tests/test_video_replacement.py#L773-L901`: 回归覆盖 SD2.0 全能参考触发彩铅链路、视频 payload 优先隐藏彩铅 URL、`gpt-image-2` 被调用且不替换可见首尾帧，以及隐藏彩铅首尾帧缺失时阻断视频。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement.VideoReplacementHelpersTest.test_prepare_colored_pencil_references_blocks_video_when_keyframes_missing tests.test_video_replacement.VideoReplacementHelpersTest.test_sd20_all_reference_comic_payload_uses_colored_pencil_chain tests.test_video_replacement.VideoReplacementHelpersTest.test_comic_video_payload_prefers_hidden_colored_pencil_references tests.test_video_replacement.VideoReplacementHelpersTest.test_prepare_colored_pencil_references_calls_gpt_image_without_replacing_visible_frames -v` 通过；完整聚焦验证见本次最终交付记录。
+- 运行与回滚：本地客户端变更，需重启客户端；已打包 EXE 需要重新构建后用户才能生效。不涉及中心服、远程 AI Canvas、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement.py` 和本条文档/Changelog 即可恢复。
+
+## 2026-08-01 工作流助手完整视频分析与口播时间轴
+- `backend/matrix_native_client.py#L17074-L17239`：工作流助手复用视频分解链路，校验视频后从整条视频抽取关键帧、识别 OCR、按 60 秒分片转写完整音频、调用视觉模型并生成七栏深度报告；关键帧覆盖整条视频时长，音频默认不截断。
+- `backend/utils/video_transcription.py#L44-L145`：`VIDEO_TRANSCRIBE_MAX_SEC` 为空时按源视频完整时长构建分片；只有显式设置正数时才截断，并返回实际转写覆盖秒数。
+- `backend/matrix_native_client.py#L19878-L19936`：报告保存完整口播时间轴；显式上限时显示真实分析范围，不再固定写“前 10 分钟”。
+- `backend/matrix_native_client.py#L16527-L16724`、`backend/matrix_native_client.py#L20141-L20182`：资产库拆解文本与结构化 `transcript.segments` 一起进入同款替换 payload，按时间段生成可编辑 `script`，避免同款替换口播稿为空。
+- `backend/matrix_native_client.py#L17242-L17330`、`backend/matrix_native_client.py#L19274-L19355`：每条采集参考视频同时保存可读拆解文本和结构化 JSON sidecar；封面只作为视频 thumbnail/preview 元数据，不单独登记资产。
+- `tests/test_workflow_assistant_deep_breakdown.py#L27-L305`、`tests/test_workflow_assistant_helpers.py#L103-L130`：回归覆盖完整时长默认值、完整口播时间轴、显式上限范围、结构化口播到同款替换脚本和资产 sidecar。
+- 验证：工作流助手/韧性回归 34/34、音频转写回归 22/22、同款替换口播链路专项 3/3 通过；未执行真实 LK888 视频分析调用。
+- 运行与回滚：仅本地客户端、转写工具、测试和文档变更；需重启本地客户端后生效。不涉及 OpenAPI、数据库、Docker、`migration.sql` 或远程服务部署。回滚上述两个源码文件、相关测试和四级文档/变更记录即可恢复旧行为。
+
+## 2026-08-01 同款替换 Seedance 首尾帧彩铅与视频写实风格
+- `backend/matrix_native_client.py#L12548-L12572`: 新增 Seedance 风格常量和 `_comic_video_model()` / `_comic_model_is_seedance()` / `_append_prompt_rule()`，只按当前 `comicVideoModel/model` 是否包含 `seedance` 触发。
+- `backend/matrix_native_client.py#L12575-L12634`: `_comic_storyboard_video_payload()` 在 Seedance 视频模型下给最终视频 prompt 追加“真人写实风格”规则，并保持 `keyframes_video_prompt/video_prompt/prompt` 三个字段一致。
+- `backend/matrix_native_client.py#L12637-L12664`: `_comic_storyboard_image_payload()` 在 Seedance 视频模型下显式设置 `image_model/imageModel=gpt-image-2`，并把首尾帧图片 prompt 覆盖为彩铅手绘风格；图片 payload 不包含“真人写实”，避免首尾帧风格和最终视频风格互相污染。
+- `tests/test_video_replacement.py#L722-L767`: 新增两条回归，锁定 Seedance 图片 payload 的 `gpt-image-2 + 彩铅/手绘`，Seedance 视频 payload 的“真人写实”，以及非 Seedance 视频模型不追加该规则。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement.VideoReplacementHelpersTest.test_seedance_comic_image_payload_uses_gpt_image_colored_pencil_style tests.test_video_replacement.VideoReplacementHelpersTest.test_seedance_comic_video_payload_requests_realistic_style_after_colored_pencil_frames -v` 通过；邻近 prompt 回归 3/3 通过；`.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_video_replacement.py` 通过。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；无中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。重启本地客户端后生效。
+
+## 2026-08-01 同款替换 LK888 视频提示词动作来源修正
+- `backend/matrix_native_client.py#L12024-L12028`: `_comic_person_reference_priority_rule()` 将人物动作来源改为“参考分镜拆解文本和关键帧近似生成”，不再写“只沿用原片人物动作、站位、镜头关系”。
+- `backend/matrix_native_client.py#L12078-L12091`: `_comic_asset_binding_prompt()` 保持项目库人物、场景、道具最高优先级；场景文案改为“不得使用原视频场景”，动作/站位/镜头节奏改为参考拆解文本和关键帧，不再暗示 LK888 收到了原片视频。
+- `backend/matrix_native_client.py#L12258-L12289`: `_comic_reference_safe_visual_text()` 会把拆解文本中的“沿用原片/保留原片动作/原片站位”改写为分镜文本来源，避免上传女角色但原拆解写男销售时继续污染最终视频 prompt。
+- `backend/matrix_native_client.py#L20125-L20279`: 旧同款替换链路的实体替换和手动瑕疵重生提示同步降误导，动作、站位和镜头节奏只参考源视频拆解文本与抽帧结果近似生成。
+- `tests/test_video_replacement.py#L698-L721`: 新增 payload 回归，锁定 `_comic_storyboard_video_payload()` 传给 LK888 的 prompt 不含“沿用原片”“原视频只提供”“保留原片动作”“原片站位”，且 payload 仍不传 `sourceVideoUrl/source_video_url`。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement.VideoReplacementHelpersTest.test_comic_video_prompt_does_not_claim_lk888_receives_source_video_motion tests.test_video_replacement.VideoReplacementHelpersTest.test_comic_project_storyboard_payload_uses_script_and_keyframes tests.test_video_replacement.VideoReplacementHelpersTest.test_comic_project_storyboard_payload_keeps_dialogue_out_of_visual_prompt -v` 通过；`.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_video_replacement.py` 通过。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；无中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。重启本地客户端后生效。
+
+## 2026-08-01 Agent.模式生成提示词中文直传与扣费标签
+- `backend/matrix_native_client.py#L1037-L1081`: 新增 Agent.模式账单阶段映射和 `_billing_agent_mode_detail_text()`，账户中心按 `billingScenario=agent_mode` 与 `billingStage` 显示“提示词优化 / 参考图理解 / 模型兼容提示词转换”。
+- `backend/matrix_native_client.py#L18566-L18634`: 参考图理解调用 `lk888_vision()` 时携带 `agent_mode/reference_analysis`；`_prodgen_expand_prompt()` 保留为显式模型兼容转换入口，并携带 `agent_mode/prompt_translation`，但默认生成链路不再调用它。
+- `backend/matrix_native_client.py#L18636-L18680`: 显式“提示词优化”调用 `lk888_chat()` 时携带 `agent_mode/prompt_optimization`，便于账户中心和 LK888 对账流水区分这类用户主动触发的模型调用。
+- `backend/matrix_native_client.py#L18685-L18816`: 新增 `_prodgen_direct_model_prompt()`；图片和视频生成阶段用用户确认的中文 `visiblePrompt/prompt` 加参考图规则、参考图描述和风格方向组装模型 prompt，不再隐藏调用 `_prodgen_expand_prompt()`。
+- `tests/test_agent_video_duration.py#L30-L111`: 回归覆盖图片/视频生成中文直传、隐藏扩写不被调用、提示词优化/兼容转换/参考图理解的业务扣费标签。
+- `tests/test_account_billing_dashboard.py#L124-L147`: 回归覆盖账户中心三类 Agent.模式提示词阶段的扣费详情文案。
+- 验证与回滚：`tests.test_account_billing_dashboard` 26/26 通过，Agent.模式提示词阶段专项 4/4 通过，`py_compile` 通过；当前完整 `tests.test_agent_video_duration` 受同文件内另一路图片模型端点/参数规则未收口改动阻塞。无中心服接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响；重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`tests/test_account_billing_dashboard.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧生成提示词链路。
+
+## 2026-08-01 Agent.模式图片模型端点路由修复
+- `backend/matrix_native_client.py#L2339-L2342`: Agent 图片模型规则新增 `endpoint`，`gemini-3-pro-image-preview` 与 `gemini-3.1-flash-image-preview` 标记为 `media`，避免继续调用不支持它们的 `/v1/images/generations`。
+- `backend/matrix_native_client.py#L2397-L2405`: 新增 `_agent_image_endpoint()`，本地已知规则优先；未显式配置但名称匹配 `gemini-*image-preview` 时也走 `media` 兜底，其它图片模型默认走 `images`。
+- `backend/matrix_native_client.py#L18704-L18724`: `_prodgen_run_image()` 按 endpoint 路由；`media` 图片模型使用 `lk888_media_task(model, payload, ["png", "jpg", "jpeg", "webp"], tries=150)`，拿到结果 URL 后下载成本地图片；`images` 图片模型保留 `lk888_image()` 同步链路。
+- `tests/test_agent_video_duration.py#L136-L165`、`tests/test_agent_video_duration.py#L202-L207`: 回归覆盖 Gemini 图片预览模型必须走 LK888 媒体端点，以及图片规则表中 GPT 与 Gemini 的 endpoint 差异。
+- 验证与回滚：新增用例先在旧实现下失败，错误为 Gemini 图片预览模型仍调用 `lk888_image()`；修复后聚焦测试通过。当前未执行真实 LK888 调用；回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`tests/test_agent_mode_defaults.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧端点路由。
+
+## 2026-08-01 账户中心一键刷新
+- `backend/matrix_native_client.py#L26912-L26944`: `AccountPage` 标题栏新增固定 100×34 的图标刷新按钮，并初始化余额请求序号与手动刷新状态；忙碌时临时隐藏图标，确保“刷新中...”完整显示且按钮不位移。
+- `backend/matrix_native_client.py#L27293-L27374`: 新增三类账单请求的手动刷新协调、完成/取消结构化日志和页面隐藏处理；手动刷新保留日期、筛选、分组和流水页码，自动刷新不触发按钮忙碌态。
+- `backend/matrix_native_client.py#L27376-L27465`: 余额请求增加序号；统计、流水的日期校验失败也会完成本轮对应请求，避免按钮永久禁用。
+- `backend/matrix_native_client.py#L27590-L27673`: 余额、统计、流水响应接入序号过滤与手动刷新完成态；陈旧响应不覆盖新数据，单项错误继续走现有错误编号和旧数据保留逻辑。
+- `tests/test_account_billing_dashboard.py#L206-L335`: 新增刷新按钮、状态保留、成功/错误完成、陈旧响应、最新请求接管、日期校验、忙碌文案宽度和隐藏取消回归。
+- 验证：新增行为测试先在旧实现下失败；修复后账户中心 25/25、相关计费/OpenAPI/API/分析测试共 77/77 通过，`py_compile`、`git diff --check` 和 Qt offscreen 几何检查通过。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_account_billing_dashboard.py`、`CHANGELOG.md`、本条记录即可；不涉及 OpenAPI schema、数据库、Docker、环境变量或 `migration.sql`。需要重启本地客户端后生效，未自动重启。
+
+## 2026-08-01 账户中心首屏加载占位
+- `backend/matrix_native_client.py#L28361-L28375`: `AccountPage` 新增 `_set_initial_metric_loading()` 和 `_set_ledger_loading_row()`，只在当前值为空、`—` 或 `-` 时写入加载态，避免覆盖已有成功数据。
+- `backend/matrix_native_client.py#L28490-L28499`: `load_balance()` 在 analytics 余额尚未成为权威数据前把“云豆余额”设置为“加载中”，防止首屏余额卡片显示成空白/横线。
+- `backend/matrix_native_client.py#L28501-L28539`: `load_analytics()` 发起请求前把四个统计卡片写为“加载中”，并通过现有 `_set_request_state()` 显示“正在加载...”，请求结构化日志仍保留 `billing_analytics_request_started`。
+- `backend/matrix_native_client.py#L28541-L28570`: `load_ledger()` 发起请求前插入“正在读取扣费明细...”占位行，并显示“正在加载...”；真实响应、错误响应和旧数据保留仍走原有 `_on()` 分支。
+- `tests/test_account_billing_dashboard.py#L229-L237`: 新增首屏 loading 回归，mock 掉后台请求返回，锁定 `on_show()` 后余额、统计提示和扣费明细占位立即可见。
+- 验证与回滚：新增用例先在旧实现下失败，修复后 `tests.test_account_billing_dashboard` 27/27 与 `py_compile` 通过。本次只影响本地客户端 UI、测试和文档；无中心服接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`tests/test_account_billing_dashboard.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-08-01 Agent.模式图片参考图传给 LK888
+- `backend/matrix_native_client.py#L18479-L18510`: 新增 `_prodgen_upload_reference_urls()` 与 `_prodgen_image_reference_urls()`，图片模式提交前会把本地上传图逐张通过 `upload_asset_url(..., mtype="image")` 上传为 LK888 可抓取的 HTTP(S) 图片 URL；上传异常或 URL 不可远程抓取时抛出“参考图上传失败”。
+- `backend/matrix_native_client.py#L18635-L18679`: `_prodgen_run_image()` 保持“第 1 张为待修改图、第 2 张起为参考图”的顺序规则，但不再把本地文件转成 `data:image/...`，而是把上传后的公网 URL 作为 `image_urls` 传给 `lk888_image()`。
+- `backend/matrix_native_client.py#L18687-L18730`: `_prodgen_run_video()` 注释同步为当前行为：视频模式既保留视觉描述作为 prompt 辅助，也上传公网参考图 URL 给 LK888 视频模型。
+- `tests/test_agent_video_duration.py#L102-L158`: 新增图片参考图 payload 回归和上传失败阻断回归，覆盖本地图片必须先上传、传给 LK888 图片模型，以及上传失败时不得继续提交生成任务。
+- `tests/test_agent_mode_defaults.py#L363-L369`: 更新 Agent 图片模式源码契约，锁定 `_prodgen_image_reference_urls(refs, display_prompt)` 和“第 1 张/第 2 张起”规则。
+- 验证与回滚：新增用例先在旧实现下失败，修复后相关测试通过。当前只完成 mock 上传与 payload 回归，未执行真实 LK888 联调；本次无中心服接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`tests/test_agent_mode_defaults.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-07-31 分解视频 LK888 实扣对账与任务详情
+- `backend/matrix_native_client.py#L945-L999`: 新增分解视频账单阶段映射，优先按 `billingScenario=video_breakdown` 和 `billingStage` 生成“分解视频文本生成 - OCR转写 / 音频提取/口播转写 / 画面理解 / 拆解报告”的任务详情，避免通用 chat 流水误显示为“工作流助手聊天”。
+- `backend/matrix_native_client.py#L1874-L1904`、`backend/matrix_native_client.py#L2199-L2228`: `lk888_chat()` 和 `lk888_vision()` 支持发送 `X-Matrix-Billing-Scenario/Stage/Detail` 脱敏业务标签；普通调用不传标签时保持旧行为。
+- `backend/matrix_native_client.py#L7449-L7454`、`backend/matrix_native_client.py#L19304-L19319`、`backend/matrix_native_client.py#L24088-L24146`: 分解视频关键帧画面理解标记为 `visual_analysis`，拆解报告生成标记为 `report_generation`，音频分片转写标记为 `audio_transcription`。OCR 仍为本地识别，不调用 LK888、不新增扣费。
+- `backend/utils/video_transcription.py#L312-L366`: `transcribe_audio_chunks()` 新增 `billing_context`，向中心服代理请求附加业务场景、阶段和简短说明；不记录或发送 Cookie、Token、Authorization 以外的敏感内容。
+- `backend/central_server.py#L1003-L1034`、`backend/central_server.py#L1269-L1297`、`backend/central_server.py#L1420-L1443`: 中心服读取本地业务标签，识别 `/v1beta/models/<model>:generateContent` 的模型名，并把这类音频转写请求登记为 `chat_usage_reconcile` 待对账。
+- `backend/central_server.py#L1511-L1512`、`backend/central_server.py#L3792-L3793`、`backend/central_server.py#L3851-L3861`: 异步任务状态结算和 LK888 usage 明细对账时，把 pending 里的 `billingScenario/billingStage/billingDetail` 透传到账单流水；金额仍完全来自 LK888 实际 `cost`，不恢复本地 token 估算。
+- `tests/test_account_billing_dashboard.py#L124-L152`、`tests/test_video_transcription.py#L342-L383`、`tests/test_api_download_contract.py#L957-L1030`、`tests/test_api_download_contract.py#L1104-L1143`: 新增回归覆盖分解视频账单文案、音频转写请求标签、`generateContent` 待对账登记和对账后 meta 保留。
+- 验证与回滚：新增测试先在旧实现下失败，修复后 `tests.test_account_billing_dashboard` 18/18、`tests.test_video_transcription tests.test_video_breakdown` 64/64、`tests.test_api_download_contract` 42/42 通过，`py_compile` 通过。本次不新增 OpenAPI 路径、数据库字段、Docker 配置、环境变量或 `migration.sql`；重启中心服和本地客户端后生效。回滚上述代码、测试和文档即可恢复旧行为。
+
+## 2026-07-31 抖音评论今日计数与硬门禁
+- `backend/api_server.py#L3953-L3979`: 新增抖音评论风控错误码到中文 `message/userMessage` 的映射，后端 `error` 机器码继续保留，覆盖每日上限、评论冷却、风险暂停和浏览器预检安全验证。
+- `backend/api_server.py#L4022-L4182`: 抖音评论状态按 `comment_risk_state.json.accounts.<accountId>` 维护，包含当天 `day/commentCount`、最近评论时间、最小间隔冷却、每日评论上限、账号级风险暂停快照，以及命中硬门禁时的 `lastBlocked*` 记录；旧全局 `cooldownUntil` 只在 `lastRiskAccountId` 匹配当前账号时生效。
+- `backend/api_server.py#L4185-L4269`: 评论成功后递增账号级 `commentCount` 并写入 `lastCommentAt/lastAction`；平台预检或评论响应命中风险时，把 `paused/pausedUntil/pausedReason/lastRiskReason` 写入同一账号状态，并把 `lastResponse` 脱敏为安全字段和 URL/正文指纹。
+- `backend/api_server.py#L4495-L4564`: `publish_comment_to_douyin()` 在 API、自动 UI 回退、强制 `edge-ui` 和 `safeMode=false` 调用前统一执行日上限/冷却/风险暂停硬门禁；`force=true` 只跳过 DOM 预检，不绕过硬门禁。
+- `backend/api_server.py#L4626-L4700`: `run_ai_outreach()` 将当前 `accountId` 传入抖音评论链路，遇到 `daily_limit/comment_cooldown/risk_cooldown/risk_paused/preflight_blocked` 立即停止本轮，并把摘要标记为 `ok=false`、中文 `message/userMessage`。
+- `backend/api_server.py#L7504-L7521`: `/api/douyin/comment/publish` 复用同一门禁，命中上限、冷却或风险暂停时返回 HTTP 429，同时保留机器 `error` 和中文提示。
+- `backend/matrix_native_client.py#L1596-L1659`: 本地客户端任务错误展示优先使用中文 `userMessage/message`，若后端只返回机器码，则把抖音评论相关错误本地化，不再把错误码直接显示给用户。
+- `backend/matrix_native_client.py#L18960-L19024`: 风控中心读取 `comment_risk_state.json`，抖音账号“今日评论”显示当天真实 `commentCount/dailyComment`，“冷却”合并最小间隔和当前账号风险暂停剩余秒数，不展示其他抖音账号的风险冷却。
+- `backend/matrix_native_client.py#L26332-L26455`: `RiskControlPage` 抖音分支接入账号级评论状态，风险暂停时显示高风险、最近风险原因和等待/人工处理建议。
+- `tests/test_douyin_comment_cooldown.py#L64-L497`: 回归覆盖成功计数、每日上限硬拦截、`safeMode=false` 仍拦截、硬门禁写入状态文件、HTTP 429 中文响应、风险暂停写入、平台风险响应暂停、账号级风险隔离、风险响应脱敏、AI 触达停止、风控中心今日评论接入和客户端中文提示。
+- 验证与回滚：新增用例先在旧实现下失败，修复后 `tests.test_douyin_comment_cooldown` 18/18 通过；完整回归见最终交付记录。本次不新增数据库迁移、Docker、环境变量或 OpenAPI 路径；重启本地客户端和本地执行器后生效。回滚上述代码、测试和文档即可恢复旧行为。
+
+## 2026-07-31 新用户账号矩阵隐藏无效默认抖音占位
+- `backend/api_server.py#L1073-L1088`: 本地执行器 `current_accounts()` 只有在默认抖音 Cookie 真实可用时才返回 `douyin-self`，空数据目录或只有无效默认 Cookie 时不再生成离线占位账号。
+- `backend/matrix_native_client.py#L1117-L1124`: 新增 `_is_offline_default_douyin_placeholder()`，识别无在线状态、无 Cookie、无可用性的本地默认抖音占位账号。
+- `backend/matrix_native_client.py#L1149-L1150`: `merge_account_sources()` 在无中心账号匹配时过滤上述占位，防止旧本地执行器仍返回 `douyin-self` 时污染账号矩阵。
+- `tests/test_douyin_multi_account.py#L67-L70`、`tests/test_native_publish.py#L170-L197`: 回归覆盖新用户空账号目录不返回默认抖音账号，以及客户端合并时只过滤默认占位、不误删真实离线多账号。
+- 验证与回滚：新增测试先在旧实现下失败，修复后账号矩阵/抖音多账号相关 70/70 通过，`py_compile` 通过。本次无 OpenAPI、数据库、Docker、环境变量或 `migration.sql` 变更；重启本地客户端和本地执行器后生效。回滚 `backend/api_server.py`、`backend/matrix_native_client.py`、两组测试和本条文档即可恢复旧行为。
+
+## 2026-07-31 账户中心扣费明细业务化展示
+- `backend/matrix_native_client.py#L926-L942`: 新增 `_billing_ledger_model_text()`，从账单行的 `model/modelId/model_id/modelName/model_name/capability` 等字段提取模型 ID，避免账户中心模型列频繁显示 `—`。
+- `backend/matrix_native_client.py#L944-L999`: 新增 `_billing_ledger_detail_text()`，按 `ref/detail/billingSource/model` 将内部账单流水转换为用户可读任务详情；覆盖数字人、同款替换首帧图/尾帧图/视频/退款、Agent.模式视频生成和工作流助手聊天等场景，并剥离“LK888实际扣费”“漫剧视频生成，项目…”类内部描述。
+- `backend/matrix_native_client.py#L26660-L26679`: 账户中心扣费明细表格清空表格和 viewport 的原生 tooltip，关闭末列强制拉伸，改为第 3 列“任务详情”拉伸，其余列按内容自适应，使表格填满右侧可用区域。
+- `backend/matrix_native_client.py#L27250-L27270`: 渲染账单行时统一使用 `_billing_ledger_model_text()` 和 `_billing_ledger_detail_text()`，并清空任务详情单元格 `ToolTipRole`，避免鼠标悬停继续显示黑色 Qt tooltip。
+- `tests/test_account_billing_dashboard.py#L81-L113`: 新增 helper 回归，锁定模型 ID 提取和任务详情业务化映射。
+- `tests/test_account_billing_dashboard.py#L252-L263`: 新增表格列宽策略回归，锁定任务详情列 `Stretch`、其余列 `ResizeToContents`。
+- 验证与回滚：新用例先在旧实现下失败，修复后账户中心扣费明细回归和原生 tooltip 策略测试通过；本次只影响本地客户端 UI、测试和文档。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`tests/test_account_billing_dashboard.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧展示。无 OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。
+
+## 2026-07-31 企业中心 KPI 悬浮文案与两行三列布局
+- `backend/matrix_native_client.py#L3632-L3639`: 企业中心总览继续固定 6 个 KPI：客户企业、企业用户、授权账号、可用账号、在线节点、调度任务。
+- `backend/matrix_native_client.py#L3642-L3680`: 新增 `_enterprise_org_names()` 和 `enterprise_kpi_info()`，让“客户企业”悬浮显示企业名称，“企业用户”显示已加入人数，“在线节点”说明启动、心跳、退出、断网、休眠、切换企业和 45 秒心跳过期等变化时机，“调度任务”显示任务总数。
+- `backend/matrix_native_client.py#L4778-L4781`: KPI 网格改为 `i // 3, i % 3`，6 张卡片稳定展示为两行三列，并将动态悬浮说明传给 `kpi_card()`。
+- `tests/test_agent_mode_defaults.py#L246-L264`: 新增回归测试锁定企业名称、企业用户数量、在线节点变化说明、调度任务总数文案，以及 3 列布局源码契约。
+- 验证与回滚：新用例先在旧实现下因缺少 `enterprise_kpi_info()` 失败，修复后企业中心相关 54/54 通过，`py_compile` 通过。本次只影响本地客户端 UI、测试和文档；无 OpenAPI、数据库、Docker、环境变量或 `migration.sql` 变更。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py` 和本条文档即可恢复旧行为。
+
+# 2026-07-31 Agent.模式视频参考图传给 LK888
+- `backend/matrix_native_client.py#L17925-L17945`: 新增 `_prodgen_video_reference_urls()`，把 Agent 视频模式上传的本地图片逐张通过 `upload_asset_url(..., mtype="image")` 上传成远程模型可读取的 HTTP(S) 图片 URL；上传失败或返回不可抓取 URL 时抛出“参考图上传失败”，不继续提交视频任务。
+- `backend/matrix_native_client.py#L18113-L18166`: `_prodgen_run_video()` 保留原有多图视觉描述作为 prompt 辅助，但在调用 `lk888_media_task()` 前会把上传后的参考图 URL 写入 `image_urls/images/reference_images/referenceImages/reference_image_urls`，并同步写入 `params.images/params.image_urls/params.reference_images`，让 LK888 视频模型直接收到用户上传图片。
+- `tests/test_agent_video_duration.py#L130-L194`: 回归覆盖 1-4 张 Agent 视频参考图进入 LK888 视频 payload 的兼容字段，以及参考图上传失败时不提交 LK888 视频任务。
+- TDD 与验证：新增测试先在旧实现下失败，分别暴露视频 payload 缺少 `image_urls` 和上传失败不会阻断提交；修复后 `tests.test_agent_video_duration` 8/8、`tests.test_agent_mode_defaults` 31/31 通过。
+- 运行与回滚：本次只影响本地客户端 Agent.模式视频参考图提交链路，需重启本地客户端后生效；不改变中心服接口形状、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧的纯文字视频提交行为。
+
+# 2026-07-31 企业中心数据悬浮说明
+- `backend/matrix_native_client.py#L3372-L3466`: 新增 `HoverInfoPopup`、`_HoverInfoFilter` 和 `attach_hover_info()`，用自绘悬浮信息卡替代 Qt 原生 tooltip，悬浮位置会按当前屏幕可用区域做边界收敛。
+- `backend/matrix_native_client.py#L3520-L3540`: 新增 `ENTERPRISE_METRIC_HELP`，集中维护企业中心 KPI 和面板统计口径说明。
+- `backend/matrix_native_client.py#L3833-L3908`: `kpi_card()` 与 `Panel` 支持 `info` 参数，角落增加轻量 `i` 标记并绑定自定义悬浮说明。
+- `backend/matrix_native_client.py#L4633-L4657`: 企业中心 KPI 网格和“任务趋势 / 运行健康 / 账号分布”面板传入对应说明文案。
+- `backend/matrix_native_client.py#L26562-L26935`: 账号中心遗留非空 `setToolTip(...)` 清理；图标按钮改接自定义悬浮说明，状态标签和账单明细单元格清空原生 tooltip。
+- `tests/test_agent_mode_defaults.py#L210-L226`: 新增源码回归测试，锁定企业中心说明文案表、自定义悬浮组件和实际接入点。
+- `tests/test_native_tooltips.py#L10-L33`: 全局策略测试继续禁止本地客户端新增任何非空 `setToolTip(...)`。
+- 验证与回滚：新测试先在旧实现下失败，修复后定向 2/2 通过；本次仅本地客户端 UI、测试和文档变化，重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为；无 OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。
+
+# 2026-07-31 分解视频口播稿去除相邻重叠
+- `backend/utils/video_transcription.py#L196-L229`: 新增 `remove_adjacent_text_overlap()`，用压缩空白后的相邻文本做最长后缀/前缀匹配；`merge_transcription_segments()` 在生成全局时间轴前删除后一段重复前缀，保留时间戳和非重复正文。
+- `backend/matrix_native_client.py#L39`、`backend/matrix_native_client.py#L19294-L19315`: 本地客户端复用同一去重函数；同款替换从 `breakdownAnalysis.transcript.segments` 聚合每个片段口播稿时，会按上一片段最终口播稿清理下一片段开头重复内容。
+- `tests/test_video_transcription.py#L246-L274`: 回归复现转写块之间重复“就这个法汀妮的粉底液...”时，合并结果只保留一次重复句。
+- `tests/test_video_replacement.py#L1415-L1453`: 回归复现同款替换 3 个片段口播稿相邻重叠，断言第二、第三段不再带上一段尾部重复句。
+- 验证：新增两项回归先在旧实现下失败，修复后通过；`tests.test_video_transcription` 21/21、`tests.test_video_replacement` 95/95、`tests.test_video_breakdown` 42/42 通过；`py_compile` 通过。
+- 运行与回滚：本次仅本地客户端和转写工具变化，不涉及中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；按用户要求不自动重启，用户手动重启本地客户端后生效。回滚上述文件即可恢复旧行为。
+
+## 2026-08-01 同款替换 Seedance 彩铅首尾帧与单模型执行
+- `backend/matrix_native_client.py#L12594-L12681`: 新增 `_COMIC_SEEDANCE_FRAME_IMAGE_MODEL`、`_COMIC_SEEDANCE_COLORED_PENCIL_IMAGE_STYLE` 与 `_COMIC_SEEDANCE_REALISTIC_VIDEO_STYLE`；Seedance 视频模型下，首尾帧图走 `gpt-image-2` 彩铅风格，视频 prompt 追加“真人写实风格”。
+- `backend/matrix_native_client.py#L12683-L12735`: `_comic_storyboard_image_payload()` 给 Seedance 首尾帧写入 `image_model/imageModel/frame_style_mode/frameStyleMode`，并保留彩铅提示；`_comic_storyboard_video_payload()` 只在 Seedance 视频模型下追加写实要求。
+- `backend/matrix_native_client.py#L12804-L12849`: `_comic_project_video_model_candidates()` 现在只返回用户当前选择的模型；`_comic_task_progress_message()` 和 `_comic_task_failure_message()` 不再暗示“已切备用模型”，Seedance 拒绝会直接转成中文失败原因。
+- `backend/matrix_native_client.py#L14959-L15177`: `_run_comic_project_segments()` 记录 `comicVideoFallbacks` 只作诊断，不再继续提交其他模型；用户选 Seedance 就只跑 Seedance，失败直接结束片段。
+- `tests/test_video_replacement.py#L726-L1404`: 回归覆盖 Seedance 首尾帧彩铅 payload、Seedance 视频写实 prompt、单模型执行和 PolicyViolation 中文失败提示。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement tests.test_aicanvas_frame_billing tests.test_aicanvas_real_person_fallback -v` 通过 160/160；`py_compile` 通过。
+- 运行与回滚：本次只改本地客户端与远程漫剧镜像的同款替换链路及测试/文档，不涉及中心服、数据库、OpenAPI、Docker、环境变量或 `migration.sql`。本地客户端需重启后生效；远程 AI Canvas 还需要单独部署 `server_current.py`/`server.py` 并重启服务后才会真正取消 fallback。回滚上述文件即可恢复旧行为。
+
+# 2026-07-31 同款替换前端隐藏错误编号
+- `backend/matrix_native_client.py#L9292-L9336`: 新增 `_replacement_display_text_without_error_id()` 并调整 `_localize_replacement_display_text()`，展示层会剥离 `错误编号 err-*`，已知错误码翻译成中文，未知上游错误保留实际 `message/detail/status` 内容，不再替换成“生成失败，请根据错误编号查看日志”。
+- `backend/matrix_native_client.py#L9338-L9363`: `_replacement_segment_display_error()` 优先返回 `error/remoteError/facefusionError` 的可读内容；只有任务只有编号没有正文时才显示“生成失败，请重试或查看日志。”，编号继续留在任务 JSON 和结构化日志里。
+- `backend/matrix_native_client.py#L2510-L2585`、`backend/matrix_native_client.py#L2851-L2875`、`backend/matrix_native_client.py#L10245-L10273`、`backend/matrix_native_client.py#L15044-L15066`：视频预览、片段状态栏、视频格子和最终弹窗同步改为可读错误，不再把错误编号直接渲染到前端。
+- `tests/test_video_replacement_v2.py#L743-L754`、`tests/test_video_replacement_v2.py#L889-L907`、`tests/test_video_replacement_v2.py#L1079-L1105`、`tests/test_video_replacement_v2.py#L5272-L5364`、`tests/test_video_replacement_v2.py#L5755-L5779`: 回归覆盖本地视频无效、远程错误、已知错误码翻译和真实上游 `message` 透出，同时断言前端不包含 `错误编号` 或 `err-*`。
+- 验证：先运行新增/调整用例观察旧实现 6 failures，修复后聚焦 10/10 通过；`py_compile` 与 diff 检查见最终交付结果。
+- 运行与回滚：本次只影响本地客户端展示层和测试，不改中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。按用户要求不自动重启本地客户端；回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py` 和本条文档即可恢复旧展示。
+
+# 2026-07-31 工作流助手采集视频基础信息展示
+- `backend/matrix_native_client.py#L16096-L16162`: 新增 `_assistant_reference_info_lines()`，从采集结果对象读取平台、作者、点赞数、评论数、收藏数、分享数、时长、作品链接和本地参考视频文件名，统一格式化为聊天页可读信息。
+- `backend/matrix_native_client.py#L16168-L16196`: `_assistant_build_direct_breakdown_reply()` 在每条“视频 N”标题后插入基础信息块，再显示拆解文本和“如何拍出同等价值的视频”，不改变采集、下载、视频理解或同款替换 payload 契约。
+- `tests/test_workflow_assistant_helpers.py#L19-L161`: 回归测试覆盖工作流助手回复必须展示作者、点赞/评论/收藏/分享、时长、链接和本地文件名；旧实现下缺少 helper 和基础信息块，测试先失败，修复后通过。
+- 运行与回滚：仅本地客户端展示层变更，需重启本地客户端后生效；不涉及本地执行器接口、中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_workflow_assistant_helpers.py` 和本次文档记录即可。
+
+# 2026-07-31 分解视频支持直接粘贴链接
+- `backend/matrix_native_client.py#L18189-L18194`: 新增 `_video_breakdown_platform_from_url()`，按链接域名识别小红书 `xiaohongshu.com/xhslink.com`，其它链接默认走抖音下载链路。
+- `backend/matrix_native_client.py#L6789-L6925`: `VideoBreakdownPage` 顶部新增链接输入框和“下载并分解”按钮；点击后后台调用 `submit_local_task(<platform>.download)`，下载完成后通过 `video_breakdown_start` 复用现有视频校验、抽帧、OCR、口播转写和报告生成流程。
+- `backend/matrix_native_client.py#L6856-L6882`: 新增 `video_breakdown_link_download` 事件处理，下载失败、本地执行器失败、账号失效或未找到视频文件时直接在分解视频页显示错误；下载成功时携带 `platform/sourceUrl/videoPath/download` 进入现有分解入口。
+- `tests/test_video_breakdown.py#L1010-L1031`: 新增回归覆盖页面直链入口、下载任务调用、分解事件复用，以及抖音/小红书链接平台识别。
+- TDD 与验证：新增测试先在旧实现下失败，暴露缺少链接入口和 `_video_breakdown_platform_from_url()`；实现后 `tests.test_video_breakdown` 42/42 通过。
+- 运行与回滚：仅本地客户端分解视频入口变更，需用户手动重启本地客户端后生效；不涉及中心服、远程服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_video_breakdown.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧页面。
+
+# 2026-07-31 Agent.模式 LK888 模型对应关系规则完善
+- `backend/matrix_native_client.py#L2086-L2121`: `_LK888_FALLBACK_MODELS` 不再只是兜底显示列表，而是 Agent.模式本地权威模型规则表；已知模型绑定真实 LK888 模型标识、用户可读显示名、`image/video` 类型和视频 `duration_slots`。前端仍不展示真实模型 ID。
+- `backend/matrix_native_client.py#L2124-L2169`: 新增 `_agent_model_rule()`、`_agent_model_for_type()` 和 `_agent_video_duration_slots()`；图片任务遇到已知视频模型会退回默认图片模型，视频任务遇到已知图片模型会退回默认 Seedance 视频模型，Vidu Q3 系列提交时长固定规范化为 8 秒。
+- `backend/matrix_native_client.py#L2361-L2368`: `_lk888_canonical_model_row()` 命中本地已知模型时合并完整本地规则，LK888 在线目录不能把 Seedance 改名成 GPT/Seedream，也不能把视频模型错分到图片列表。
+- `backend/matrix_native_client.py#L17760-L17846`: `_prodgen_run_image()` 和 `_prodgen_run_video()` 在调用 LK888 前都会先做模型类型规范化，并把规范化后的模型和显示名写回生成记录。
+- `backend/matrix_native_client.py#L24227-L24239`: Agent 视频时长按钮改为按当前视频模型规则同步；Vidu Q3 / Vidu Q3 Turbo 显示固定 8 秒，Seedance 1.5 Pro 保留 5/10 秒切换。
+- `tests/test_agent_video_duration.py#L31-L131`: 回归覆盖 Vidu Q3 8 秒、视频任务拒绝图片模型状态、图片任务拒绝视频模型状态、本地规则表存在，以及 LK888 目录错配不能覆盖本地权威规则。
+- TDD 与验证：新增测试先在旧实现下失败，分别暴露 `gpt-image-2` 被提交到视频任务、Seedance 被提交到图片任务、缺少 `_agent_model_rule()` 和已知模型缺少 `duration_slots`；修复后 `tests.test_agent_video_duration` 6/6、`tests.test_agent_mode_defaults` 29/29 通过。
+- 运行与回滚：本次只影响本地客户端 Agent.模式模型映射、参数规范化和 UI 时长显示，需重启本地客户端后生效；不涉及中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+# 2026-07-31 本地客户端 LK888 扣费四位小数显示
+- `backend/matrix_native_client.py#L3845-L3855`: `_billing_amount()` 从 `float + %.2f` 改为 `Decimal` 四位量化后去尾零，非有限值继续显示 `—`，精确字符串 `"inf"` 继续显示运营方无限余额；`-0.0000` 和四位量化后的负零统一显示为 `0`。
+- `backend/matrix_native_client.py#L26543-L26558`: 账户中心账单表格的实扣/变动金额继续复用 `_billing_amount()`，因此 LK888 返回的 `0.0016`、`0.0222`、`0.0340` 等实际扣费不会在本地表格中被压成两位或 `-0`。
+- `tests/test_account_billing_dashboard.py#L75-L79`、`tests/test_account_billing_dashboard.py#L177-L199`: 回归覆盖 helper 四位小数、负零处理，以及账单表格中 `change=-0.0016` 和 `balanceAfter=9.9984` 的真实渲染。
+- TDD 与验证：新增测试先在旧实现下失败，错误为 `-0.0016` 显示成 `-0`、`12.3456` 显示成 `12.35`；修复后账户中心账单回归 14/14 通过，并通过 LK888 实际扣费中心服聚焦用例确认结算路径没有两位取整。
+- 运行与回滚：本次只影响本地客户端显示层，需重启本地客户端后生效；不涉及 OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_account_billing_dashboard.py` 和本条文档/Changelog 即可恢复旧两位显示。
+
+# 2026-07-31 Agent.模式 Vidu Q3 视频时长参数修复
+- `backend/matrix_native_client.py#L2121-L2134`: 保留 Agent 视频界面通用 `5/10` 秒时长选择，同时新增 `_agent_video_request_duration(model, value)`；当模型 ID 以 `viduq3` 或 `vidug3` 开头时，提交前统一规范化为 LK888 当前可接受的 8 秒。
+- `backend/matrix_native_client.py#L17770-L17804`: `_prodgen_run_video()` 先确定视频模型，再用 `_agent_video_request_duration()` 计算实际提交时长，并把规范化后的时长写回生成记录和 LK888 `params.duration`。
+- `tests/test_agent_video_duration.py#L1-L58`: 回归覆盖 `viduq3` 在界面时长为 5 秒时，实际提交 payload 使用 `duration=8`，且 Seedance 等其他模型仍保留通用选择链路。
+- TDD 与验证：新增 Vidu Q3 时长测试先在旧实现下失败，证明旧代码会提交 `duration=5`；修复后该测试通过。完整验证见最终交付结果。
+- 运行与回滚：仅本地客户端 Agent 视频参数层变更，需重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为；无中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。
+
+# 2026-07-31 Windows start-visible-client central restart
+- `start-visible-client.bat#L31`: startup now calls `:restart_central` before the first `:check_central`, so an already-healthy old 9080 process is not reused.
+- `start-visible-client.bat#L59-L67`: `:restart_central` scans `netstat -ano` for `:%CENTRAL_PORT% ... LISTENING`, force-stops matching PIDs with `taskkill /F /PID`, waits one second, then lets the existing central startup and health-check flow launch the current `backend/central_server.py`.
+- `tests/test_start_visible_client_script.py#L11-L19`: regression coverage locks the restart call order and the netstat/taskkill/port contract.
+- Verification: the new script test first failed against the old script because `call :restart_central` was missing, then passed after the script update. Focused LK888 postpaid tests also passed, confirming the startup change does not alter billing logic.
+- Runtime and rollback: double-clicking `start-visible-client.bat` now restarts the center server and then opens the local client. Rollback restores the previous script and removes `tests/test_start_visible_client_script.py`; no OpenAPI, database, Docker, environment-variable, or `migration.sql` change is involved.
+
+# 2026-07-31 工作流助手对话式热点视频拆解
+- `backend/matrix_native_client.py#L15366-L15370`: 账号切换后的本地状态重载不再读取旧 `workflows.json`，避免历史自动化工作流在新模式下继续影响页面状态。
+- `backend/matrix_native_client.py#L15448-L15664`: 新增 `WF_ASSISTANT_SYSTEM`、`_assistant_guess_collect_request()`、`_reference_breakdown_to_replacement_payload()`、`_assistant_reference_replacement_payloads()`、`_assistant_build_direct_breakdown_reply()` 和 `run_workflow_assistant_request()`；助手只追问或直接执行采集/拆解，不输出工作流 JSON，不把采集原视频作为可发布素材。拆解结果会被包装成 `video_replace_start` 兼容 payload。
+- `backend/matrix_native_client.py#L16328-L16459`: `AgentChatPage` 改为“热点视频拆解助手”，发送消息后直接调用 `run_workflow_assistant_request(..., include_payloads=True)`，通过 `workflow_assistant_status/workflow_assistant_reply` 在当前聊天页显示状态和最终拆解文本，并为每条参考视频展示“按这条改造生成”按钮；按钮发送 `goto_nav=🧬 同款替换` 和 `video_replace_start`。
+- `backend/matrix_native_client.py#L24904-L24952`: 资产库采集参考视频的文本弹窗按钮从“用此文本生成视频”改为“按此视频改造”，读取绑定拆解文本后调用 `_reference_breakdown_to_replacement_payload()` 并进入 `同款替换`，不再发送 `breakdown_to_product_video` 或跳转 `Agent.模式`。
+- `backend/matrix_native_client.py#L26518-L26543`、`backend/matrix_native_client.py#L28149-L28182`: 侧边栏移除“自动化工作流”页面入口；登录完成后不再启动旧 `_start_scheduler()` 定时工作流调度。
+- `tests/test_workflow_assistant_direct_mode.py#L57-L64`、`tests/test_workflow_assistant_helpers.py#L48-L101`、`tests/test_asset_library_shared_button.py#L192-L205`: 回归覆盖助手动作卡进入同款替换、拆解包符合 `video_replace_start` 契约、资产库文本入口不再进入 `Agent.模式`。
+- `tests/test_workflow_assistant_direct_mode.py#L36-L75`、`tests/test_workflow_account_scope.py#L70-L73`、`tests/test_workflow_resilience.py#L468-L472`、`tests/test_login_centered_layout.py#L31-L37`: 回归覆盖旧入口消失、助手不再生成/保存工作流、旧调度不启动、直接助手提示规则和登录页文案。
+- 验证：先补测试并确认旧实现失败；实现后聚焦助手/资产库/同款替换相关回归与 `python -m py_compile backend\matrix_native_client.py` 通过。
+- 运行与回滚：仅本地客户端层变更，需重启本地客户端后生效；不涉及中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、相关测试和三份文档即可恢复旧自动化工作流入口与编排链路。
+
+# 2026-07-31 同款替换漫剧素材优先提示词
+- `backend/matrix_native_client.py#L11135-L11203`：`_comic_person_reference_priority_rule()` 与 `_comic_asset_binding_prompt()` 改为“上传素材最高优先级、原视频只提供动作/站位/镜头/节奏”，并追加不要生成字幕、对白文字、促销文字或复刻原片实体的约束。
+- `backend/matrix_native_client.py#L11205-L11287`：新增 `_comic_motion_entity_terms()` 和 `_comic_clean_motion_action()`，从原片拆解字段中只保留动作表达；上传道具存在时，把动作里指向原片产品、原片道具或通用商品部位的词替换为“上传道具”。
+- `backend/matrix_native_client.py#L11244-L11331`：`_comic_uploaded_asset_motion_prompt()` 在上传人物/场景/道具时只输出 `项目库角色“主角”`、`项目库场景“场景1”`、`项目库道具“道具1”` 以及清洗后的动作、节奏、景别，不再把原片人物、产品、道具、场景字段原文传给漫剧生成器。
+- `backend/matrix_native_client.py#L11440-L11461`：`_comic_segment_script_line()` 不再向项目 `source_text` 写入 `对白：<口播稿>`；口播稿继续只通过 TTS/audio 字段进入配音链路，避免画面剧本和远程模型 prompt 被台词污染。
+- `backend/matrix_native_client.py#L11579-L11627`：`_comic_storyboard_video_payload()` 除首尾帧外，同步携带 typed reference fields，并新增负向提示，确保视频生成阶段也能看到上传人物、场景和道具的分类参考，不再只依赖文字描述。
+- `tests/test_video_replacement.py#L1568-L1718`：更新并新增回归，覆盖项目剧本不带台词、远程模型 prompt 只使用上传素材和动作、视频 payload 带 typed refs，且不包含原片男销售、服装、凯美瑞、汽车展厅、OCR 或原片拆解证据。
+- TDD 与验证：新素材优先测试在旧实现下失败，证明 `source_text` 仍含 `对白` 且画面提示词混入台词；实现后 `tests.test_video_replacement` 93/93 通过。未调用真实远程模型。
+- 运行与回滚：仅本地客户端提示词拼装逻辑变更，需用户手动重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为；无中心服、远程漫剧服务、数据库、OpenAPI、Docker、环境变量或 `migration.sql` 影响。
+
+# 2026-07-31 本地客户端任务中心表格样式与时间显示
+- `backend/matrix_native_client.py#L4063-L4086`：新增 `_task_center_time_text()`，优先显示中心服已有的 `updatedAtText/createdAtText/timeText`；当接口只返回 `updatedAt/createdAt/finishedAt/startedAt` 数值时间戳时，兜底格式化为 `MM-DD HH:MM`，并兼容毫秒时间戳。
+- `backend/matrix_native_client.py#L5777-L5820`：任务中心表格改用统一 `style_table(self.table)`，关闭默认单元格网格线，保持整行选择和其他本地客户端表格视觉一致；时间列改为 `_task_center_time_text(t)`，避免最近任务有时间戳但页面为空。
+- `tests/test_agent_mode_defaults.py#L158-L188`：新增回归测试，覆盖任务中心表格必须复用统一样式、文本时间优先、数值时间戳可格式化显示。
+- TDD 与验证：生产代码修改前，表格样式测试因缺少 `style_table(self.table)` 失败，时间测试因缺少 `_task_center_time_text()` 失败；实现后定向 3/3 通过。完整相关回归与编译检查见最终回复。
+- 运行与回滚：仅本地客户端显示层变更，需重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py` 和本次三份文档记录即可恢复旧显示；无 Web、中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响。
+
+# 2026-07-31 同款替换取消声音验证
+- `backend/matrix_native_client.py#L14104-L14140`：当前漫剧自动声音任务的最终合成只使用片段状态、人工确认、视频有效性和保留的视觉质量门禁；完成任务清理历史 `audioCheck` 并记录 `audioValidation=disabled`，页面进度不再宣称正在执行声音检查。
+- `backend/matrix_native_client.py#L20122-L20150`：FaceFusion 输出无音轨且前序视频也无音轨时直接保留无声视频；只有前序视频确有音轨时才执行兼容性音轨回填，FFmpeg 回填失败仍按功能失败处理。
+- `backend/matrix_native_client.py#L20603-L20633`：AI 配音或上传配音混音只校验输入存在、视频时长、FFmpeg 返回值和输出视频有效性，不再比较配音覆盖时长，也不再检查输出音轨、静音或音量。
+- `backend/matrix_native_client.py#L21229-L21335`：片段质检保留视频有效性、审核帧和视觉质检，声音检查固定记录为 `status=skipped/code=disabled`、`checks.audio=skipped`。
+- `backend/matrix_native_client.py#L21794-L21826`：漫剧自动声音任务的最终门禁不再读取 `hasAudio`、`audioStatus` 或历史 `qcStatus`，但仍要求片段完成、人工确认且本地视频有效；其他模式继续保留非声音质量门禁。
+- `backend/matrix_native_client.py#L22667-L22701`：片段合成及上传完整配音后的最终输出不再调用声音质量检查；片段缺失、视频损坏、混音命令失败仍会停止合成。
+- `tests/test_video_replacement.py#L2927-L2969`、`tests/test_video_replacement_v2.py#L2536-L2553`、`tests/test_video_replacement_v2.py#L3203-L3216`、`tests/test_video_replacement_v2.py#L4412-L4421`：覆盖历史声音状态不阻断、无音轨可合成但损坏视频仍阻断、片段质检跳过声音、合成不复查声音及人工确认/失败状态门禁。
+- TDD 与验证：上述 5 项在生产代码修改前为 5 failures，修改后 5/5 通过；`tests.test_video_replacement` 92/92 通过。V2 完整套件保留改动前已存在的 5 failures + 2 errors 基线；未调用真实远程模型。
+- 运行与回滚：仅本地客户端需要用户手动重启后生效。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement.py`、`tests/test_video_replacement_v2.py` 和本次三份文档记录即可恢复旧门禁；无中心服、远程服务、数据库、OpenAPI、Docker、环境变量或 `migration.sql` 影响。
+
+# 2026-07-31 抖音详情接口连接重试与脱敏失败契约
+- `backend/dy_apis/douyin_api.py#L20-L30` 定义固定连接/读取超时、退避间隔和稳定异常类型；`backend/dy_apis/douyin_api.py#L121-L185` 在作品详情请求中仅重试连接及超时异常，最多执行 4 次请求，不改变 HTTP 业务响应和 JSON 解析行为。
+- `backend/api_server.py#L3569-L3597` 生成作品编号指纹、固定主机、尝试次数、异常类型和超时参数组成的脱敏 JSON 日志；`backend/api_server.py#L7399-L7438` 将最终详情网络失败归一化为 HTTP 502、`douyin_detail_network_failed`、`stage=detail` 和安全 `errorId`，响应不返回原始异常或堆栈。
+- `backend/matrix_native_client.py#L6671-L6681` 使用统一分解下载失败文案；`backend/matrix_native_client.py#L17685-L17706` 将稳定错误码精确映射为“抖音连接暂时失败，请重试”，其他历史错误继续使用原提示。
+- `tests/test_douyin_detail_retry.py#L31-L97` 覆盖临时失败恢复、固定 `(8, 15)` 超时、`1/2/4` 秒退避、4 次失败和 HTTP 业务响应不重试；`tests/test_api_download_contract.py#L85-L132` 覆盖 502 契约及作品编号、签名、Token、Cookie 脱敏；`tests/test_video_breakdown.py#L78-L82` 锁定页面完整中文文案。
+- Phase 0/TDD：生产代码修改前运行上述 5 项测试，结果为 1 failure、3 errors，分别证明缺少重试异常、接口契约和中文映射；实现后同一组测试 5/5 通过。
+- 回滚：恢复上述三个生产文件、三组测试及本次 API/排障/变更文档即可。无数据库、中心服、Docker、环境变量或 `migration.sql` 变更；按用户要求未自动重启任何进程。
+
+# 2026-07-30 抖音全自动回复会话、账号与隐私边界加固
+- `backend/matrix_native_client.py#L5480-L5493`：小红书线索禁止进入当前仅支持抖音主页的私信 MVP；抖音线索继续携带获客中心选中的 `accountId`。
+- `backend/matrix_native_client.py#L7488-L7629`：`DMPage` 引入会话代次；编辑客户主页时立即关闭全自动、清空旧客户待回复/发送中/去重状态和输入内容，迟到的收件、AI 和发送事件按代次、目标及账号丢弃。
+- `backend/matrix_native_client.py#L7869-L7937`、`backend/matrix_native_client.py#L7954-L8009`：手动发送、自动发送和收件轮询都直连本机 `9081`；成功事件不再误带 `http_200`。首次成功收件会锁定实际账号，后续收发账号不一致时停止自动处理。
+- `backend/api_server.py#L406-L416`、`backend/api_server.py#L1504-L1556`：中心复合账号 ID 归一化成本机账号 ID；收件浏览器按账号加锁，并使用 `dy_dm_profile/accounts/<localAccountId>/current` 稳定隔离，默认账号保留 `dy_dm_profile/current` 兼容路径。
+- `backend/api_server.py#L1809-L1821`、`backend/api_server.py#L2908-L3181`：浏览器异常生成脱敏 `errorId` 和安全堆栈，不返回子进程标准输出/错误或客户链接；空会话返回 `ok=true/messages=[]/empty=true`。
+- `backend/api_server.py#L4360-L4387`、`backend/api_server.py#L7199-L7250`：私信发送/收件统一状态码为成功 200、无效目标 400、登录失效 401、内部浏览器异常 500，异常响应不再暴露原始堆栈。
+- `backend/central_server.py#L755-L810`、`backend/central_server.py#L842-L870`、`backend/central_server.py#L13498-L13530`、`backend/central_server.py#L13751-L13784`：中心兼容任务的发送目标、正文和发送结果只持久化/公开其指纹；只有领取排队任务的本地执行器可在内存中读取原始参数。
+- `docs/openapi.yaml#L339-L374`、`docs/openapi.yaml#L1586-L1675` 与 `docs/API_REFERENCE.md#L670-L754`：记录目标别名、账号 profile 隔离、空会话成功、HTTP 状态和脱敏边界，删除 `dm_inbox_messages_not_found` 错误枚举。
+- `tests/test_douyin_dm_auto_reply.py#L157-L242`、`tests/test_douyin_dm_auto_reply.py#L385-L488`、`tests/test_douyin_dm_auto_reply.py#L816-L844`、`tests/test_finder_page_actions.py#L132-L140`、`tests/test_openapi_contract.py#L123-L151`：覆盖状态码、脱敏日志、账号目录、客户切换、迟到事件、本机直连、账号锁定、中心持久化、XHS 门禁和 OpenAPI 契约。
+- 验证：新增成功事件和空会话契约断言均先失败后通过；完整私信模块 72/72、获客页面 10/10、OpenAPI 契约 6/6 通过，三层源码与相关测试 `py_compile` 退出 0。既有 `utils/dy_util.py` 未关闭文件 `ResourceWarning` 和 `api_server.py` 两条无效转义 `SyntaxWarning` 仍存在，未由本次改动引入。
+- 运行与回滚：本地客户端/执行器必须重启后加载新代码；中心隐私加固需中心服后续按发布流程部署。回滚本节列出的三层源码、三组测试、OpenAPI/API 文档及本次变更记录即可；不涉及数据库、Docker、环境变量或 `migration.sql`。
+
+# 2026-07-30 小红书真实浏览器冒烟与账号默认口径统一
+- 真实冒烟：使用 `backend/datas/accounts/boss/xhs_profile` 跑小红书搜索、下载、评论、获客寻客和图文发布 dry-run。`xhs_profile_ready=true`，但搜索页面实际停在 `https://www.xiaohongshu.com/explore?source=tourist_search`，页面仍显示登录入口，搜索返回 0；下载和评论因无笔记无法继续；获客寻客返回 0；发布 dry-run 返回 `xhs_creator_login_required`，未点击真实发布。
+- `backend/platform_adapters.py#L484-L505`：新增 `_xhs_apply_search_login_state()`，账号模式搜索未验证且落到游客推荐流或登录提示页时返回 `xhs_login_required/needLogin=true`，不再伪装为成功 0 条。
+- `backend/platform_adapters.py#L855-L855`：`xhs_search_notes()` 在写入调试快照和风险判断后调用账号登录态校验，保留 `debug.screenshot/html` 用于追溯。
+- `backend/api_server.py#L7164-L7179`、`backend/api_server.py#L7314-L7329`：`/api/xhs/search` 和 `/api/xhs/download` 默认改为 `guestMode=false`，与客户端“账号矩阵登录态优先”口径一致；未传 `accountCollectionConfirmed=true` 时由账号采集门禁拒绝。
+- `tests/test_api_download_contract.py#L110-L154`、`tests/test_xhs_lead_filtering.py#L65-L97`：新增/更新回归，覆盖搜索默认账号确认门禁、确认后账号模式调用、账号搜索落游客推荐流时要求重新登录，以及显式游客模式仍保持游客受限契约。
+- `docs/API_REFERENCE.md#L245-L256`、`docs/openapi.yaml#L1207-L1219`、`docs/openapi.yaml#L1676-L1686`：小红书采集通用字段改为全部默认账号模式，OpenAPI 同步允许 `guestMode/accountCollectionConfirmed/accountId`。
+- 验证与回滚：新增/修改测试先失败后通过；完整回归见本次交付验证。回滚可恢复 `backend/api_server.py`、`backend/platform_adapters.py`、`tests/test_api_download_contract.py`、`tests/test_xhs_lead_filtering.py`、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 和本节文档；不涉及数据库迁移、Docker 或 `migration.sql`。
+
+# 2026-07-30 同款替换口播识别失败提示与重试入口
+- `backend/matrix_native_client.py#L12475-L12480`: 同款替换源视频栏新增“重试口播”短按钮，默认禁用，载入分解结果后仅在 `transcript.failedRanges` 非空时启用。
+- `backend/matrix_native_client.py#L12791-L12825`: `VideoReplacementPage._on()` 新增口播重试进度和完成事件处理；成功或失败都会回写 `_source["breakdownAnalysis"]`，已有任务会同步保存到 `replacement_job.json`。
+- `backend/matrix_native_client.py#L12947-L13050`: `load_source()` 在口播转写失败时直接显示“口播识别失败”提醒；`retry_source_transcription()` 复用 `_transcribe_breakdown_audio()` 和 `_merge_transcription_retry()`，只重试失败时间段，不重新下载、抽帧或 OCR。
+- `backend/matrix_native_client.py#L17962-L17985`: 新增 `_replacement_transcription_retry_ranges()` 和 `_replacement_transcription_issue_text()`，统一把 `remote_timeout` 等失败码转为用户可读提示。
+- `tests/test_video_replacement_v2.py#L5160-L5241`: TDD 覆盖失败提醒文案和重试成功后源分析/任务 JSON 回写。
+- 验证：新增两项测试先在旧实现下失败，修复后通过；`py_compile` 通过。完整 `tests.test_video_replacement_v2` 的 5 failures + 2 errors 为既有 XHS 测试夹具和旧原片声音断言，不属于本次改动。
+- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md`。本次不涉及中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；本地客户端需重启生效。
+
 # 2026-07-30 Douyin DM inbox account scope
-- `backend/api_server.py#L2851-L3034`: `browser_read_dm_inbox()` accepts optional `account_id`, resolves the account-matrix login source before Playwright starts, forwards `DY_DM_INBOX_ACCOUNT_ID` into the isolated child, seeds the selected profile, and injects selected-account cookies before visiting the customer page without logging cookie values.
-- `backend/api_server.py#L4271-L4282` and `backend/api_server.py#L7109-L7117`: local wrapper and `/api/douyin/dm/inbox` route pass `accountId/account`; omitted account keeps latest usable Douyin account behavior.
-- `backend/matrix_native_client.py#L5462-L5469` and `backend/matrix_native_client.py#L7487-L7838`: Finder follow-up carries the selected account, DMPage stores `_dm_account_id`, and manual send plus auto inbox polling use the same account until the user edits the target.
-- `docs/openapi.yaml#L1513-L1531` and `docs/API_REFERENCE.md#L670-L724`: inbox request documents optional `accountId`; it is intentionally not required.
-- `tests/test_douyin_dm_auto_reply.py#L132-L207`, `tests/test_douyin_dm_auto_reply.py#L258-L273`, and `tests/test_openapi_contract.py#L120-L128`: regression coverage locks route, wrapper, browser reader, cookie injection, client account carryover, and OpenAPI optional field behavior.
+- `backend/api_server.py#L2851-L3094`: `browser_read_dm_inbox()` accepts optional `account_id`, resolves the account-matrix login source before Playwright starts, forwards `DY_DM_INBOX_ACCOUNT_ID` into the isolated child, seeds the selected profile, and injects selected-account cookies before visiting the customer page without logging cookie values.
+- `backend/api_server.py#L4271-L4286` and `backend/api_server.py#L7109-L7118`: local wrapper and `/api/douyin/dm/inbox` route pass `accountId/account`; omitted account keeps latest usable Douyin account behavior.
+- `backend/matrix_native_client.py#L5462-L5472` and `backend/matrix_native_client.py#L7466-L7844`: Finder follow-up carries the selected account, DMPage stores `_dm_account_id`, and manual send plus auto inbox polling use the same account until the user edits the target.
+- `docs/openapi.yaml#L1513-L1538` documents the optional inbox `accountId`; `docs/openapi.yaml#L1559-L1599` documents response `accountId` and count-only `dmCookieInjection` diagnostics. `docs/API_REFERENCE.md#L670-L732` keeps the same request, response, and privacy contract.
+- `tests/test_douyin_dm_auto_reply.py#L132-L279`, `tests/test_openapi_contract.py#L120-L128`, and `tests/test_openapi_contract.py#L129-L138`: regression coverage locks route, wrapper, browser reader, cookie injection, client account carryover, the optional OpenAPI request field, and the safe response diagnostics schema.
+- Verification: the new tests first failed on missing route/wrapper/browser/client/OpenAPI account propagation. After implementation, focused DM tests passed 54/54, the full DM module passed 58/58, Finder tests passed 9/9, OpenAPI tests passed 6/6, and related `py_compile` checks exited 0. Real read-only browser smoke and the restarted `9081` endpoint both matched the selected account, injected 60/60 cookies, returned `needLogin=false`, and did not send a message; an empty page returned the existing `dm_inbox_messages_not_found` code.
+- Runtime: the old local client was stopped and `start-visible-client.bat` started the updated client. The `9081` listener changed from PID `29684` to `7012`; the existing `9080` central service was not restarted.
 - Rollback: revert `backend/api_server.py`, `backend/matrix_native_client.py`, `docs/openapi.yaml`, `docs/API_REFERENCE.md`, `docs/IMPLEMENTATION.md`, `docs/TROUBLESHOOTING.md`, `tests/test_douyin_dm_auto_reply.py`, and `tests/test_openapi_contract.py`. No database or `migration.sql` change is involved; local client and local executor must restart for runtime effect.
 
 # 2026-07-30 账户中心账单看板完整验证与回滚门禁
-- `backend/billing_analytics.py#L1-L283`：账单查询边界、来源归一化、analytics/ledger 计算与 Draft 2020-12 运行时响应 Schema；366 天是最大日期跨度。
-- `backend/maindb.py#L309-L318`：主库 `model_usage_logs` 按用户、时间范围和降序稳定键查询，`limit` 被限制在 50,001 行。
-- `backend/central_server.py#L3060-L3210`：汇总 `STATE` 流水、主库模型用量与充值来源，达到 50,001 行即拒绝部分统计；查询/响应校验、结构化耗时日志和脱敏错误响应在同一边界完成。
-- `backend/central_server.py#L3296-L3410`：主库充值与退款同步写入可追溯正向 `STATE` 流水，保留既有返回签名。
-- `backend/central_server.py#L14205-L14230`：新增 analytics 与参数化 ledger 路由；鉴权失败返回 401，查询错误返回 400，无参数 ledger 继续走原兼容响应。
-- `backend/matrix_native_client.py#L3830-L4000`：金额/查询格式、固定高度趋势图和固定四行类型分布控件。
-- `backend/matrix_native_client.py#L25191-L25975`：账户中心四指标、独立筛选/分页、analytics/ledger 请求序列、迟到响应丢弃、错误保留与角色权限复核。
-- `docs/openapi.yaml#L439-L572` 与 `docs/openapi.yaml#L1008-L1089`：ledger/analytics 查询参数、成功/错误响应及账单 Schema，与运行时字段、枚举、范围和 nullability 一致。
-- `scripts/smoke_billing_performance.py#L1-L140`：仅允许本机 HTTP 回环地址，固定 200 请求/20 workers，使用单调计时计算 nearest-rank P95，并逐响应调用运行时 analytics Schema；P95 超过 800 ms 或任一响应无效即非零退出。
-- `scripts/monitor_billing_rollout.py#L1-L157`：固定 100 请求窗口、严格 `>1%` 门槛、镜像 Tag 全字符串校验、固定 Docker 参数列表、复制环境和 `shell=False`；fixture 只能与 `--dry-run` 同时使用。
-- `tests/test_billing_rollout_guard.py#L1-L70`：TDD 覆盖 1%/2% 边界、100 样本约束、严格 Tag 正则、参数列表、复制环境、`shell=False` 和 dry-run 不调用子进程/不含凭据。
+- `backend/billing_analytics.py#L1-L300`：账单查询边界、来源归一化、analytics/ledger 计算与 Draft 2020-12 运行时响应 Schema；`backend/billing_analytics.py#L151-L213` 规范化 `wxpay:<orderNo>` / `redeem:<code>`、兼容 `paidAt/usedAt`，并把没有其他关联字段的账本 `ref` 保留到 `requestId`。
+- `backend/maindb.py#L162-L171`：`get_balance_strict()` 不吞查询异常；`backend/maindb.py#L321-L330`：`model_usage_logs` 按用户、时间范围和稳定降序键查询，`limit` 限制在 50,001 行。
+- `backend/central_server.py#L54-L65`、`backend/central_server.py#L2653-L2672`：`MAINDB_ENABLED` 默认启用，显式 `0` 才跳过导入；导入异常只记录进程内状态且不写日志，其他既有主库调用仍沿用健康探测。
+- `backend/central_server.py#L3097-L3164`：余额与参数化账单在主库默认启用时对导入、配置、健康、用量和严格余额读取失败统一失败关闭；`user-owner` 固定返回 `"inf"`，达到 50,001 行拒绝部分统计。
+- `backend/central_server.py#L3167-L3265`：查询/响应校验、结构化耗时日志和脱敏 400/500/503 错误响应；异常消息、凭据和连接细节不进入日志。
+- `backend/central_server.py#L3351-L3465`、`backend/central_server.py#L3656-L3749`：主库充值与退款同步写入可追溯正向 `STATE` 流水，保留既有返回签名和稳定 `wxpay/redeem` 引用。
+- `backend/central_server.py#L14313-L14349`：`/api/account/balance`、analytics 与参数化 ledger 共用运营方 `"inf"` 和主库失败关闭语义；鉴权失败返回 401，查询错误返回 400，来源错误返回 503，无参数 ledger 继续走原兼容响应。
+- `backend/matrix_native_client.py#L3837-L4083`：金额/查询格式、固定高度趋势图和固定四行类型分布控件。
+- `backend/matrix_native_client.py#L25479-L26276`：账户中心四指标、独立筛选/分页、analytics/ledger 请求序列、迟到响应丢弃、成功 analytics 余额优先级、充值后刷新、错误保留与角色权限复核。
+- `docs/openapi.yaml#L457-L589` 与 `docs/openapi.yaml#L1009-L1134`：account balance/ledger/analytics 查询参数、数字或 `inf` 余额、成功/错误响应及账单 Schema，与运行时字段、枚举、范围和 nullability 一致。
+- `scripts/smoke_billing_performance.py#L1-L148`：仅允许本机 HTTP 回环地址，固定 200 请求/20 workers，拒绝所有跳转且不转发 Authorization，使用单调计时计算 nearest-rank P95，并逐响应调用运行时 analytics Schema；P95 超过 800 ms 或任一响应无效即非零退出。
+- `scripts/monitor_billing_rollout.py#L1-L165`：固定 100 请求窗口、3xx 原样计错且禁止跳转、严格 `>1%` 门槛、镜像 Tag 全字符串校验、固定 Docker 参数列表、复制环境和 `shell=False`；fixture 只能与 `--dry-run` 同时使用。
+- `tests/test_billing_rollout_guard.py#L1-L128` 与 `tests/test_billing_performance_smoke.py#L1-L92`：TDD 覆盖跳转前拒绝及 Authorization 隔离、任一无效响应即失败、nearest-rank P95 的 800 ms 精确边界、CLI dry-run 无网络/子进程、1%/2% 回滚边界和既有命令安全约束。
+- `tests/test_billing_analytics.py#L67-L153`、`tests/test_billing_dashboard_api.py#L248-L580`、`tests/test_account_billing_dashboard.py#L190-L207`、`tests/test_billing_unified.py#L246-L289`：最终评审 RED/GREEN 覆盖权威充值去重、驼峰时间、共享引用、主库失败关闭、三条真实运营方余额路径、迟到旧余额覆盖和精确依赖锁。
+- `backend/requirements.txt#L20-L22`、`backend/requirements.deploy.txt#L21-L23`：两种运行方式统一锁定 `jsonschema==4.23.0`、`PyMySQL==1.1.1`、`passlib[bcrypt]==1.7.4`。
 - 可追溯性：已提交源码基线为 `347120c9308db2ae43482aba3f33df5ed2dd40ad`；源码快照和当前源码 SHA-256 见 `docs/DEPLOYMENT.md`。这些不是可部署制品，生产发布前仍须登记上一稳定中心镜像 Tag 和客户端包 SHA-256。
 - 数据库/部署：`migration.sql` 只追加 no-op 注释，无 DDL/DML；Dockerfile、Compose 拓扑与 `/api/health` 不变。本任务不运行 Docker、不部署、不重启生产或客户端、不提交。
 
@@ -64,23 +440,23 @@
 # 2026-07-30 Task 3: authoritative billing analytics and filtered ledger APIs
 
 - `backend/central_server.py#L40-L52`: `_load_central_dotenv()` defaults to enabled and performs the two pre-existing dotenv loads in exact parent/backend order with `override=False` then `override=True`; `CENTRAL_LOAD_DOTENV=0` skips both.
-- `backend/central_server.py#L3059-L3108`: `collect_billing_records()` snapshots local ledger, recharge-order, and redeemed-code rows under `LOCK` after current-user filtering. Numeric users return local records only when main DB is absent or reports `configured() == false`; an enabled configuration whose readiness check is false, whose configuration check raises, or whose bounded usage query fails is fatal. The 50,001-row sentinel still raises `billing_record_limit_exceeded`.
-- `backend/central_server.py#L3111-L3170`: `_normalized_billing_query()` starts the query/payload helper range. Request schemas validate before parsing; `_validated_billing_response()` wraps only successful-response schema failures in `BillingResponseValidationError`; `billing_dashboard_payload()` emits the approved completion fields after successful validation.
-- `backend/central_server.py#L3173-L3209`: `_billing_api_error()` maps query `ValidationError` to redacted 400 `invalid_billing_query`, response validation failures to redacted 500 `internal_billing_response_error`, and source failures to 503 `billing_data_source_failed`. Response and JSON log share one `errorId` and preserve a redacted stack.
-- `backend/central_server.py#L14114-L14139`: authenticated analytics handling starts at current-user authentication and continues through the end of the legacy/parameterized ledger route; the range excludes recharge. Requests without `startDate/endDate/type/status/page/pageSize` retain the raw reverse latest-100 response.
-- `tests/test_billing_dashboard_api.py#L1-L552`: 22 tests cover service behavior, absent/unconfigured versus configured-unavailable main-DB behavior, query/response validation phase separation, correlated redacted 400/500/503 errors, exact dotenv calls and opt-out, completion logs, and real `json_response` UTF-8/status/shape/order/latest-100 legacy compatibility.
+- `backend/central_server.py#L54-L65`、`backend/central_server.py#L3097-L3164`: `MAINDB_ENABLED=0` is the only intentional local-source mode. With the default enabled mode, import/configuration/readiness/usage/strict-balance failures are fatal; `user-owner` returns exact `"inf"`; the 50,001-row sentinel still raises `billing_record_limit_exceeded`.
+- `backend/central_server.py#L3167-L3226`: `_normalized_billing_query()` starts the query/payload helper range. Request schemas validate before parsing; `_validated_billing_response()` wraps only successful-response schema failures; `billing_dashboard_payload()` emits approved completion fields after successful validation.
+- `backend/central_server.py#L3229-L3265`: `_billing_api_error()` maps query `ValidationError` to redacted 400, response validation failures to redacted 500, and source failures to 503. Response and JSON log share one `errorId`; import exception text is never logged.
+- `backend/central_server.py#L14319-L14344`: authenticated analytics handling continues through the legacy/parameterized ledger route. Requests without `startDate/endDate/type/status/page/pageSize` retain the raw reverse latest-100 response.
+- `tests/test_billing_dashboard_api.py#L1-L758`: 29 tests cover explicit main-DB disable versus default fail-closed behavior, import tracking, strict balance, owner infinity through real routes, dependency locks, query/response validation, correlated redacted 400/500/503 errors, dotenv control, completion logs, and exact legacy compatibility.
 - Verification: remaining-findings RED ran 4 focused tests with `FAILED (failures=3)`; focused GREEN is 4/4. Final Task 3, unified/structured, compile, and diff-check evidence is recorded in `.tmp-validation/sdd/task-3-implementer-report.md`.
 - Rollback: revert only the Task 3 hunks in `backend/central_server.py`, remove `tests/test_billing_dashboard_api.py`, and remove these Task 3 documentation/report entries. No OpenAPI, database schema, migration, deployment, remote service, production request, process restart, or image tag changed; a later release must retain the previous stable image tag and roll back if the new endpoint error rate exceeds 1%.
 
 # 2026-07-30 Task 4: billing OpenAPI and API reference contract
 
 - `backend/billing_analytics.py#L52-L94`: `parse_period()` and `parse_ledger_filters()` are the authoritative optional date, `groupBy`, type, status, minimum-page, and `20/50/100` page-size contract.
-- `backend/billing_analytics.py#L269-L282`: Draft 2020-12 query and response schemas define the strict parameterized contract: exact dates, numeric-or-exact-`"inf"` balance, nullable historical `balanceAfter`, required pagination, and closed response objects.
-- `backend/central_server.py#L14119-L14139`: analytics is always validated; ledger selects strict pagination only when one of the six recognized dashboard parameters is present, leaving unrelated-query requests on the legacy raw latest-100 path.
-- `docs/openapi.yaml#L439-L547`: authenticated ledger and analytics routes document 400/401/500/503 `ErrorResponse` responses. Ledger 200 explicitly uses the legacy/strict response union and says unrelated parameters preserve legacy behavior.
-- `docs/openapi.yaml#L976-L1089`: `LegacyBillingLedgerResponse` preserves arbitrary historical rows without pagination, while `BillingLedgerResponse` exactly represents the closed Draft 2020-12 parameterized response; `BillingAnalytics`, metrics, buckets, distribution, rows, and pagination remain explicit.
-- `tests/test_openapi_contract.py#L22-L250`: YAML parsing, component-reference resolution, OpenAPI nullable translation only when needed, strict runtime-surface/enums comparison, and representative analytics, strict-ledger, and legacy-ledger payload validation prevent the review regressions.
-- `docs/API_REFERENCE.md#L602-L624`: operator-facing analytics semantics, recognized-parameter mode selection, current-user scope, 500 response validation failure, data-source failure, strict pagination, and legacy compatibility.
+- `backend/billing_analytics.py#L286-L292`: Draft 2020-12 query and response schemas define the strict parameterized contract: exact dates, numeric-or-exact-`"inf"` balance, nullable historical `balanceAfter`, required pagination, and closed response objects.
+- `backend/central_server.py#L14319-L14344`: analytics is always validated; ledger selects strict pagination only when one of the six recognized dashboard parameters is present, leaving unrelated-query requests on the legacy raw latest-100 path.
+- `docs/openapi.yaml#L475-L583`: authenticated ledger and analytics routes document 400/401/500/503 `ErrorResponse` responses. Ledger 200 explicitly uses the legacy/strict response union and says unrelated parameters preserve legacy behavior.
+- `docs/openapi.yaml#L1012-L1125`: `LegacyBillingLedgerResponse` preserves arbitrary historical rows without pagination, while `BillingLedgerResponse` exactly represents the closed parameterized response; analytics, metrics, buckets, distribution, rows, and pagination remain explicit.
+- `tests/test_openapi_contract.py#L1-L335`: YAML parsing, component-reference resolution, strict runtime-surface/enums comparison, and representative analytics, strict-ledger, and legacy-ledger validation prevent contract drift.
+- `docs/API_REFERENCE.md#L618-L622`: operator-facing analytics semantics, recognized-parameter mode selection, current-user scope, validation/data-source failures, strict pagination, and legacy compatibility.
 - Verification: review-fix RED was the focused billing OpenAPI contract test and failed on the prior missing 500 contract. Focused GREEN passed; final Task 4 evidence is in `.tmp-validation/sdd/task-4-implementer-report.md`.
 - Rollback: revert only the Task 4 hunks in `docs/openapi.yaml`, `docs/API_REFERENCE.md`, `docs/IMPLEMENTATION.md`, `docs/TROUBLESHOOTING.md`, `tests/test_openapi_contract.py`, and its report. No production source, schema migration, deployment manifest, image tag, service process, or database state changed. A later release must retain the previous stable image tag and roll back if endpoint error rate exceeds 1%.
 
@@ -97,12 +473,12 @@
 - Rollback: 回滚 `backend/matrix_native_client.py`、`backend/api_server.py`、`tests/test_finder_page_actions.py`、`tests/test_douyin_multi_account.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服接口、数据库、OpenAPI、Docker、环境变量或 `migration.sql`。生效需要重启本地客户端。
 - `backend/maindb.py#L254-L289`: `refund_generation()` retains `(False, 0.0)` for no eligible or already-refunded rows, but rolls back and re-raises transactional/database exceptions so callers can distinguish a failed data source from idempotency.
 - `backend/maindb.py#L292-L306`: `topup()` requires `_exec()` to report exactly one affected user row before returning success; a zero-row update returns `ok=False` and cannot authorize a center-ledger entry.
-- `backend/maindb.py#L309-L318`: `list_model_usage_logs()` selects the exact usage fields for one user, applies `[start_at, end_at)`, orders by `created_at DESC, id DESC`, clamps `limit` to `1..50001`, and intentionally lets database errors propagate.
-- `backend/central_server.py#L3122-L3145`: successful main-DB `topup_user()` writes a positive ledger entry under `LOCK`, persists it, and uses the caller ref or an `admin-topup:<uuid>` fallback. Failed main-DB updates keep the existing return signature and write nothing.
-- `backend/central_server.py#L3150-L3215`: a successful non-zero model refund writes `退款:模型生成` with the original request ref. A false/zero result preserves the documented idempotent success tuple and cannot append another positive row.
-- `backend/central_server.py#L3427-L3473`: WeChat only marks an order credited and persists `wxpay:<order_no>` after concrete `maindb.topup()` success; failed balance writes remain eligible for later polling retry.
-- `backend/central_server.py#L3479-L3509`: redeem-code use is deferred until concrete main-DB topup success, then persists `redeem:<normalized-code>`; failures leave the code active.
-- `tests/test_billing_unified.py#L177-L294`, `tests/test_billing_unified.py#L316-L385`: focused regressions cover main-DB admin/refund/WeChat/redeem ledger rows, zero-row topups with no center ledger, database-refund exception propagation through the center failure path, repeated zero refund behavior, and the exact bounded query contract.
+- `backend/maindb.py#L321-L330`: `list_model_usage_logs()` selects the exact usage fields for one user, applies `[start_at, end_at)`, orders by `created_at DESC, id DESC`, clamps `limit` to `1..50001`, and intentionally lets database errors propagate.
+- `backend/central_server.py#L3351-L3376`: successful main-DB `topup_user()` writes a positive ledger entry under `LOCK`, persists it, and uses the caller ref or an `admin-topup:<uuid>` fallback. Failed main-DB updates keep the existing return signature and write nothing.
+- `backend/central_server.py#L3379-L3465`: a successful non-zero model refund writes `退款:模型生成` with the original request ref. A false/zero result preserves the documented idempotent success tuple and cannot append another positive row.
+- `backend/central_server.py#L3656-L3705`: WeChat only marks an order credited and persists `wxpay:<order_no>` after concrete `maindb.topup()` success; failed balance writes remain eligible for later polling retry.
+- `backend/central_server.py#L3708-L3749`: redeem-code use is deferred until concrete main-DB topup success, then persists `redeem:<normalized-code>`; failures leave the code active.
+- `tests/test_billing_unified.py#L177-L289`、`tests/test_billing_unified.py#L338-L407`: focused regressions cover strict-balance propagation plus main-DB admin/refund/WeChat/redeem ledger rows, zero-row topups, repeated zero refunds, and the bounded query contract.
 - Verification: the review-fix RED run was 24 tests with 2 expected failures; GREEN was `24/24` with the specified unittest command. No schema, migration, deployment, remote service, or process restart was changed.
 
 # 实现索引
@@ -841,11 +1217,11 @@
 - 验证：先运行新增测试观察旧实现因缺少 `_selected_material_open_target` 失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v` 通过 17 条用例。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-24 企业中心按钮重叠修复
-- `backend/matrix_native_client.py#L3081-L3082`：团队成员表格“操作”列改为固定宽度 174px，避免 `style_table()` 的全列拉伸在窄窗口下把两个操作按钮压到一起。
-- `backend/matrix_native_client.py#L3183-L3187`：行内“重置密码”和“停用/恢复”按钮使用固定宽度，保证每一行的点击区域稳定，不随文字和表格宽度抖动。
-- `backend/matrix_native_client.py#L18773-L18816`：侧边栏底部由单行布局改为上下两行；上行显示头像、账号名和连接状态，下行显示余额、主题切换和退出按钮，避免用户信息、余额和图标按钮在 220px 侧边栏内重叠。
-- `tests/test_role_permissions.py#L137-L147`：新增布局契约测试，锁定操作列固定宽度、按钮固定宽度和侧边栏底部上下两行结构。
-- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_role_permissions` 通过；运行 `.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py` 通过；使用 Qt 离屏渲染生成 `.tmp-validation/team-members-layout.png`，操作列按钮不再重叠。
+- `backend/matrix_native_client.py#L5524-L5525`：团队成员表格“操作”列保持固定宽度，并收窄到 146px，避免 `style_table()` 的全列拉伸在窄窗口下挤压操作按钮。
+- `backend/matrix_native_client.py#L5631-L5648`：行内“重置密码”和“停用/恢复”按钮改用专属 `teamAction` 紧凑样式，宽度分别为 72px 和 48px，覆盖全局 `ghost` 按钮最小宽度，保证每一行点击区域稳定且不重叠。
+- `backend/matrix_native_client.py#L31086-L31123`：侧边栏底部保持上下两行；上行显示头像和账号名，下行显示余额、主题切换和退出按钮，避免用户信息、余额和图标按钮在 220px 侧边栏内重叠。
+- `tests/test_role_permissions.py#L259-L277`：布局契约测试锁定操作列固定宽度、`teamAction` 紧凑按钮宽度和侧边栏底部上下两行结构。
+- 验证：先运行 `.venv-win\Scripts\python.exe -m unittest tests.test_role_permissions.RolePermissionsTest.test_client_team_member_and_sidebar_controls_have_stable_widths -v` 观察旧实现因仍是 174px 操作列和 `ghost` 按钮而失败；修复后同命令通过，`.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_role_permissions.py` 通过；Qt 离屏几何检查生成 `.tmp-validation/team-members-actions.png`，按钮外框为 74px/50px，最右到 131px，小于 146px 操作列且不重叠。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_role_permissions.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI、充值/兑换码或 `migration.sql`。
 
 ## 2026-07-25 素材发布多文件打开目录
@@ -1386,7 +1762,7 @@
 - `backend/matrix_native_client.py#L8060-L8429`：七栏报告契约、缺失栏目补全和报告生成。
 - `backend/matrix_native_client.py#L9679-L9799`：Tesseract 优先、RapidOCR 回退和逐帧错误记录。
 - `backend/matrix_native_client.py#L9801-L9888`：客户端音频分片转写封装与降级状态。
-- `backend/utils/video_transcription.py#L24-L141`：服务 URL 策略、60 秒分片、600 秒上限和定向重试导出。
+- `backend/utils/video_transcription.py#L24-L145`：服务 URL 策略、60 秒分片、默认完整时长导出、显式上限和定向重试导出。
 - `backend/utils/video_transcription.py#L144-L243`：严格转写 Schema、拒绝识别和绝对时间戳合并。
 - `backend/utils/video_transcription.py#L274-L356`：Gemini 音频请求、顺序重试和结构化失败。
 
@@ -1774,7 +2150,7 @@
 - `backend/matrix_native_client.py#L7654-L7715`：远程原图在后台流式加载；失败记录脱敏结构化日志 `xhs_note_source_image_load_failed`，旧任务图片响应由 generation 标识丢弃。
 - `backend/matrix_native_client.py#L7927-L8059`：读取结构、生成预览和保存草稿均固定捕获发起时的任务 ID 与 generation；切换笔记后旧响应不再覆盖新任务，读取结构仍包含 30 秒超时和明确缺图提示，生成预览前会要求手动补齐全部替换图。
 - `backend/matrix_native_client.py#L11365-L11365`：资产库允许 `note_template` 类型。
-- `backend/matrix_native_client.py#L18016-L18038`：资产库仅展示本地收藏，过滤项新增“图文模板”。
+- `backend/matrix_native_client.py#L18016-L18038`：资产库保留 `note_template` 类型兼容；当前筛选入口不展示“图文模板”。
 - `backend/matrix_native_client.py#L19406-L19406`：原生导航新增“🧩 图文同款”。
 - 历史 Web 图文同款入口已随 `2026-07-27 Web 交付面移除` 退役；当前入口只保留原生客户端“内容生产 -> 图文同款”和后端接口。
 - `tests/test_xhs_note_replacement.py#L385-L397`：4 图图文同款冒烟测试。
@@ -1822,8 +2198,8 @@
 - `backend/local_browser_worker.py#L48-L48`：本地浏览器执行器新增 `douyin.dm.inbox -> /api/douyin/dm/inbox` 映射，并通过现有 `CAPABILITIES` 对中心服声明能力。
 - `backend/central_server.py#L732-L739`：中心服审计对 `douyin.dm.inbox` payload 做专门脱敏，只记录 `targetFingerprint`、`limit` 和 `sinceFingerprint`；`backend/central_server.py#L743-L773` 对中心任务结果做持久化脱敏，不保存 `target` 原文和 `messages[].text` 原文；`backend/central_server.py#L13024-L13024` 将任务类型映射到本地收件箱接口；`backend/central_server.py#L13522-L13540` 在任务结果写入时使用脱敏结果。
 - `backend/api_server.py#L1644-L1672`：新增私信消息归一化，固定输出 `fingerprint/direction/kind/text/createdAtText`，非文本消息不返回正文；未知方向输出 `unknown`，客户端不自动处理；浏览器抽取会给同文本重复消息附加 `ordinal`，避免连续相同文本共用同一指纹；`backend/api_server.py#L1675-L1867` 使用隔离子进程和本机 Playwright 浏览器打开指定客户私信会话并读取最近消息；`backend/api_server.py#L1759-L1760` 将私信读取浏览器固定到 `dy_dm_profile/current` 资料目录，避免每 20 秒创建全新临时 profile；`backend/api_server.py#L3032-L3040` 提供 `run_douyin_dm_inbox()` 包装；`backend/api_server.py#L5548-L5560` 接通 POST `/api/douyin/dm/inbox`。
-- `backend/matrix_native_client.py#L800-L814`：新增本机 API 调用 helper，自动收信正文不再经中心服任务结果传递；`backend/matrix_native_client.py#L5807-L5836`：全自动回复轮询间隔固定为 20 秒，合并窗口固定为 300 秒，并新增安全错误码归一化和致命收件箱错误列表；`backend/matrix_native_client.py#L6002-L6085` 维护已见指纹、客户指纹、待合并文本和 5 分钟发送条件，并只处理 `direction=customer` 的文本消息，非文本消息进入 `manual_required`；`backend/matrix_native_client.py#L6087-L6123` 在 `not_authenticated`、`dm_inbox_button_not_found`、本地执行器不可用等错误下停止全自动并提示重新登录/人工查看，避免反复弹浏览器；`backend/matrix_native_client.py#L6175-L6190` 每 20 秒直接调用本机 `/api/douyin/dm/inbox` 携带 `sinceFingerprint`；`backend/matrix_native_client.py#L6226-L6232` 首次成功拉取只标记历史消息为已见，避免重启后自动回复旧私信；`backend/matrix_native_client.py#L6209-L6276` 自动回复失败/发送成功/发送失败日志均使用 `targetFingerprint`、`messageFingerprint` 和 `errorCode`，发送失败会恢复待发缓冲并移除未发送历史。
-- `tests/test_douyin_dm_auto_reply.py#L22-L208`：覆盖中心服/本地执行器任务映射、本地接口契约、消息指纹稳定性、重复文本指纹、未知方向跳过、隔离子进程、本机直连轮询、20 秒轮询、首次基线、5 分钟合并、非文本人工处理、发送失败回滚、未登录/不可私信时停止全自动、固定私信 profile、中心结果脱敏和结构化日志字段；`tests/test_openapi_contract.py#L14-L44` 将 `/api/douyin/dm/inbox` 和 schema 纳入 OpenAPI 契约覆盖。
+- 该历史实现已由本文件 2026-08-01 的 “Douyin automatic reply serial queue and manual handoff” 记录替代：当前轮询间隔仍为 20 秒，但纯文本按顺序逐条回复；非文本或明确转人工请求会关闭自动回复并提示人工接管。
+- `tests/test_douyin_dm_auto_reply.py#L22-L727`：覆盖中心服/本地执行器任务映射、本地接口契约、消息指纹稳定性、重复文本指纹、未知方向跳过、隔离子进程、本机直连轮询、20 秒轮询、首次尾部未回复消息处理、单轮即时合并、非文本/混合批次人工处理、发送失败停用、未登录/不可私信时停止全自动、固定私信 profile、中心结果脱敏和结构化日志字段；`tests/test_openapi_contract.py#L14-L44` 将 `/api/douyin/dm/inbox` 和 schema 纳入 OpenAPI 契约覆盖。
 - `docs/openapi.yaml#L276-L325`、`docs/openapi.yaml#L1259-L1332`：新增本地收件箱接口和请求/响应/消息 schema，并标注正文只在本机响应中存在、中心持久化会脱敏；`docs/API_REFERENCE.md#L586-L646`：同步接口手册和隐私边界；`docs/TROUBLESHOOTING.md#L1761-L1768`：记录“全自动回复点击后没反应”的排查、隐私边界和回滚；`CHANGELOG.md#L702-L708` 与 `migration.sql#L7-L10`：记录发布和 no-op 迁移。
 - 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_dm_auto_reply tests.test_openapi_contract -v` 通过 19/19；后续完整回归见最终回复。真实抖音页面冒烟依赖可用登录账号和目标客户会话，本次未自动执行。
 - 回滚：回退上述后端、客户端、测试和文档文件即可恢复到半自动私信能力；不涉及数据库结构或数据迁移。代码生效需要重启本地客户端、本地执行引擎和中心服。
@@ -1865,7 +2241,7 @@
 - `backend/matrix_native_client.py#L4907-L4977`: `_register_xhs_note_template_asset()` writes a traceable `note_template` JSON under `data_dir()/xhs_note_template_assets/`, carrying draft title/body/tags/files/status, source title/body/tags/url/noteId, template id/imageSlots/copyStructure, replacement job id, and the first saved draft image as thumbnail/preview metadata. Missing files or asset registration failures emit `xhs_note_template_asset_register_failed`.
 - `backend/matrix_native_client.py#L9090-L9112`: `XhsNoteReplacementPage.save_draft()` now registers the local asset template after a successful local draft save and central sync attempt, returning the result as `assetSync`.
 - `backend/matrix_native_client.py#L13767-L13798`: `add_asset()` accepts `kind="note_template"` plus compatible `category`, `thumbnail`, and `preview` fields, copying thumbnails into the asset directory for stable local display.
-- `backend/matrix_native_client.py#L20461-L20555` and `backend/matrix_native_client.py#L20570-L20621`: the local asset library exposes the `图文模板` filter and renders note-template cards with thumbnail fallback plus `文件夹` and `删除` actions; it no longer exposes a direct JSON `打开` action.
+- `backend/matrix_native_client.py#L20461-L20555` and `backend/matrix_native_client.py#L20570-L20621`: the local asset library retains note-template card rendering with thumbnail fallback plus `文件夹` and `删除` actions, while the current filter row no longer exposes the `图文模板` entry and still does not expose a direct JSON `打开` action.
 - `tests/test_xhs_note_replacement.py#L1094-L1144` and `tests/test_xhs_note_replacement.py#L1147-L1225`: regression coverage verifies saved drafts still sync to the central material library and now register a `note_template` asset with source/template metadata.
 - Verification: first ran the new focused regression and observed the old implementation fail with no asset registration; after implementation, `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests.test_save_draft_registers_note_template_asset tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests.test_save_draft_syncs_saved_material_to_central_library -v` passed 2/2, `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement -v` passed 55/55, and `.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_xhs_note_replacement.py` exited 0.
 - Rollback: revert `backend/matrix_native_client.py`, `tests/test_xhs_note_replacement.py`, this implementation note, the troubleshooting note, and `CHANGELOG.md`. No central-server API, OpenAPI, Docker, database schema, or `migration.sql` change is required.
@@ -1950,19 +2326,19 @@
 
 ## 2026-07-30 账单领域模块与 Phase 0 冒烟
 
-- `backend/billing_analytics.py#L1-L283`：新增无基础设施依赖的账单领域模块，包含 UTC+8 日期范围和流水筛选、账本/模型用量/充值订单/兑换码的归一化与去重、退款双记录、四类消费聚合、零填充趋势、分页，以及 Draft 2020-12 运行时 JSON Schema 校验；金额转换边界拒绝 Infinity、NaN 和其他非有限 Decimal，只有余额输入的精确字符串 `"inf"` 表示无限。
-- `tests/test_billing_analytics.py#L1-L130`：测试锁定活跃消费日均值、退款展开、账本权威退款与模型扣费共存、Decimal 归一化边界、视频任务去重均值、月趋势零填充、范围与分页参数错误、运行时 schema 拒绝，以及仅精确 `"inf"` 合法、其余非有限余额在响应校验/序列化前被拒绝的语义。
+- `backend/billing_analytics.py#L1-L300`：新增无基础设施依赖的账单领域模块，包含 UTC+8 日期范围和流水筛选、账本/模型用量/充值订单/兑换码的归一化与去重、退款双记录、四类消费聚合、零填充趋势、分页，以及 Draft 2020-12 运行时 JSON Schema 校验；金额转换边界拒绝 Infinity、NaN 和其他非有限 Decimal，只有余额输入的精确字符串 `"inf"` 表示无限。
+- `tests/test_billing_analytics.py#L1-L216`：测试锁定活跃消费日均值、权威充值去重和驼峰时间、共享扣费/退款引用、退款展开、Decimal 边界、视频任务去重均值、月趋势、范围/分页、运行时 schema 和仅精确 `"inf"` 合法的语义。
 - `scripts/smoke_billing_dashboard.py#L1-L36`：确定性 Phase 0 假数据链路覆盖视频、图片、配音、充值和退款；执行归一化、统计、分页及两个响应 schema 校验。
-- `backend/requirements.txt#L1-L20`、`backend/requirements.deploy.txt#L1-L21`：锁定 `jsonschema==4.23.0`，供本地和部署运行时使用。
+- `backend/requirements.txt#L20-L22`、`backend/requirements.deploy.txt#L21-L23`：锁定 `jsonschema==4.23.0`、`PyMySQL==1.1.1` 和 `passlib[bcrypt]==1.7.4`，供本地和部署运行时使用。
 - 验证：先运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_billing_analytics -v`，因缺少 `billing_analytics` 按预期 RED；当前完整套件 12/12 通过，包含非有限余额回归。Phase 0 冒烟输出单个 `{"ok": true}` JSON 对象，且 `py_compile` 退出码为 0。
 - 回滚：移除 `backend/billing_analytics.py`、`tests/test_billing_analytics.py`、`scripts/smoke_billing_dashboard.py` 及两份 requirements 中的 `jsonschema` 锁定，并删除本条和对应排障记录即可；本任务未改动中心服、客户端、数据库、OpenAPI、Docker、环境变量或运行中进程。
 
 ## 2026-07-30 Task 5 原生账户中心账单看板
 
 - `backend/matrix_native_client.py#L3830-L4000`：新增 `_billing_amount()`、`_billing_query()`、固定 190px 高的 `BillingTrendChart` 和固定四行的 `BillingDistributionBars`。趋势标签超过 12 个桶时确定性抽稀；分布图固定预留类型、横条、金额和百分比列，不引入 QtCharts、WebView 或新依赖。
-- `backend/matrix_native_client.py#L25187-L25560`：`AccountPage` 从当前类定义开始，构建四个紧凑指标、独立的统计/明细日期、按日/按月分组、四类消费分布、六项明细筛选、20/50/100 分页和七列固定宽度表格。指标直接展示中心端 `activeConsumptionDays`、`dailyAverage` 和 `videoAverage`，客户端不重算活跃日语义；充值、兑换、手机号和用户管理控件移至账单明细之后，原权限容器继续使用平台管理员可见判断。
-- `backend/matrix_native_client.py#L25562-L25598`：`load_analytics()` 从当前异步请求函数定义开始，递增独立序列号、发出脱敏结构化请求事件，并将异常转换为带 `errorId` 的 bridge payload。`backend/matrix_native_client.py#L25599-L25638`：`load_ledger()` 以独立序列号和分页/筛选查询执行同样的保护。
-- `backend/matrix_native_client.py#L25763-L25971`：响应处理从 `_on()` 定义开始：analytics 与 ledger 丢弃过期响应并记录结构化事件；失败或响应格式异常只显示可重试提示与 `errorId`，保留上次成功内容。`"inf"` 显示为 `∞ 运营方`，历史未知 `balanceAfter` 显示 `—`，正负变动分别使用绿/红色，详情保留完整悬停文本；晚到的管理员响应会再次校验当前角色。
+- `backend/matrix_native_client.py#L25479-L25853`：`AccountPage` 构建四个紧凑指标、独立的统计/明细日期、按日/按月分组、四类消费分布、六项明细筛选、20/50/100 分页和七列固定宽度表格；管理控件仍由平台管理员权限容器控制。
+- `backend/matrix_native_client.py#L25854-L25931`：`load_analytics()` 与 `load_ledger()` 使用独立序列号、脱敏结构化事件、分页/筛选查询和带 `errorId` 的异常 payload。
+- `backend/matrix_native_client.py#L26055-L26268`：`_on()` 丢弃迟到 analytics/ledger 响应，错误时保留上次成功内容；`"inf"` 显示为 `∞ 运营方`，未知 `balanceAfter` 显示 `—`，并在晚到管理员响应后复核当前角色。
 - `tests/test_account_billing_dashboard.py#L1-L197`：TDD 覆盖四指标/七列表头源码契约、30 天默认区间、明细筛选独立性、固定图表高度、零数据四行分布、金额/查询格式、analytics/ledger 过期响应、错误保留、未知历史余额、详情 tooltip、角色隐藏及旧浮点无穷余额兼容。
 - `scripts/smoke_account_billing_ui.py#L1-L205`：使用假 analytics/ledger 响应分别以企业角色渲染 1280x900、普通角色渲染 1024x768，输出 `.tmp-validation/account-billing/account-billing-1280x900.png` 和 `account-billing-1024x768.png`；脚本检查非空像素、每个命名账单指标标签的页面/文本边界、表头和可见单元格的 viewport/字体几何、右侧省略的长详情完整 tooltip、固定四行分布及晚到管理员 payload 后的管理员控件隐藏，并为 Qt offscreen 显式加载 Windows 中文字体以保证视觉证据可读。
 - 验证：`tests/test_account_billing_dashboard.py#L1-L197` 的专项测试先有 9 项因控件/字段缺失按预期 RED；实现后专项 11/11 与既有权限/计费回归 15/15 通过。review-fix RED 确认旧 205 行离屏脚本缺少标签/表格几何断言助手；补充助手后，离屏冒烟覆盖命名指标文字、表头、可见单元格与长详情 tooltip。2026-07-30 最终复跑 `tests.test_account_billing_dashboard tests.test_role_permissions tests.test_native_billing_rates` 为 26/26（3.659s），`py_compile` 覆盖客户端、205 行冒烟脚本和 197 行专项测试，`git diff --check` 全量与 Task 5 定向检查均通过。离屏冒烟首次因 PySide6 `QWidget.render` 签名不兼容失败，修正为显式 `QPoint` 后通过；首次图片检查发现 offscreen 字体库为空导致方框字，显式加载 `Deng.ttf` 后重渲染并人工确认两种尺寸无重叠、裁切或不可读文本。
@@ -1979,13 +2355,273 @@
 - `tests/test_enterprise_task_center_local_browser.py#L86-L134`: 回归覆盖企业家看到本企业本地任务、普通用户只看到自己的本地任务、企业用量/概览计数包含本地任务，以及离线本地执行尝试会留下失败任务。
 - 验证：先运行新增专项测试观察旧实现失败；实现后 `.\.venv-win\Scripts\python.exe -m unittest tests.test_enterprise_task_center_local_browser tests.test_role_permissions -v` 通过 17 项，`.\.venv-win\Scripts\python.exe -m py_compile backend\central_server.py backend\matrix_native_client.py tests\test_enterprise_task_center_local_browser.py` 通过。
 - 回滚：回退 `backend/central_server.py`、`backend/matrix_native_client.py`、`tests/test_enterprise_task_center_local_browser.py`、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及数据库迁移、Docker、环境变量或 `migration.sql`。中心服和本地客户端需重启后生效。
+# 2026-07-30 小红书账号矩阵改名同步修复
+- `backend/matrix_native_client.py#L1108-L1117`: 账号矩阵合并中心服和本地执行引擎账号时，小红书只在本地执行引擎返回 `xhs-self` 时展示；本地登录态消失后，中心旧记录不再单独出现在账号矩阵里。
+- `backend/matrix_native_client.py#L5111-L5111`、`backend/matrix_native_client.py#L5214-L5237`: “改名”按钮把中心账号 ID 一并传入；保存昵称时先写本地 `/api/accounts/rename`，再同步调用中心服 `/api/accounts/rename`。只要本地或中心任一侧保存成功，界面刷新后即可看到新昵称；两侧都失败才提示失败。
+- `backend/central_server.py#L4283-L4313`、`backend/central_server.py#L13775-L13806`: 节点账号同步和本地浏览器账号上报时保留 `displayNameOverride`，避免下一次心跳把人工昵称刷回平台默认名。
+- `backend/central_server.py#L4445-L4450`、`backend/central_server.py#L4483-L4520`、`backend/central_server.py#L15370-L15379`: 中心账号列表优先返回人工昵称；新增中心服账号改名函数与 `/api/accounts/rename` 路由，按企业范围和当前用户可见范围拦截越权请求，并写入 `account.rename` 审计。
+- `docs/openapi.yaml#L184-L214`、`docs/openapi.yaml#L1524-L1556`、`docs/API_REFERENCE.md#L161-L180`: 补齐账号改名 OpenAPI 和接口说明，明确不返回 Cookie、不修改平台昵称，中心服记录写入 `displayNameOverride`。
+- `tests/test_native_publish.py#L170-L191`、`tests/test_native_publish.py#L257-L268`、`tests/test_account_matrix_metrics.py#L87-L119`、`tests/test_openapi_contract.py#L78-L110`: TDD 回归覆盖小红书中心旧记录登录态失效、客户端本地/中心双写、中心人工昵称不被节点同步覆盖，以及 OpenAPI 路径/Schema 追踪。
+- Verification: 新增失败测试已先在旧实现下失败，修复后相关聚焦测试、OpenAPI 合同测试和 `py_compile` 通过。完整验证见本次最终交付记录。
+- Rollback: 回退 `backend/matrix_native_client.py`、`backend/central_server.py`、`tests/test_native_publish.py`、`tests/test_account_matrix_metrics.py`、`tests/test_openapi_contract.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及数据库迁移、Docker、环境变量或 `migration.sql`。
+# 2026-07-31 LK888 strict postpaid actual-cost settlement
+- `backend/matrix_native_client.py#L802-L991`: `_comic_actual_cost()` reads only final remote cost fields; `_settle_comic_actual_billing()` writes an idempotent task-based ref, actual model ID and exact amount with `allowArrears=true`. Missing cost or task ID becomes `awaiting_actual_cost` with a redacted structured log. The former video/keyframe estimate, precharge and refund helpers are deleted.
+- `backend/matrix_native_client.py#L14688-L14906`: initial comic replacement submits and waits for start/end-frame and video tasks before billing. Each successful remote task is settled from its own `cost/actual_model`; failed or cancelled tasks create no local precharge or refund.
+- `backend/matrix_native_client.py#L15256-L15418`: single-frame and video regeneration use the same actual-cost settlement. Video download failure keeps the old completed media and stores the new task as pending recovery; settlement reads the new task ID from the final payload without overwriting the old media state.
+- `backend/central_server.py#L1057-L1149`: `lk888_actual_charge_amount()` extracts final cost and `lk888_actual_model_id()` prefers `actual_model/fallback_model` over the requested model. Known Vidu Q3 remote aliases normalize to `viduq3-cankaosheng`.
+- `backend/central_server.py#L1191-L1454`: `/lk888/*` has no estimate/precharge branch or runtime switch. Synchronous final costs settle immediately. `/v1/media/generate` submit responses always remain pending even when they contain amount-like fields; task status settles only from final cost and actual model. Historical `STATE.gen_charges` is read only to refund or close old precharge records.
+- `backend/central_server.py#L3477-L3531` and `backend/central_server.py#L3735-L3833`: actual-cost charging is idempotent by `ref`, may create arrears and uses the supplied LK888 amount even for `comic_keyframe_image`; normal non-model capability charging still uses center-owned prices and blocks insufficient balance.
+- `backend/central_server.py#L15898-L15917`, `docs/openapi.yaml#L594-L622` and `docs/openapi.yaml#L1168-L1192`: `/api/billing/charge` accepts documented `allowArrears` plus actual-cost metadata (`modelId/taskId/actualAmount/billingScenario/billingStage/billingDetail`). No new path or response field is introduced.
+- `tests/test_video_replacement.py#L2419-L2577` and `tests/test_video_replacement.py#L3009-L3120`: regression coverage proves submit-before-charge ordering, exact frame/video costs, actual model IDs, no charge/refund on submit failure, and preservation of existing media during download recovery.
+- `tests/test_api_download_contract.py#L1362-L1504` and `tests/test_billing_unified.py#L184-L205`: setting the removed legacy environment variable cannot restore precharge; async status uses the actual model; keyframe actual cost is not replaced by a local fixed capability price.
+- Observability: successful and pending comic settlements emit `video_replace_comic_actual_billing_settled` or `video_replace_comic_billing_awaiting_actual_cost`. Logs include amount/model and hashed task ID only; no Cookie, Token, Authorization, API key or private media URL is recorded.
+- Contract and storage impact: OpenAPI descriptions/schema are updated; no database DDL/DML, Docker topology, required environment variable or `migration.sql` change. Historical ledger rows are not mutated automatically.
+- Rollback: restore the matching previous client, center, tests and docs together, then restart both processes. There is no environment switch for precharge; running old and new billing processes together is prohibited because it can create duplicate or mismatched ledger rows.
 
-## 2026-07-30 抖音全自动回复账号登录态复用
-- `backend/matrix_native_client.py#L5462-L5472`: “去私信跟进”事件除客户主页外同时带入当前选择的抖音账号 ID。
-- `backend/matrix_native_client.py#L7466-L7844`: 私信页保存来源账号；手动发送、全自动收件轮询和自动回复发送统一携带同一个 `accountId`。用户手动编辑客户链接时清空来源账号，后端再按默认可用账号解析，避免误用旧线索账号。
-- `backend/api_server.py#L2851-L3094`: 自动收件浏览器接收 `account_id`，先通过账号矩阵解析可用 profile，再播种稳定的 `dy_dm_profile/current`；启动上下文后、访问客户主页前注入该账号 Cookie。诊断只保留账号 ID、Cookie 尝试数、注入数和异常类型。
-- `backend/api_server.py#L4271-L4286` 与 `backend/api_server.py#L7109-L7118`: 收件包装层和 HTTP 路由逐层转发可选 `accountId`，同时兼容运行时历史别名 `account`。
-- `docs/openapi.yaml#L1513-L1538` 与 `docs/API_REFERENCE.md`: `DouyinDmInboxRequest` 新增可选 `accountId`，并说明未传时使用最新可用抖音账号。
-- `tests/test_douyin_dm_auto_reply.py#L132-L278` 与 `tests/test_openapi_contract.py#L120-L128`: TDD 覆盖客户端账号一致性、路由/包装层传播、profile 播种、Cookie 注入顺序、脱敏诊断和 OpenAPI 可选字段。
-- 验证：新增用例先按预期失败，分别显示路由少传第 4 个参数、包装函数不接受 `account_id`、浏览器未解析账号/未注入 Cookie、客户端负载缺少账号、OpenAPI 缺少字段；实现后私信专项 54/54、获客页面 9/9、OpenAPI 契约 5/5 通过，相关 `py_compile` 退出码为 0。
-- 回滚：恢复 `backend/matrix_native_client.py`、`backend/api_server.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、`tests/test_douyin_dm_auto_reply.py`、`tests/test_openapi_contract.py`、`CHANGELOG.md` 和两份实现/故障文档。无数据库、Docker 或 SQL 迁移，`migration.sql` 保持 no-op；代码切换后重启本地客户端和本地执行引擎。
+# 2026-07-31 素材发布抖音多文件素材拦截
+- `backend/api_server.py#L4666-L4678`: `run_publish()` 在抖音平台进入发布锁、账号恢复和浏览器上传前检查素材文件数量；多于 1 个文件时返回 `douyin_single_video_required`、`platform=douyin` 和 `fileCount`，不再把多个路径交给抖音单文件上传框。
+- `backend/api_server.py#L7605-L7626`: `/api/publish/run` 响应透传 `fileCount`，便于本地客户端显示“当前选中几个文件”的可读提示。
+- `backend/matrix_native_client.py#L16852-L16869`: `_publish_result_message()` 将 `douyin_single_video_required` 翻译为“抖音视频发布只支持单个视频文件”，提示用户选择单独的 `.mp4/.mov` 视频素材后重试。
+- `tests/test_douyin_multi_account.py#L112-L134` 和 `tests/test_native_publish.py#L596-L613`: 回归覆盖抖音多文件素材不会调用 `publish_to_douyin()`，以及客户端展示中文单视频限制提示。
+- 契约影响：`/api/publish/run` 成功/失败 JSON 新增可选 `fileCount` 字段，已同步 `docs/openapi.yaml` 和 `docs/API_REFERENCE.md`。无数据库、Docker、环境变量或 `migration.sql` 变更。
+- 验证与回滚：新增测试先在旧实现下失败，修复后通过；完整验证见最终交付记录。回滚 `backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_multi_account.py`、`tests/test_native_publish.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可恢复旧行为。生效需要重启本地客户端和本地执行器。
+# 2026-07-31 抖音全自动回复每轮即时合并
+- 上述 2026-07-31 合并回复实现已被 2026-08-01 逐条队列替代。当前行为和测试位置见本文件的 “Douyin automatic reply serial queue and manual handoff” 记录。
+- 验证与回滚：新增行为测试先在旧实现下失败，修复后 `tests.test_douyin_dm_auto_reply` 79/79 通过；完整验证见最终交付记录。回滚 `backend/matrix_native_client.py`、`tests/test_douyin_dm_auto_reply.py`、`docs/API_REFERENCE.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可恢复旧 5 分钟窗口行为；本次不涉及中心服接口、数据库、OpenAPI schema、Docker、环境变量或 `migration.sql`，代码生效需要重启本地客户端。
+# 2026-07-31 资产库按此视频改造口播稿传递修复
+- `backend/matrix_native_client.py#L15513-L15632`: 新增 `_reference_breakdown_text_to_transcript_segments()`，把资产库采集参考视频的可读拆解文本解析为 `breakdownAnalysis.transcript.segments`；`_reference_breakdown_to_replacement_payload()` 在发送 `video_replace_start` 前补齐分段口播时间轴，避免同款替换生成方案只看到 `transcript.text` 而每段 `script` 为空。
+- `backend/matrix_native_client.py#L18598-L18616`: 同款替换方案构建仍按现有规则从 `transcript.segments` 与分镜时间重叠关系提取口播稿，本次只补齐资产库入口的数据契约，不改变用户上传人物/场景/道具后的替换方案生成流程。
+- `tests/test_workflow_assistant_helpers.py#L20-L130`: 回归测试覆盖资产库拆解文本中的 `镜头/台词/时长` 被转换成同款替换可读取的口播片段；旧实现因缺少转换函数和 `segments=[]` 先失败，修复后通过。
+- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_workflow_assistant_helpers.WorkflowAssistantHelpersTest.test_reference_breakdown_payload_builds_transcript_segments_for_replacement_scripts -v` 已从失败转为通过；完整相关回归和编译检查见最终交付结果。
+- 运行与回滚：仅本地客户端层变更，需重启本地客户端后生效；不涉及中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。回滚 `backend/matrix_native_client.py`、`tests/test_workflow_assistant_helpers.py` 和本次文档记录即可恢复旧行为。
+# 2026-07-31 本地客户端主题切换保留 UI 状态
+- `backend/matrix_native_client.py#L28477-L28526`: `toggle_theme()` 不再调用 `_rebuild_pages()`，改为调用 `_refresh_theme_ui()` 轻量刷新 QApplication 样式、现有控件和 `AuroraBg` 背景绘制，避免销毁工作流助手、输入框、任务页等本地 UI 状态。
+- `backend/matrix_native_client.py#L28528-L28559`: `_rebuild_pages()` 保留给确需完整页面重建的场景，主题/背景切换不再使用它。
+- `tests/test_video_breakdown.py#L873-L924`: 回归测试锁定视频分解忙碌时仍阻止主题切换，空闲后主题切换只调用 `_refresh_theme_ui()`，不得调用 `_rebuild_pages()`。
+- 验证：新增断言先在旧实现下失败；修复后运行主题切换聚焦测试、工作流助手直接模式测试、`py_compile` 和 `git diff --check`。
+- 回滚：回退 `backend/matrix_native_client.py`、`tests/test_video_breakdown.py`、`CHANGELOG.md`、`docs/TROUBLESHOOTING.md` 和本条记录即可；不涉及中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+# 2026-07-31 企业中心任务趋势真实柱状图
+- `backend/central_server.py#L10036-L10116`: 新增 `enterprise_task_trend_7d()`，`enterprise_usage()` 返回 `taskTrend7d`，按最近 7 个自然日和任务 `createdAt` 聚合中心服任务 `STATE["tasks"]` 与本地客户端任务 `STATE["localBrowserTasks"]`。
+- `backend/matrix_native_client.py#L4415-L4522`: 新增 `_enterprise_task_trend_series()`，企业中心“任务趋势”改为读取 `usage.taskTrend7d`，展示真实日期标签和每日任务数；删除 `or 280` 与固定比例模拟柱状图。
+- `docs/openapi.yaml#L827-L856`、`docs/openapi.yaml#L1332-L1379`、`docs/API_REFERENCE.md#L629-L644`: 补齐 `/api/enterprise/usage`、`EnterpriseUsage` 和 `EnterpriseTaskTrendBucket` 契约，并说明 `调度任务` KPI 是当前权限范围内任务总数，趋势图是近 7 天每日任务量。
+- `tests/test_enterprise_task_center_local_browser.py#L113-L142`、`tests/test_agent_mode_defaults.py#L189-L208`、`tests/test_openapi_contract.py#L80-L114`: 回归覆盖真实日桶聚合、前端不再使用模拟数据和 OpenAPI 必备路径/schema。
+- 验证：新增测试先在旧实现下失败；修复后运行企业任务中心、本地客户端趋势解析、OpenAPI 覆盖测试和相关 `py_compile` 均通过。
+- 回滚：回退 `backend/central_server.py`、`backend/matrix_native_client.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、相关测试、`CHANGELOG.md`、`docs/TROUBLESHOOTING.md` 和本条记录即可；不涉及数据库、Docker、环境变量或 `migration.sql`。
+# 2026-07-31 数字人口播上传素材悬浮删除
+- `backend/matrix_native_client.py#L3279-L3348`: 新增 `HoverDeleteMediaFrame`，把预览 QLabel 和左上角 `×` 删除按钮封装到同一个固定尺寸预览框；按钮默认隐藏，只在鼠标悬停且已有素材时显示。
+- `backend/matrix_native_client.py#L9110-L9119`: `DigitalHumanPage` 的人物、场景和声音上传位改用 `HoverDeleteMediaFrame`，三类素材都绑定到同一个 `_clear_uploaded_asset()` 清空入口。
+- `backend/matrix_native_client.py#L9244-L9279`: `_set_image_preview()` 支持新预览框；新增 `_sync_asset_status()` 和 `_clear_uploaded_asset()`，点击 `×` 只清空当前页面状态与预览，不删除磁盘文件或资产库记录。
+- `backend/matrix_native_client.py#L9281-L9327`: 上传流程改为上传成功后才替换预览；声音上传成功后显示短文本预览并可悬浮移除。
+- `tests/test_video_replacement_v2.py#L1895-L1906`: 新增源码回归测试，锁定数字人口播三类上传素材都有悬浮删除控件和清空逻辑。
+- 验证与回滚：本次只影响本地客户端数字人口播 UI；需要重启本地客户端后生效。无 OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响；回滚上述代码、测试和文档即可恢复旧行为。
+# 2026-07-31 企业中心 KPI 固定口径与在线节点统计
+- `backend/matrix_native_client.py#L3618-L3625`: 新增 `ENTERPRISE_OVERVIEW_KPI_LABELS`，企业中心总览固定展示“客户企业 / 企业用户 / 授权账号 / 可用账号 / 在线节点 / 调度任务”六个业务指标，不再按接口返回顺序展示“团队成员”等重复卡片。
+- `backend/matrix_native_client.py#L4717-L4719`: KPI 网格按固定列表取数，缺失字段显示 0；“授权账号”仍表示账号矩阵平台账号数量，“企业用户”表示企业内平台登录用户数量。
+- `backend/central_server.py#L10265-L10339`: `/api/enterprise/usage` 的 `nodes/onlineNodes/nodeOnlineRate` 改为使用统一执行端口径，包含本地浏览器客户端和兼容期旧执行节点。
+- `backend/central_server.py#L10675-L10763`: `/api/enterprise/summary` 的 `counts.nodesOnline` 按角色过滤；平台管理员/企业管理员按可见企业统计，普通用户直接调用接口返回 0，避免泄露企业执行端状态。
+- `backend/central_server.py#L14085-L14135`: 新增 `enterprise_execution_nodes()` 和 `enterprise_execution_nodes_for_orgs()`，统一本地浏览器客户端 `localBrowserClients` 与旧 `nodes`，并按 `lb-` 前缀去重同一台本地客户端。
+- `tests/test_enterprise_task_center_local_browser.py#L113-L124`、`tests/test_role_permissions.py#L124-L134`、`tests/test_agent_mode_defaults.py#L234-L244`: 回归覆盖在线本地浏览器客户端计入企业管理员在线节点、普通用户不能看到该数量，以及客户端 KPI 固定列表。
+- 验证与回滚：新增测试先暴露旧实现未统计 `localBrowserClients`、普通用户可看到企业在线节点和客户端 KPI 未固定的问题；修复后 `tests.test_enterprise_task_center_local_browser`、`tests.test_role_permissions`、`tests.test_agent_mode_defaults` 共 52/52 通过，`py_compile` 通过。回滚 `backend/central_server.py`、`backend/matrix_native_client.py`、三组测试、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及数据库结构、Docker、环境变量或 `migration.sql`。中心服和本地客户端需重启后生效。
+# 2026-07-31 AI触达 task_timeout 可观测性与长任务超时修复
+- `backend/matrix_native_client.py#L1394-L1416`: `submit_local_task()` 超时返回时保留最后一次 `/api/local-browser/task` 轮询结果，写入 `lastStatus`、`lastError` 和 `lastTask`，便于前端和日志判断任务是 queued、running 还是其他状态。
+- `backend/matrix_native_client.py#L1433-L1440`: `_local_task_error_message()` 新增 `task_timeout` 中文说明，提示检查本地执行引擎、登录/验证码/风控和页面加载状态，并附带任务ID与最后状态。
+- `backend/matrix_native_client.py#L6022-L6040`: `OutreachPage` 提交 `outreach.run` 时等待 900 秒，状态栏失败文案改用 `_local_task_error_message(d)`，不再直接显示 `未完成:task_timeout`。
+- `backend/central_server.py#L14005-L14074`: 中心服新增 `LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`、`LOCAL_BROWSER_LONG_TASK_PATHS` 和 `local_browser_task_timeout_sec()`；AI触达、寻找线索、发布、下载类长任务默认 900 秒后才 requeue，普通任务保持 300 秒。
+- `docs/DEPLOYMENT.md#L221-L221`: 环境变量清单补充可选 `CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`，便于 staging/prod 按需调整本地浏览器长任务 requeue 阈值。
+- `tests/test_outreach_page_copy.py#L31-L61`: 回归覆盖 AI触达 900 秒等待、中文错误翻译和超时诊断字段。
+- `tests/test_enterprise_task_center_local_browser.py#L180-L220`: 回归覆盖 `outreach.run` 运行超过普通 300 秒不会被中心服重新排队，同时普通搜索任务仍会按原 300 秒 requeue。
+- 验证：新增测试先在旧实现下失败；修复后运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_outreach_page_copy tests.test_enterprise_task_center_local_browser tests.test_finder_page_actions tests.test_native_publish -v` 通过 68/68。完整编译和 diff 检查见最终交付记录。
+- 回滚：恢复 `backend/central_server.py`、`backend/matrix_native_client.py`、`tests/test_outreach_page_copy.py`、`tests/test_enterprise_task_center_local_browser.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及 OpenAPI、数据库、Docker 或 `migration.sql`。本次新增可选环境变量 `CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`，默认 900 秒；中心服与本地客户端均需重启后生效。
+## 2026-07-31 Comic Replacement Motion-Only Prompt Cleanup
+- `backend/matrix_native_client.py#L11962-L12010`: `_comic_clean_motion_action()` now strips quoted spoken text, replaces source product/object words with uploaded prop actions, collapses repeated uploaded-prop replacements, and normalizes speech/promo verbs into visual actions.
+- `backend/matrix_native_client.py#L12001-L12009`: `_comic_clean_visual_continuation_prompt()` sanitizes continuation text before it is appended to visual prompts, removing `口播/讲解/说话` wording from LK888-facing prompt text.
+- `backend/matrix_native_client.py#L12012-L12111`: `_comic_uploaded_asset_motion_prompt()` now parses Markdown shot blocks such as `### ... **画面：** ... **动作：** ...`, keeps only motion/shot/rhythm structure, omits original person/product/scene/subtitle fields, and emits uploaded asset slots.
+- `backend/matrix_native_client.py#L12757-L12775`: `_comic_storyboard_update_payload()` sends `camera_movement="静态镜头"` instead of the full visual prompt, so the comic generator no longer parses the prompt body as camera movement.
+- `tests/test_video_replacement.py#L155-L170` and `tests/test_video_replacement.py#L1630-L1695`: regression coverage locks the camera-movement field and the Markdown motion-only prompt cleanup.
+- Verification and rollback: `tests.test_video_replacement` 97/97 passed; `py_compile` passed for `backend/matrix_native_client.py` and `tests/test_video_replacement.py`; latest job prompt reconstruction showed no original product/scene/person-clothing/subtitle-table/original quote/koubo/promo-detail residue. No OpenAPI, database, Docker, environment variable, remote comic service, or `migration.sql` impact. Roll back the two code/test files and docs entries to restore old behavior. Runtime effect requires manually restarting the local client; no restart was performed.
+## 2026-08-01 同款替换远程网络错误中文提示
+- `backend/matrix_native_client.py#L9870-L9905`: `_localize_replacement_display_text()` 新增远程请求超时与连接失败识别；`HTTPConnectionPool`、`Read timed out`、`ConnectionError`、`NewConnectionError` 等 requests 内部文本只保留在原始错误和结构化日志中，用户界面显示固定中文提示。
+- `tests/test_video_replacement_v2.py#L5340-L5376`: 新增两条展示层回归，分别锁定远程服务响应超时和远程服务连接失败，不展示英文异常、错误编号或 requests 内部文本。
+- 运行与回滚：本次仅本地客户端展示层、同款替换测试和文档变化；不涉及中心服、远程漫剧服务、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效，回滚上述文件和文档条目即可恢复旧展示。
+## 2026-08-01 Matrix comic storyboard TTS audio boundary
+- `tools/aicanvas_remote/server_current.py#L9807-L9820`: added `_is_matrix_video_replacement_project()` to detect Matrix video replacement projects from `source_mode/sourceMode/project_source_mode/projectSourceMode` on the project, task, or project config.
+- `tools/aicanvas_remote/server_current.py#L9822-L9838`: `_comic_storyboard_video_params_with_dialogue_audio()` now upgrades Matrix storyboard `audio_mode=auto` with dialogue to the TTS preparation path. Ordinary comic `auto` still logs `comic_storyboard_dialogue_audio_skipped` and submits no storyboard TTS.
+- `tools/aicanvas_remote/server_current.py#L13176-L13211`: `_finalize_ai_comic_fallback_video_audio()` now allows Matrix primary storyboard video results to enter the TTS remux path even when `fallback_applied` is false; non-Matrix primary results still return unchanged. The task-level `project_source_mode` fallback covers project-cache misses after service restart.
+- `tools/aicanvas_remote/server_current.py#L13432-L13478`: storyboard video submission now persists `project_source_mode/projectSourceMode` on remote tasks alongside `audio_mode/audioMode`.
+- `tests/test_aicanvas_frame_billing.py#L254-L274`, `tests/test_aicanvas_frame_billing.py#L446-L454`, and `tests/test_aicanvas_frame_billing.py#L609-L681`: regression coverage for Matrix `auto+dialogue` TTS preparation, source-mode metadata persistence, primary video TTS remux, and project-cache-miss remux. `tests/test_aicanvas_real_person_fallback.py#L58-L60` keeps the AST fixture aligned with the new helper.
+- Verification: RED was `tests.test_aicanvas_frame_billing` with 2 initial failures, then 2 metadata/cache-miss failures. GREEN verification passed `tests.test_aicanvas_frame_billing tests.test_aicanvas_real_person_fallback` 56/56, `.venv/bin/python -m unittest tests.test_video_replacement`, and `py_compile` for the remote mirror, local client, and touched tests. `server_current.py` still emits a pre-existing `return in finally` SyntaxWarning at line 2621.
+- Operations and rollback: no remote deploy, restart, OpenAPI, database, Docker, environment variable, or `migration.sql` change was performed. Runtime production effect requires separately deploying the remote AI Canvas `server.py` with backup hash, service health check, port check, and rollback plan. Revert `tools/aicanvas_remote/server_current.py`, `tests/test_aicanvas_frame_billing.py`, `tests/test_aicanvas_real_person_fallback.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the previous behavior.
+## 2026-08-01 Agent LK888 model endpoint audit
+- `backend/matrix_native_client.py#L2357-L2409`: Agent local canonical LK888 model rows keep UI-facing display names, model type, endpoint and duration rules. `_LK888_AGENT_EXCLUDED_MODEL_IDS` and `_lk888_fallback_models_by_type()` keep non-generic video rows such as `kling-avatar-image2video`, `vidu-jieshuoman`, and `vidu-mv` out of generic Agent selectors.
+- `backend/matrix_native_client.py#L2462-L2538`: `_agent_image_payload()` and `_agent_video_payload()` build LK888 media payloads with model-specific required params for Gemini/Nano Banana, Seedream, MJ, Vidu, Kling, Seedance, Sora, Grok, HappyHorse, Hailuo and Wanxiang rows.
+- `backend/matrix_native_client.py#L2845-L2868`: `_lk888_models_by_type()` merges LK888 online catalog rows with local canonical rows, then filters Agent-selectable models before the frontend receives the catalog. This prevents LK888 raw model IDs or mismatched catalog metadata from changing local Agent behavior.
+- `backend/matrix_native_client.py#L18832-L18915`: `_prodgen_run_image()` and `_prodgen_run_video()` submit Agent generation through `lk888_media_task()` with uploaded HTTP(S) reference images and the normalized model payload.
+- `tests/test_agent_video_duration.py#L301-L654`: regression coverage locks media endpoint routing, required LK888 params, valid duration normalization and exclusion of `kling-avatar-image2video` / `vidu-jieshuoman` / `vidu-mv` from Agent video choices.
+- `tests/test_video_replacement_v2.py#L1440-L1490`: focused digital-human tests keep `kling-avatar-image2video` available on the avatar/audio path and ensure local avatar images are sent in the dedicated digital-human payload.
+- Verification and rollback: no live LK888 generation was executed, so no real model fee was produced. No OpenAPI, DB, Docker, environment variable, or `migration.sql` impact. Restart the local client for runtime effect. Roll back `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `tests/test_agent_mode_defaults.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the old mapping.
+## 2026-08-01 Agent LK888 reference limits and special video params
+- `backend/matrix_native_client.py#L2357-L2380`: canonical Agent LK888 rows now include `viduq3-turbo-cankaosheng` and `grok-imagine-video-1.5-preview`; Vidu Q3 family duration slots are `(4, 8, 12, 16)`, Wanxiang 2.7 reference/first-last-frame rows use `(3, 6, 9, 12, 15)`, `sora-2` uses LK888's valid `(4, 8, 12)` slots, `veo3.1` uses LK888's single valid `(8,)` slot, and Grok Imagine 1.5 uses `(1..15)` slots.
+- `backend/matrix_native_client.py#L2389-L2422`: `_AGENT_IMAGE_REFERENCE_LIMITS` and `_AGENT_VIDEO_REFERENCE_LIMITS` define per-model LK888 reference limits. Locked image limits include `qwen-image=4`, `kling-v3=4`, `kling-v3-omni=4`, `wan2.7-image=4`, and `kling-image-o1=10`; locked video limits include `viduq3=7`, `viduq3-turbo=2`, `viduq3-turbo-cankaosheng=7`, `wan2.7-cankaosheng=4`, `wan2.7-shouweizhen=2`, `sora-2=2`, `veo3.1=3`, `grok-video-3=0`, `grok-imagine-video-1.5-preview=1`, `pixverse-v6-shouweizhen=2`, `happyhorse-i2v=1`, and `hailuo-2.3=2`.
+- `backend/matrix_native_client.py#L2462-L2495`: `_agent_image_reference_limit()`, `_agent_video_reference_limit()`, `_agent_video_is_first_last_frame_model()`, and `_prodgen_ref_label_for()` centralize reference truncation and UI labels. First/last-frame video models are detected by local row or `*-shouweizhen` style IDs and always show `首帧/尾帧` with a 2-image limit.
+- `backend/matrix_native_client.py#L2545-L2625`: `_agent_video_payload()` sends the model-specific LK888 fields: Vidu reference models use supported duration slots and `off_peak=false`; `wan2.7-cankaosheng` uses `ratio/resolution/images`; `wan2.7-shouweizhen` uses `first_frame_image/last_frame_image`; `sora-2` uses `input_reference`; `veo3.1` uses fixed `duration=8`, `generation_mode=fast/components`, `generation_type=TEXT/REFERENCE`, `quality=1080p`, and up to 3 `images`; `grok-video-3` uses `size=vertical_hd/horizontal_hd` without generic `resolution/aspect_ratio`; `grok-imagine-video-1.5-preview` requires one first-frame image and uses `aspect_ratio/resolution/images`; `happyhorse-i2v` uses `resolution=720P` without generic `aspect_ratio`; `hailuo-2.3` uses `resolution=768P`.
+- `backend/matrix_native_client.py#L19334-L19357`: `_prodgen_entry_ref_limit()` and `_prodgen_entry_refs()` apply the same model-specific limit to saved generation cards, so historical Agent records for first/last-frame models no longer render a third thumbnail as if it participated in generation.
+- `backend/matrix_native_client.py#L25722-L25722` and `backend/matrix_native_client.py#L26417-L26417`: generation cards and input slots use the centralized first/last-frame label and hint text instead of generic `参考图1/2/3`.
+- `tests/test_agent_video_duration.py#L419-L640`: regression coverage locks image/video reference limits, first/last-frame visible slots, Vidu/Wanxiang/Sora-2/Veo 3.1/Grok duration normalization, and LK888-specific payload fields for Sora, Veo, Grok, PixVerse, HappyHorse, Hailuo, Vidu and Wanxiang rows.
+- Verification: focused RED/GREEN was run for the new tests; final local verification is `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_video_duration -v`, `.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_agent_video_duration.py`, and `git diff --check -- backend/matrix_native_client.py tests/test_agent_video_duration.py CHANGELOG.md docs/IMPLEMENTATION.md docs/TROUBLESHOOTING.md`.
+- Operations and rollback: native-client-only change. No OpenAPI, database, Docker, environment variable, remote deploy, or `migration.sql` impact. Restart the local client before UI retest. Roll back `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the previous mapping.
+## 2026-08-01 Local browser account profile routing
+- `backend/matrix_native_client.py#L6192-L6254`: `FinderPage` 继续从账号下拉读取当前 `accountId`，但“打开主页”不再调用 `QDesktopServices.openUrl`；点击时捕获 `platform/accountId/url`，异步调用本地执行器 `/api/cloud-login/open-url`。
+- `backend/matrix_native_client.py#L6370-L6376`: `FinderPage._on()` 接收 `finder_open_profile` 结果并在状态栏显示“已用所选账号浏览器打开主页”或本地浏览器失败原因。
+- `backend/api_server.py#L4282-L4564`: 抖音评论预检、云浏览器 UI fallback、旧 Edge fallback 和 `publish_comment_to_douyin()` 全部携带选中的 `account_id`，避免 AI 触达评论回退误用 `douyin-self`。
+- `backend/api_server.py#L6163-L6182`: `CloudLoginSession.open_url()` 在已有账号浏览器 session 中导航到指定 HTTP(S) URL，并保留登录态诊断。
+- `backend/api_server.py#L6913-L6927`: `cleanup_cloud_sessions()` 对缺少 `last_seen/closed` 的旧 session 容错，避免残留 session 让本地浏览器接口 500。
+- `backend/api_server.py#L7385-L7428`: 新增 `/api/cloud-login/open-url`，按传入 `accountId` 查找或创建本地执行器管理的可视浏览器 session，并返回 `sessionId/accountId/requestedUrl/createdSession` 等诊断字段。
+- `tests/test_finder_page_actions.py#L43-L57`: 源码契约锁定获客中心“打开主页”必须调用本地执行器并传入选中账号，不得再调用系统默认浏览器。
+- `tests/test_douyin_comment_cooldown.py#L497-L611`: 回归覆盖评论预检、强制 UI fallback、云浏览器 session 创建和 `/api/cloud-login/open-url` 路由都使用选中 `accountId`。
+- `tests/test_openapi_contract.py#L77-L109`、`docs/openapi.yaml#L220-L253`、`docs/openapi.yaml#L1702-L1747`、`docs/API_REFERENCE.md#L182-L226`: 新接口写入 OpenAPI 和 API 参考，保持本地执行器契约可追溯。
+- 验证与回滚：已执行定向 RED/GREEN；最终验证见交付记录。生效需要重启本地客户端和本地执行器；无数据库、Docker、环境变量或 `migration.sql` 影响。回滚上述代码、测试和文档即可恢复旧行为。
+## 2026-08-01 AI Canvas remote file descriptor exhaustion handling
+- `tools/aicanvas_remote/server_current.py#L5878-L5928`: `_is_file_descriptor_exhaustion_error()` detects `OSError(24)`, `errno 24`, and `Too many open files`; `_platform_json_request()` sends `Connection: close`, emits `platform_json_request_fd_exhausted`, and returns `503 {"code":"platform_fd_exhausted"}` without exposing raw Python exception text.
+- `backend/matrix_native_client.py#L10059-L10103`: `_localize_replacement_display_text()` maps remote `Too many open files`, `OSError(24)`, `errno 24`, and `platform_fd_exhausted` failures to a Chinese operational message for same-style replacement users.
+- `tests/test_aicanvas_frame_billing.py#L214-L238`: regression covers remote platform request handling for `URLError(OSError(24, "Too many open files"))`, asserting the 503 code, sanitized detail, and structured log event.
+- `tests/test_video_replacement_v2.py#L5377-L5395`: regression covers native-client display localization so Python internals are not shown in the UI.
+- Verification: focused RED/GREEN was run for both new tests, then `tests.test_aicanvas_frame_billing tests.test_aicanvas_real_person_fallback` passed 57/57, the three focused display tests passed 3/3, and `py_compile` passed for `backend/matrix_native_client.py` and `tools/aicanvas_remote/server_current.py`.
+- Operations and rollback: no OpenAPI, database, Docker, environment variable, or `migration.sql` impact. Remote AI Canvas was deployed to `/root/AI-CanvasPro/server.py` at `20260801_113520`; backup is `/root/AI-CanvasPro/server.py.bak.comic-inline-media-20260801_113520`, previous SHA `f53d4d2ace67e12886557f28882fa61d40104083983ced96876b7efeaceb1f78`, deployed SHA `0cdbbd45b95817883ff0711faa6678b108f3f76a50b57f60c15fb3f54184f2fe`, service `active`, port listeners `1`, `/login` health `200`, remote smoke `tests.test_aicanvas_frame_billing` 43/43 OK. Roll back remote runtime by restoring that backup to `server.py` and restarting `ai-canvas.service`; roll back the two source files, two tests, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`, and this entry to restore prior source behavior.
+## 2026-08-01 Douyin DM inbox diagnostics and safe message classification
+
+## 2026-08-01 Douyin automatic reply serial queue and manual handoff
+
+- `backend/matrix_native_client.py#L8392-L8395`: the explicit-handoff pattern recognizes clear transfer requests such as `转人工`, `人工客服`, and `找人工`; ordinary mentions of `人工` alone do not trigger it.
+- `backend/matrix_native_client.py#L8654-L8691`: system notices are stored in the current conversation for traceability; manual handoff stops the timer, clears pending automatic messages, closes the checkbox, raises the app taskbar entry, and opens one non-blocking notification.
+- `backend/matrix_native_client.py#L8741-L8749`: the automatic queue pops one customer message at a time, keeps its single fingerprint as the active send, and never combines customer text.
+- `backend/matrix_native_client.py#L8752-L8811`, `backend/matrix_native_client.py#L9066-L9135`: non-text media or an explicit handoff request routes the batch to human review; the redacted log records `non_text` or `explicit_handoff`, and after each successful automatic send the next queued text begins immediately.
+- `tests/test_douyin_dm_auto_reply.py#L520-L673`: regressions cover local display, ordered one-by-one generation after each send, image handoff, and explicit customer request for human service.
+- Verification and operations: `\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_dm_auto_reply -v` passed 82/82. No API/OpenAPI, database, Docker, environment-variable, remote-service, or `migration.sql` change. Restart the local client to apply. Rollback restores `backend/matrix_native_client.py`, `tests/test_douyin_dm_auto_reply.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md`.
+
+- `backend/api_server.py#L2952-L2964`: inbox completion logs include redacted panel state and text-direction counts, without cookies or message bodies.
+- `backend/api_server.py#L3131-L3263`: DM inbox reading finds a bottom rich-text editor, scopes candidate bubbles to its conversation column, keeps non-empty bubbles as text even if avatar markup is present, strips trailing hover-menu actions, and uses bubble-center versus panel-center geometry only when CSS direction markers are absent.
+- `backend/matrix_native_client.py#L8594-L8643`: unknown-direction messages are retained for manual review instead of being marked seen.
+- `backend/matrix_native_client.py#L8896-L8932`: auto-reply status distinguishes unknown-direction text from a true empty inbox.
+- `tests/test_douyin_dm_auto_reply.py#L243-L356`: source-contract regression coverage protects panel diagnostics, rich-text editor candidates, action-menu exclusion, geometry fallback, and the client manual-review status.
+- Runtime note: restart the local client and local executor after applying. No API contract, OpenAPI, database, Docker, environment variable, or `migration.sql` change is required. Rollback is file-level restoration of the files listed in `docs/TROUBLESHOOTING.md`.
+## 2026-08-01 Same-style replacement image URL recovered as video
+- `backend/matrix_native_client.py#L10011-L10013`: `_REPLACEMENT_ERROR_DISPLAY` now maps `comic_segment_invalid:media_invalid_duration`, generic comic segment invalid media, and missing comic video recovery to Chinese user-facing messages.
+- `backend/matrix_native_client.py#L13046-L13057`: added small URL suffix helpers so recovery can distinguish obvious image URLs from video URLs without logging signed query strings.
+- `backend/matrix_native_client.py#L13059-L13070`: `_comic_storyboard_media_url(..., "video")` now accepts strong video fields only when they are not image URLs and accepts generic `resultUrl/result_url/url` only when the suffix is video-like. This prevents a storyboard end-frame `.png` from becoming the segment `videoUrl` after a submit timeout.
+- `tests/test_video_replacement.py#L1163-L1186`: regression reproduces project `314` / storyboard `314001` style recovery where only start/end frame image URLs exist and asserts `comic_video_recovery_missing` instead of returning a `.png`.
+- `tests/test_video_replacement_v2.py#L5394-L5403`: regression locks the Chinese display text for `comic_segment_invalid:media_invalid_duration`.
+- Verification: the two new tests failed before implementation and passed after the fix. Focused recovery/download tests passed 4/4, focused display tests passed 4/4. Broader verification is listed in the final handoff.
+- Operations and rollback: local client source and tests only. No remote AI Canvas deploy/restart, OpenAPI, database, Docker, environment variable, or `migration.sql` impact. Restart the local client for runtime effect. Roll back `backend/matrix_native_client.py`, `tests/test_video_replacement.py`, `tests/test_video_replacement_v2.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore prior behavior.
+## 2026-08-01 Agent Kling 2.6 Pro LK888 sound param
+- `backend/matrix_native_client.py#L2501-L2536`: `_agent_video_payload()` now leaves `kling-v2-6` on the generic video parameter set and no longer sends `params.sound=false`, which LK888 rejects during task creation.
+- `tests/test_agent_video_duration.py#L332-L350`: regression coverage asserts the `Kling 2.6 Pro` payload has no `sound` field while preserving the other Agent video model parameter rules.
+- Verification and rollback: RED first failed with `sound` present, then GREEN passed after the payload change. `tests.test_agent_video_duration tests.test_agent_mode_defaults` passed 58/58 and `py_compile` passed for `backend/matrix_native_client.py`. No OpenAPI, DB, Docker, environment variable, remote service, live LK888 generation, or `migration.sql` impact. Restart the local client for runtime effect. Roll back `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the old mapping.
+## 2026-08-01 Agent LK888 upstream saturation display text
+- `backend/matrix_native_client.py#L18896-L18965`: `_prodgen_user_error_text()` now normalizes mixed Chinese/English quotes first, extracts `详情/detail/message/msg/error/reason`, strips `未拿到任务ID` / `status` / `message` / `code`-style wrappers, removes raw error-number prefixes, and normalizes malformed punctuation such as `（image_url)` to `（image_url）`.
+- `backend/matrix_native_client.py#L25348-L25348`: Agent result cards render `生成失败：` plus `_prodgen_user_error_text(...)`, so historical saved failures are also cleaned when cards refresh.
+- `backend/matrix_native_client.py#L26135-L26140`: Agent generation failure handling stores the cleaned `error` for UI, keeps the original summary in `rawError`, logs the raw diagnostic locally, and refunds the local pre-generation capability charge as before.
+- `tests/test_agent_video_duration.py#L451-L569`: regression coverage now also locks two task-creation payload shapes that previously leaked raw LK888 fields: unquoted `code/msg` JSON-like text and mixed-quote Chinese-colon payloads.
+- Verification and rollback: `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_video_duration -v` passed 27/27 and `.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_agent_video_duration.py` passed. No OpenAPI, DB, Docker, environment variable, remote deploy, live LK888 generation, or `migration.sql` impact. Restart the local client for runtime effect. Roll back `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the old raw-error display.
+- Verification and rollback: `tests.test_agent_video_duration tests.test_agent_mode_defaults` passed 54/54; `py_compile` passed for `backend/matrix_native_client.py`. No OpenAPI, DB, Docker, environment variable, or `migration.sql` impact. Restart the local client for runtime effect. Roll back `backend/matrix_native_client.py`, `tests/test_agent_video_duration.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore old display behavior.
+## 2026-08-01 Agent Motion Control 与图片提交契约
+- `backend/matrix_native_client.py#L2053-L2140`：旧图片入口统一提交 LK888 `/v1/media/generate`，返回原始 JSON；需要本地图片字节的内部流程改用 `_lk888_image_result_download()`，避免旧入口隐式轮询下载。
+- `backend/matrix_native_client.py#L2409-L2558`：Agent 模型规则区增加图像/视频参考图数量上限、`kling-motion-control-v3` 专属图片+视频字段和 `kling-v2-6` 的 `sound=on`。
+- `backend/matrix_native_client.py#L19161-L19191`、`#L19367-L19419`：参考视频先上传为公网 HTTPS URL，再进入动作控制任务 payload；普通视频模型仍上传全部允许的参考图片。
+- `backend/matrix_native_client.py#L25734-L26230`：Agent UI 增加动作控制参考视频选择按钮，模型非动作控制时隐藏；生成记录保存 `referenceVideo` 路径，重新编辑时恢复。
+- `tests/test_agent_video_duration.py#L342-L430`：覆盖动作控制字段、参考视频上传、多图上限、Kling 2.6 有声和旧图片入口原始 JSON 契约。
+## 2026-08-01 小红书移除账号不再残留 JSON
+- `backend/api_server.py#L589-L610`: `remove_xhs_account()` 现在会优先删除 `xhs_auth_state.json`，失败时才回退为最小 tombstone；同时只清理 `xhs_profile` 下的 `Cookies*` 文件，不会触碰 `materials/`、`media_datas/` 或其他素材目录。
+- `tests/test_douyin_multi_account.py#L186-L210`: 回归测试覆盖了小红书移除后 `xhs_auth_state.json` 消失、cookie 文件清理、profile marker 保留以及素材文件保留。
+- 运行与回滚：仅影响本地账号状态文件与测试；重启本地客户端后生效。回滚 `backend/api_server.py`、`tests/test_douyin_multi_account.py` 和本条文档即可恢复旧行为。
+## 2026-08-03 Agent LK888 video media contract alignment
+- `backend/matrix_native_client.py#L2408-L2490`: define per-model Agent video image/video/audio capability defaults and required-media rules. The same helper controls reference limits and UI capability checks.
+- `backend/matrix_native_client.py#L2628-L2776`: build LK888-specific video payloads. Hailuo, Vidu Q3, Kling V3 video, HappyHorse, Wanxiang, first/last-frame, Motion Control, and Grok Imagine rules are normalized before submission; local reference videos are passed as public URLs.
+- `backend/matrix_native_client.py#L19775-L19794`: reference-video upload metadata is generic for Agent video models, not limited to Motion Control.
+- `backend/matrix_native_client.py#L19971-L20035`: `_prodgen_run_video()` uploads images and supported reference videos according to the shared media contract before calling LK888.
+- `backend/matrix_native_client.py#L26562-L26577`: Agent reference-video button visibility follows the selected model capability.
+- `tests/test_agent_video_duration.py#L431-L858`: regression coverage for image limits, duration slots, model-specific payload fields, required media, generic reference-video upload, and HappyHorse/Wanxiang contracts.
+- Native-client-only change. No OpenAPI, database, Docker, environment-variable, remote-service, or `migration.sql` change. Restart the local client before testing the Agent UI.
+## 2026-08-03 Agent videos to publish queue
+- `backend/matrix_native_client.py#L19511-L19557`: `prodgen_video_pending_entry()` and `add_prodgen_video_to_pending()` convert only completed Agent video records into `PENDING` publish rows, default the platform to Douyin, copy the Agent prompt into `caption`, and preserve `sourceProdgenId` for traceability. The helper checks for an existing pending row before insertion so repeated clicks do not duplicate the publish queue.
+- `backend/matrix_native_client.py#L26206-L26213`: `GenCard` shows `加入发布` beside `播放` only for completed video results; once a matching pending row exists, it switches to disabled `已加入`.
+- `backend/matrix_native_client.py#L26564-L26566`: `ProductGenPage.on_show()` loads both Agent results and the pending publish queue so restarted clients can still show `已加入` for videos already queued.
+- `backend/matrix_native_client.py#L26882-L26891`: `ProductGenPage.add_to_publish()` handles the click, refreshes the current card, and tells the user to continue in 素材发布 for account selection and Douyin publishing.
+- `tests/test_agent_mode_defaults.py#L375-L410`: regression coverage verifies Douyin defaulting, duplicate protection, source trace fields, and completed-video button visibility.
+- Verification and rollback: run `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_agent_completed_video_can_be_added_to_douyin_pending_publish_once tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_agent_video_publish_button_is_only_available_after_generation -v`, then the broader Agent/native publish checks. This is native-client-only; no OpenAPI, database, Docker, environment variable, remote deployment, LK888 generation, or `migration.sql` change. Restart the local client after source update. Roll back `backend/matrix_native_client.py`, `tests/test_agent_mode_defaults.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md`.
+## 2026-08-03 MiniMax H3 official direct integration
+- `backend/utils/minimax_direct.py#L1-L272`: adds the dependency-light MiniMax official direct adapter. `_https_url()` rejects non-public HTTPS media including local paths, `data:` URLs, localhost, loopback, private, link-local, reserved, multicast, and unspecified IPs before provider submission. `normalize_video_request()` fixes provider model to `MiniMax-H3`, validates duration `4..15` and resolution `768P|2K`. `MiniMaxDirectClient.submit_video()` calls `/v2/video_generation`; `poll_video()` calls `/v2/query/video_generation/{task_id}`; `retrieve_video()` extracts final `task.content.url` shapes.
+- `backend/utils/minimax_pricing.py#L1-L6`: intentionally returns no published unit price with version `minimax-h3-price-unresolved`, so H3 cannot be charged from an unsupported local estimate.
+- `backend/central_server.py#L972-L1279`: adds the authenticated center endpoints `/api/v1/minimax/video/generate` and `/api/v1/minimax/video/tasks/{task_id}`, including enabled/configured/concurrency checks, redacted structured MiniMax logs, pending-task storage, official provider polling for active tasks, `resultUrl/providerResultUrl` extraction, and `awaiting_actual_cost` status when provider generation succeeds without a confirmed price.
+- `backend/central_server.py#L14296-L14321`: reads `MINIMAX_ENABLED`, `MINIMAX_CENTER_API_BASE`, `MINIMAX_CENTER_API_KEY`, `MINIMAX_MAX_ACTIVE_TASKS`, `MINIMAX_TASK_TIMEOUT_SEC`, and `MINIMAX_POLL_INTERVAL_SEC` from the environment. `backend/central_server.py#L15234-L15235` and `backend/central_server.py#L15846-L15846` wire the GET/POST routes.
+- `tools/aicanvas_remote/server_current.py#L437-L446`: adds remote-only MiniMax H3 constants and environment variables. `tools/aicanvas_remote/server_current.py#L1220-L1225` adds the `minimax-h3` catalog row with provider `minimax-direct`, actual model `MiniMax-H3`, duration `4..15`, and resolutions `768P/2K`.
+- `tools/aicanvas_remote/server_current.py#L11242-L11256`: maps H3 video selections to the `minimax-h3-video` direct adapter. `tools/aicanvas_remote/server_current.py#L12844-L12847` routes active `provider=minimax-direct` task refreshes to MiniMax official status query. `tools/aicanvas_remote/server_current.py#L13514-L13772`: submits H3 comic video tasks through the direct branch, bypassing local precharge and LK888/APIMart gateway submission, and records `billing_status=awaiting_actual_cost`.
+- `tools/aicanvas_remote/server_current.py#L14127-L14442`: implements remote H3 HTTPS media validation, duration/resolution normalization, content assembly, official `/v2/video_generation` submit, official `/v2/query/video_generation/{task_id}` status envelope, provider result URL extraction, provider `task_id` extraction, and redacted H3 task metadata.
+- `docs/openapi.yaml#L113-L161` and `docs/openapi.yaml#L2097-L2157`: document the center H3 submit/status contract, result URL fields, and `awaiting_actual_cost`. `docs/API_REFERENCE.md#L18-L71`, `docs/ARCHITECTURE.md#L3-L8`, `docs/DEPLOYMENT.md#L3-L13`, `docs/TROUBLESHOOTING.md#L1-L8`, `backend/.env.example#L24-L27`, `CHANGELOG.md#L3-L13`, and `migration.sql#L21-L25` document the two dedicated keys, official direct boundary, rollout, no-op migration, and rollback expectations.
+- `tests/test_minimax_direct.py#L1-L244`, `tests/test_minimax_pricing.py#L1-L29`, `tests/test_minimax_central_server.py#L1-L472`, `tests/test_minimax_aicanvas_remote.py#L1-L291`, and `tests/test_openapi_contract.py#L1-L372`: focused coverage for the adapter contract, unresolved pricing, center auth/config/error/status polling, remote H3 no-gateway/no-precharge branch, official remote polling, local/private-reference rejection, and OpenAPI schema exposure.
+- Operations and rollback: center/runtime use only environment secrets and require process restart after deploy. Remote AI Canvas requires backing up `/root/AI-CanvasPro/server.py`, verifying incoming SHA, atomic replacement, restarting `ai-canvas.service`, checking port `8777`, and confirming `/login` returns 200. Database migration is no-op. Roll back by restoring the previous remote `server.py` backup and reverting the listed local source, tests, docs, `CHANGELOG.md`, and `migration.sql`.
+## 2026-08-03 Native Client Username-Only Login Screen
+- `backend/matrix_native_client.py#L30111-L30119`: login account input is labeled as username-only while retaining the same widget for register-mode phone input.
+- `backend/matrix_native_client.py#L30282-L30331`: login mode sets the placeholder to `用户名`, shows the new username/password copy, and restricts the SMS verification row to register mode.
+- `backend/matrix_native_client.py#L30484-L30499`: `send_code()` returns immediately outside register mode so the login screen cannot request a login SMS code.
+- `backend/matrix_native_client.py#L30662-L30673`: login submission no longer checks `login_needs_phone_code(acct)` and sends only `identifier`, `password`, and `legalConsent`.
+- `tests/test_auth_login_modes.py#L38-L58`: regression coverage locks the username-only login screen, removed phone/SMS copy, no login SMS branch, and no login `code` field.
+- Verification and rollback: focused RED/GREEN was run for `tests.test_auth_login_modes.AuthLoginModesTest.test_native_client_login_screen_is_username_password_only`, then `tests.test_auth_login_modes` passed 3/3 with `PYTHONPATH=backend`. Native-client restart is required for the UI change. No OpenAPI shape, database, Docker, environment variable, remote service, or `migration.sql` change. Roll back `backend/matrix_native_client.py`, `tests/test_auth_login_modes.py`, `CHANGELOG.md`, `docs/API_REFERENCE.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the previous phone/SMS login entry.
+## 2026-08-03 Account Center Date Picker Year Contrast
+- `backend/matrix_native_client.py#L28774-L28820`: `AccountPage._date_edit()` now assigns `billingDateEdit`/`billingDateCalendar` object names and local QSS for the date input, calendar navigation bar, month/year buttons, popup menu, year `QSpinBox`, and date grid.
+- `tests/test_account_billing_dashboard.py#L223-L242`: regression coverage verifies all four account-center date fields use the calendar popup and include explicit readable year-spinbox styling.
+- Verification and rollback: focused RED/GREEN was run for `test_billing_date_picker_calendar_year_is_readable`; `tests.test_account_billing_dashboard` passed 29/29 and `py_compile` passed for the touched client/test files. A small offscreen render saved nonblank account/date-calendar PNGs under `.tmp-validation/account-billing/`. The broader `scripts/smoke_account_billing_ui.py` is still blocked by its existing fake-ledger long-text-elision assertion, so it was not used as a passing gate. Native-client restart is required. No OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` change. Roll back `backend/matrix_native_client.py`, `tests/test_account_billing_dashboard.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore prior styling.
+## 2026-08-03 Agent videos appear in material publish list
+- `backend/matrix_native_client.py#L19583-L19628`: `prodgen_video_publish_material_id()` and `add_prodgen_video_to_publish_library()` upload completed Agent videos to the central material library through existing `upload_materials(..., mtype="video")`, store `publishMaterialId` on the Agent entry, and avoid duplicate uploads when the same card is clicked again.
+- `backend/matrix_native_client.py#L19630-L19660`: `add_prodgen_video_to_pending()` still creates the compatible pending-publish row and now copies `materialId/centralMaterialId` when available.
+- `backend/matrix_native_client.py#L26315-L26322`: `GenCard.refresh()` marks a video as `已加入` only after a material-library id exists, so older pending-only rows can be clicked again to sync into 素材发布.
+- `backend/matrix_native_client.py#L26990-L27022` and `backend/matrix_native_client.py#L27196-L27212`: `ProductGenPage.add_to_publish()` runs the material upload in a background task, updates the pending row after upload, and refreshes the card/status from `prodgen_publish_add`.
+- `tests/test_agent_mode_defaults.py#L407-L456`: regression coverage verifies material-library upload, idempotency, old pending-row gating, pending compatibility, and completed-video button visibility.
+- Verification: focused RED/GREEN Agent publish tests and `py_compile` passed. Native-client-only change using existing `/api/library/upload`; no LK888 payload, OpenAPI shape, database schema, Docker, environment variable, remote service, or `migration.sql` impact. Restart the local client to load the new button behavior.
+
+## 2026-08-03 Agent video editor placeholder copy
+- `backend/matrix_native_client.py#L26768-L26769`: `ProductGenPage.sync_mode()` keeps the image-mode reference hint, but the video-mode placeholder now renders only `描述你想要的视频素材…` and no longer mentions LK888 output-model behavior.
+- `tests/test_agent_mode_defaults.py#L294-L299`: regression coverage locks the video placeholder copy and rejects both spaced and unspaced variants of `按所选 LK888 视频模型出片`.
+- Verification: focused RED/GREEN unittest passed; `py_compile` passed. Native-client-only change; no LK888 payload, OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` impact. Restart the local client to refresh the placeholder. Roll back the files listed in `CHANGELOG.md` for this entry to restore old copy.
+## 2026-08-03 Agent video selector removes Kling Motion Control V3
+- `backend/matrix_native_client.py#L2421-L2426`: `_LK888_AGENT_EXCLUDED_MODEL_IDS` now includes `kling-motion-control-v3`, so Agent.模式 does not show `Kling Motion Control V3` from local fallback rows or LK888 catalog rows.
+- `backend/matrix_native_client.py#L3137-L3149`: `_lk888_grouped_models()` canonicalizes and filters caller-provided rows before building the menu groups, preventing raw online rows for excluded Agent models from appearing in the selector.
+- `tests/test_agent_video_duration.py#L973-L993`: regression coverage locks the fallback, online catalog, and grouped-menu paths so `kling-motion-control-v3` remains hidden from Agent video selection.
+- Operations: native-client-only change. Restart the local client to refresh the video model selector. No OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` impact. Roll back this change set to restore the previous selectable model.
+## 2026-08-03 Agent grok-video-3 uses 10s only
+- `backend/matrix_native_client.py#L2405-L2405`: local canonical Agent LK888 row for `grok-video-3` now uses `duration_slots=(10,)`, so the UI exposes only 10 seconds.
+- `tests/test_agent_video_duration.py#L616-L629`: regression coverage locks the 10-second-only slot and verifies a saved/stale 5-second request is normalized to `params.duration=10` before LK888 submission.
+- Operations: native-client-only LK888 payload mapping change. Restart the local client to refresh the Agent duration button. No OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` impact.
+## 2026-08-03 Sidebar Connection Status Copy Removal
+- `backend/matrix_native_client.py#L31071-L31085`: the sidebar footer now adds only the account display name beside the avatar; the previous `self.conn` status label is no longer created.
+- `backend/matrix_native_client.py#L31178-L31191`: warmup payload handling keeps toast notifications but no longer writes warmup or connection status into the sidebar.
+- `backend/matrix_native_client.py#L31217-L31248`: successful login still sets the account name, avatar, balance refresh and session context, but no longer renders `已连接 · 数据隔离`.
+- `tests/test_role_permissions.py#L277-L290`: regression coverage locks the absence of the sidebar status label and the old connection/isolation copy.
+- Verification and rollback: focused RED/GREEN was run for `test_client_sidebar_does_not_show_connection_isolation_status`. Native-client restart is required. No OpenAPI, database, Docker, environment variable, remote service, or `migration.sql` change. Roll back `backend/matrix_native_client.py`, `tests/test_role_permissions.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and `docs/TROUBLESHOOTING.md` to restore the previous status row.
+## 2026-08-03 内容采集隐藏图文同款按钮
+- `backend/matrix_native_client.py#L7413-L7425`: `ContentPage` 底部操作区只保留“下载 / 分解 / 看评论”等按钮，不再创建或加入“图文同款”按钮，隐藏内容采集页的一键图文同款入口。
+- `backend/matrix_native_client.py#L7686-L7707`: 保留历史 `c_note_replace` 结果处理，旧异步结果如果到达仍可完成素材解析与图文同款页面交接，不因按钮移除产生属性错误。
+- `tests/test_xhs_note_replacement.py#L577-L612`: RED/GREEN 覆盖内容采集页按钮文本中不再出现“图文同款”，并确认历史交接处理仍存在。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests.test_content_page_hides_note_replacement_button tests.test_xhs_note_replacement.XhsNoteNativeFlowTests.test_native_collection_hides_note_replace_button_but_keeps_handoff_handler tests.test_xhs_note_replacement.XhsNoteNativeDisplayTests.test_content_download_result_navigates_and_reaches_prebuilt_note_page -v` 通过。该变更仅影响本地客户端 UI；无 OpenAPI、数据库、Docker、环境变量、远程服务或 `migration.sql` 影响，重启本地客户端后生效。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md`，重新启动本地客户端即可恢复旧按钮。
+## 2026-08-03 Account Matrix Self-Service Password Change
+- `backend/matrix_native_client.py#L6185-L6192`: `AccountsPage` header now adds a right-side `修改密码` ghost button before `刷新`, visible to every user who can open 账号矩阵, including enterprise admins and normal users.
+- `backend/matrix_native_client.py#L6211-L6266`: `change_password()` opens a local password dialog, validates current password presence, new password length and confirmation match, then posts only `currentPassword` and `newPassword` to `/api/auth/change-password` through the authenticated central API helper.
+- `backend/matrix_native_client.py#L6268-L6276` and `backend/matrix_native_client.py#L6359-L6366`: password-change errors are localized without logging password text; success clears the hint and shows only `密码修改成功`.
+- `docs/openapi.yaml#L93-L123` and `docs/openapi.yaml#L1652-L1668`: OpenAPI documents the authenticated self-service password-change path, request schema, success schema and 400/401/403 error surfaces.
+- `docs/API_REFERENCE.md#L112-L139`: API reference documents that the endpoint changes only the current user's password, keeps the current session, revokes other sessions server-side, and audits without plaintext passwords.
+- `tests/test_auth_login_modes.py#L59-L74` and `tests/test_openapi_contract.py#L317-L340`: RED/GREEN coverage locks the native account-matrix button, central request body, success message and OpenAPI contract.
+- Verification and rollback: `tests.test_auth_login_modes` 4/4, `tests.test_openapi_contract` 9/9, `py_compile`, and an offscreen `AccountsPage` smoke check pass. Restart the native client to show the button; update/restart the central server only if the running deployment does not already include `/api/auth/change-password`. No database schema, Docker, environment variable, or `migration.sql` change. Roll back the files listed in `CHANGELOG.md` to remove the entry.
+## 2026-08-03 Enterprise Add Member Without Contact Fields
+- `backend/matrix_native_client.py#L5696-L5704`: the add-member success handler now opens the copy dialog with `成员已加入当前企业`, the generated login identifier, and either the provided initial password or a reset-password reminder.
+- `backend/matrix_native_client.py#L5787-L5828`: `EnterpriseMembersPage.add_member()` no longer creates phone/email inputs, no longer requires a contact field, and posts only `orgId`, `name`, optional `password`, and `role` to `/api/enterprise/users/upsert`.
+- `backend/central_server.py#L8617-L8653`: `upsert_enterprise_user()` accepts name-only member creation, generates `user-<12 hex>` ids when no user id is provided, writes optional initial passwords, creates the membership, and returns `credential.identifier`.
+- `backend/central_server.py#L17132-L17138`: the HTTP handler for `/api/enterprise/users/upsert` delegates to `upsert_enterprise_user()` and audits only user id, name, org id, status, and error code, not plaintext passwords.
+- `docs/openapi.yaml#L1080-L1118` and `docs/openapi.yaml#L1732-L1765`: OpenAPI documents the add/update member request with only `orgId/name` required and a credential-bearing response.
+- `docs/API_REFERENCE.md#L187-L226`: API reference documents that phone/email are legacy optional fields and new native add-member flow uses generated user ids.
+- `tests/test_role_permissions.py#L195-L236` and `tests/test_openapi_contract.py#L342-L364`: RED/GREEN coverage locks UI removal of contact fields, backend generated login identifiers, and OpenAPI contract.
+- Verification and rollback: `tests.test_openapi_contract` 10/10, focused team-member role tests 3/3, `py_compile`, and an offscreen `EnterpriseMembersPage` smoke check pass. Restart native client and central server to apply. No database schema, Docker, environment variable, or `migration.sql` change. Roll back the files listed in `CHANGELOG.md` to restore the previous contact-required form.
+## 2026-08-03 公开下载页 `/download`
+- `backend/central_server.py#L15192-L15547`：内置“云灵星图 AI 爆款复刻平台 Windows 客户端下载”页面 HTML 和 `text/html; charset=utf-8` 响应头，下载按钮为禁用状态，不链接安装包。
+- `backend/central_server.py#L15658-L15659`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
+- `tests/test_web_surface_removed.py#L45-L90`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
+- 验证与影响：`tests.test_web_surface_removed.WebSurfaceRemovedTest` 先红后绿；本次无 OpenAPI JSON Schema、数据库、Docker、环境变量或 `migration.sql` 影响。中心服重启后生效，回滚上述文件和文档即可移除页面。

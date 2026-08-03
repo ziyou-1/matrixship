@@ -90,6 +90,38 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/LegalConsentError"}
+  /api/auth/change-password:
+    post:
+      summary: Change the current authenticated user's password
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthChangePasswordRequest"
+      responses:
+        "200":
+          description: Password changed for the current user
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthChangePasswordResponse"}
+        "400":
+          description: Current password is missing or the new password is too short
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "403":
+          description: Current password is invalid or the login type cannot change passwords
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
   /api/health:
     get:
       summary: Service health
@@ -108,8 +140,87 @@ paths:
                   agentReady: {type: boolean}
                   authorized: {type: boolean}
                   cookieReady: {type: boolean}
-                  onlineNodes: {type: integer, minimum: 0}
-                additionalProperties: true
+                onlineNodes: {type: integer, minimum: 0}
+              additionalProperties: true
+  /api/v1/minimax/video/generate:
+    post:
+      summary: Submit an authenticated MiniMax direct video task
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MiniMaxVideoGenerateRequest"
+      responses:
+        "202":
+          description: MiniMax provider task accepted and recorded as pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MiniMaxVideoTaskResponse"
+        "400":
+          description: Request validation failed before provider submission
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Center session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: MiniMax active-task concurrency limit is full
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: MiniMax is disabled or the center key is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: MiniMax provider submission failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/v1/minimax/video/tasks/{task_id}:
+    get:
+      summary: Return an authenticated MiniMax direct video task status
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Pending, failed, or awaiting-actual-cost task status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MiniMaxVideoTaskResponse"
+        "401":
+          description: Center session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Task is missing or outside the authenticated user's scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/comic-drama/storyboards/{storyboard_id}/generate-image:
     post:
       summary: Generate storyboard image frames, optionally selecting one keyframe
@@ -181,6 +292,72 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/accounts/rename:
+    post:
+      summary: Rename an account matrix display name without changing platform profile data
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountRenameRequest"
+      responses:
+        "200":
+          description: Account display name was updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountRenameSuccess"
+        "400":
+          description: Account id or display name is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Current user cannot rename accounts in this organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Account was not found in the requested organization or is outside the user's scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/cloud-login/open-url:
+    post:
+      summary: Open a platform URL in the local executor browser profile for the selected account
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloudLoginOpenUrlRequest"
+      responses:
+        "200":
+          description: URL was opened or reused in an interactive local browser session bound to accountId
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CloudLoginOpenUrlResponse"
+        "400":
+          description: URL is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Local browser session could not start or navigate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/library/update-title:
     post:
       summary: Update a local material title edited from the native publish table
@@ -219,6 +396,7 @@ paths:
   /api/publish/run:
     post:
       summary: Publish a local material with an optional title override from the native publish table
+      description: Default production surface is Douyin-only. Requests that select Xiaohongshu/XHS are rejected with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the service is restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -252,6 +430,10 @@ paths:
                   published: {type: boolean}
                   dryRun: {type: boolean}
                   error: {type: string}
+                  fileCount:
+                    type: integer
+                    minimum: 0
+                    description: Present on publish preflight failures such as douyin_single_video_required.
                   finalUrl: {type: string}
                   steps:
                     type: array
@@ -260,6 +442,12 @@ paths:
                 additionalProperties: true
         "409":
           description: Another publish run is in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Xiaohongshu/XHS publishing is disabled by default
           content:
             application/json:
               schema:
@@ -289,7 +477,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "502":
-          description: Download or media validation failed
+          description: Douyin detail connection, download, or media validation failed
           content:
             application/json:
               schema:
@@ -339,6 +527,8 @@ paths:
   /api/xhs/download:
     post:
       summary: Download and import a Xiaohongshu note
+      deprecated: true
+      description: Disabled by default. The local executor and central server return 404 with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the relevant services are restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -349,11 +539,17 @@ paths:
               $ref: "#/components/schemas/XhsDownloadRequest"
       responses:
         "200":
-          description: Download and material import completed
+          description: Download and material import completed only when MATRIX_XHS_ENABLED=1
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/XhsDownloadSuccess"
+        "404":
+          description: Xiaohongshu/XHS platform is disabled by default
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Downloaded media could not be committed to the material library
           content:
@@ -432,6 +628,12 @@ paths:
                 $ref: "#/components/schemas/AccountBalance"
         "401":
           description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Configured billing data source is unavailable
           content:
             application/json:
               schema:
@@ -547,8 +749,8 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
   /api/billing/charge:
     post:
-      summary: Charge the authenticated account for a server-priced capability
-      description: Known capabilities are charged by server-owned prices. Cloud-bean wallet amounts use 1 cloud bean = 1 CNY.
+      summary: Charge the authenticated account for a local capability or an LK888 actual cost
+      description: Non-model capabilities use server-owned prices. LK888 postpaid settlement sets allowArrears=true and uses the exact amount/model/task returned by LK888. Cloud-bean wallet amounts use 1 cloud bean = 1 CNY.
       security:
         - bearerAuth: []
       requestBody:
@@ -715,7 +917,8 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
   /api/finder/discover:
     post:
-      summary: Discover intent leads from Douyin or Xiaohongshu comments
+      summary: Discover intent leads from enabled platform comments
+      description: Default production surface is Douyin-only. Requests with platform=xhs/xiaohongshu/rednote are rejected with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the service is restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -749,6 +952,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Xiaohongshu/XHS discovery is disabled by default
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/central/nodes:
     get:
       summary: Return online and registered central execution nodes
@@ -770,6 +979,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CentralNodes"
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user is not an auditor of the organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/usage:
+    get:
+      summary: Return enterprise usage metrics, quota usage, and real seven-day task trend
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: orgId
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: Enterprise usage metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseUsage"
         "401":
           description: Session is missing or invalid
           content:
@@ -835,6 +1073,36 @@ paths:
                 $ref: "#/components/schemas/EnterpriseInviteCreateResponse"
         "403":
           description: The authenticated user cannot create invites for this organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/enterprise/users/upsert:
+    post:
+      summary: Add or update an enterprise member without requiring phone or email
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseUserUpsertRequest"
+      responses:
+        "200":
+          description: Enterprise member was added or updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseUserUpsertResponse"
+        "400":
+          description: Required member name is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The authenticated user cannot add members to this organization
           content:
             application/json:
               schema:
@@ -971,7 +1239,10 @@ components:
         ok: {const: true}
         userId: {type: string}
         phone: {type: string}
-        balance: {type: number}
+        balance:
+          oneOf:
+            - {type: number}
+            - {const: inf}
       additionalProperties: true
     LegacyBillingLedgerResponse:
       type: object
@@ -1094,6 +1365,20 @@ components:
         amount: {type: number, minimum: 0}
         reason: {type: string}
         ref: {type: string}
+        allowArrears:
+          type: boolean
+          default: false
+          description: True only for postpaid LK888 actual-cost settlement; the charge may make the balance negative.
+        meta:
+          type: object
+          additionalProperties: false
+          properties:
+            modelId: {type: string}
+            taskId: {type: string}
+            actualAmount: {type: number, minimum: 0}
+            billingScenario: {type: string}
+            billingStage: {type: string}
+            billingDetail: {type: string}
       additionalProperties: false
     BillingChargeResponse:
       type: object
@@ -1142,7 +1427,10 @@ components:
       required: [orgId]
       properties:
         orgId: {type: string, minLength: 1}
-        type: {type: string, default: xhs.discover}
+        type:
+          type: string
+          default: xhs.discover
+          description: Supported task types include douyin.comment.publish. Its local result may return ok=false, skipped=true, a machine error such as douyin_daily_comment_limit/douyin_comment_cooldown/douyin_comment_risk_cooldown, status, cooldownLeft, safety, and Chinese message/userMessage when the local Douyin comment hard gate blocks before browser or platform calls.
         payload:
           type: object
           additionalProperties: true
@@ -1179,6 +1467,8 @@ components:
         num: {type: integer, minimum: 1, maximum: 20}
         commentMode: {type: string, enum: [page, all], default: page}
         accountId: {type: string}
+        guestMode: {type: boolean, default: false}
+        accountCollectionConfirmed: {type: boolean, default: false}
       additionalProperties: true
     FinderLead:
       type: object
@@ -1252,6 +1542,58 @@ components:
           items:
             type: object
             additionalProperties: true
+      additionalProperties: true
+    EnterpriseTaskTrendBucket:
+      type: object
+      required: [date, label, count]
+      additionalProperties: false
+      properties:
+        date: {type: string, pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        label: {type: string}
+        count: {type: integer, minimum: 0}
+    EnterpriseUsage:
+      type: object
+      required: [ok, orgId, tasks24h, tasks7d, taskTrend7d]
+      properties:
+        ok: {const: true}
+        orgId: {type: string}
+        generatedAt: {type: number}
+        window24hSec: {type: integer}
+        tasks24h: {type: integer, minimum: 0}
+        tasks7d: {type: integer, minimum: 0}
+        taskTrend7d:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            $ref: "#/components/schemas/EnterpriseTaskTrendBucket"
+        billableTasks24h: {type: integer, minimum: 0}
+        billableTasks7d: {type: integer, minimum: 0}
+        status24h: {type: object, additionalProperties: {type: integer}}
+        status7d: {type: object, additionalProperties: {type: integer}}
+        type24h: {type: object, additionalProperties: {type: integer}}
+        type7d: {type: object, additionalProperties: {type: integer}}
+        queueCount: {type: integer, minimum: 0}
+        accounts: {type: integer, minimum: 0}
+        usableAccounts: {type: integer, minimum: 0}
+        nodes:
+          type: integer
+          minimum: 0
+          description: Registered execution endpoints in the enterprise usage scope, including local browser clients and legacy nodes.
+        onlineNodes:
+          type: integer
+          minimum: 0
+          description: Online execution endpoints with fresh heartbeat in the enterprise usage scope, including local browser clients and legacy nodes.
+        materials: {type: integer, minimum: 0}
+        successRate24h: {type: number}
+        failureRate24h: {type: number}
+        nodeOnlineRate: {type: number}
+        accountReadyRate: {type: number}
+        avgDurationSec7d: {type: number}
+        slaScore: {type: number}
+        quota: {type: object, additionalProperties: true}
+        quotaUsage: {type: object, additionalProperties: true}
+        taskRecovery: {type: object, additionalProperties: true}
       additionalProperties: true
     EnterpriseTaskCenter:
       type: object
@@ -1337,6 +1679,22 @@ components:
           enum: [all, org, self]
         balance: {type: number}
       additionalProperties: true
+    AuthChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      additionalProperties: false
+      properties:
+        currentPassword: {type: string, minLength: 1, maxLength: 256}
+        newPassword: {type: string, minLength: 8, maxLength: 256}
+    AuthChangePasswordResponse:
+      type: object
+      required: [ok, user, revokedSessions, changedAt]
+      additionalProperties: true
+      properties:
+        ok: {const: true}
+        user: {type: object, additionalProperties: true}
+        revokedSessions: {type: integer, minimum: 0}
+        changedAt: {type: number}
     EnterpriseInvite:
       type: object
       required: [id, orgId, role, status, expiresAt]
@@ -1370,6 +1728,36 @@ components:
         inviteCode: {type: string, pattern: "^[0-9a-f]{64}$"}
         invite: {$ref: "#/components/schemas/EnterpriseInvite"}
         message: {const: invite_created}
+      additionalProperties: false
+    EnterpriseUserUpsertRequest:
+      type: object
+      required: [orgId, name]
+      properties:
+        orgId: {type: string, minLength: 1}
+        id: {type: string, minLength: 1, description: Optional existing user id to update.}
+        userId: {type: string, minLength: 1, description: Optional existing user id alias.}
+        name: {type: string, minLength: 1, maxLength: 80}
+        password: {type: string, minLength: 0, maxLength: 256, description: Optional initial password; blank means use reset-password later.}
+        role: {type: string, enum: [admin, member], default: member}
+        status: {type: string, enum: [active, inactive], default: active}
+        phone: {type: string, description: Legacy optional field; native add-member flow leaves it empty.}
+        email: {type: string, description: Legacy optional field; native add-member flow leaves it empty.}
+      additionalProperties: false
+    EnterpriseUserUpsertResponse:
+      type: object
+      required: [ok, orgId, user, credential]
+      properties:
+        ok: {const: true}
+        orgId: {type: string}
+        user: {type: object, additionalProperties: true}
+        credential:
+          type: object
+          required: [identifier, initialPassword, generated]
+          properties:
+            identifier: {type: string, description: Login identifier, usually the generated user id when no phone/email is provided.}
+            initialPassword: {type: string, description: Echoes the optional initial password; blank means reset-password is required before handoff.}
+            generated: {type: boolean}
+          additionalProperties: false
       additionalProperties: false
     EnterpriseInviteVerifyRequest:
       type: object
@@ -1485,6 +1873,85 @@ components:
         removed: {type: integer, minimum: 0}
         id: {type: string}
       additionalProperties: false
+    AccountRenameRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          description: Local account id or central account id such as node:xhs-self.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 40
+        nickname:
+          type: string
+          maxLength: 40
+          description: Compatibility alias for name.
+        displayName:
+          type: string
+          maxLength: 40
+          description: Compatibility alias for name.
+      additionalProperties: false
+    AccountRenameSuccess:
+      type: object
+      required: [ok, id, name, updated]
+      properties:
+        ok: {const: true}
+        id: {type: string}
+        name: {type: string}
+        updated:
+          oneOf:
+            - {type: integer, minimum: 0}
+            - {type: boolean}
+        account:
+          $ref: "#/components/schemas/LocalAccount"
+      additionalProperties: true
+    CloudLoginOpenUrlRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: "^https?://"
+          description: Platform profile, work, or login URL to open in the local executor browser.
+        accountId:
+          type: string
+          default: douyin-self
+          description: Account matrix ID whose local browser profile should be used.
+        account:
+          type: string
+          description: Compatibility alias for accountId.
+        platform:
+          type: string
+          enum: [douyin, xhs]
+          description: Optional caller hint; accountId remains the authoritative profile selector.
+      additionalProperties: false
+    CloudLoginOpenUrlResponse:
+      type: object
+      required: [ok, hasSession, sessionId, accountId, requestedUrl]
+      properties:
+        ok: {type: boolean}
+        hasSession: {type: boolean}
+        sessionId: {type: string}
+        accountId:
+          type: string
+          description: Local account ID whose interactive browser session handled this URL.
+        requestedUrl: {type: string, format: uri}
+        url:
+          type: string
+          description: Browser's current URL after navigation.
+        loggedIn: {type: boolean}
+        createdSession: {type: boolean}
+        message: {type: string}
+        warning: {type: string}
+        error: {type: string}
+        profileDir:
+          type: string
+          description: Local profile directory path. Callers must not expose cookies from it.
+      additionalProperties: true
     LegalConsentError:
       type: object
       required: [ok, error, requiredTermsVersion, requiredPrivacyVersion, effectiveDate]
@@ -1512,7 +1979,10 @@ components:
           default: false
     DouyinDmInboxRequest:
       type: object
-      required: [target]
+      anyOf:
+        - required: [target]
+        - required: [userUrl]
+        - required: [secUid]
       properties:
         target:
           type: string
@@ -1565,6 +2035,20 @@ components:
         target:
           type: string
           description: Local-engine response only. Center task persistence stores targetFingerprint instead of the raw target.
+        accountId:
+          type: string
+          description: Account matrix ID whose local Douyin login state was used for this poll.
+        dmCookieInjection:
+          type: object
+          description: Safe local diagnostics containing Cookie counts only; Cookie names and values are never returned.
+          required: [attemptedCount, addedCount]
+          properties:
+            attemptedCount: {type: integer, minimum: 0}
+            addedCount: {type: integer, minimum: 0}
+            error:
+              type: string
+              description: Exception type only when browser Cookie injection fails.
+          additionalProperties: false
         messages:
           type: array
           items:
@@ -1581,16 +2065,20 @@ components:
         empty: {type: boolean}
         error:
           type: string
-          enum: ["", "missing_target", "numeric_uid_unsupported_in_browser_dm", "not_authenticated", "dm_inbox_button_not_found", "dm_inbox_messages_not_found", "dm_inbox_child_failed", "dm_inbox_child_exception", "dm_inbox_invalid_result"]
+          enum: ["", "missing_target", "numeric_uid_unsupported_in_browser_dm", "not_authenticated", "dm_inbox_button_not_found", "dm_inbox_child_failed", "dm_inbox_child_exception", "dm_inbox_invalid_result"]
       additionalProperties: true
     XhsDownloadRequest:
       type: object
+      description: Disabled by default; accepted only when MATRIX_XHS_ENABLED=1.
       anyOf:
         - required: [url]
         - required: [noteUrl]
       properties:
         url: {type: string, format: uri}
         noteUrl: {type: string, format: uri}
+        accountId: {type: string}
+        guestMode: {type: boolean, default: false}
+        accountCollectionConfirmed: {type: boolean, default: false}
       additionalProperties: false
     DownloadFile:
       type: object
@@ -1633,6 +2121,7 @@ components:
       additionalProperties: true
     XhsDownloadSuccess:
       type: object
+      description: Response emitted only when MATRIX_XHS_ENABLED=1.
       required: [ok, materialId, material]
       properties:
         ok: {const: true}
@@ -1662,12 +2151,119 @@ components:
       required: [ok, error]
       properties:
         ok: {const: false}
-        error: {type: string}
+        error:
+          type: string
+          description: Stable machine-readable code; Xiaohongshu/XHS-disabled routes use platform_disabled.
         stage: {type: string}
         errorId: {type: string, pattern: "^err-[A-Za-z0-9_-]+$"}
         context:
           type: object
           additionalProperties: true
+      additionalProperties: true
+    MiniMaxVideoGenerateRequest:
+      type: object
+      required: [prompt, duration, resolution]
+      properties:
+        model:
+          type: string
+          description: Optional client label. The center ignores this value and always submits provider model MiniMax-H3.
+        prompt:
+          type: string
+          minLength: 1
+        duration:
+          type: integer
+          minimum: 4
+          maximum: 15
+        resolution:
+          type: string
+          enum: [768P, 2K]
+        content:
+          type: array
+          items:
+            oneOf:
+              - type: object
+                required: [type, text]
+                properties:
+                  type:
+                    type: string
+                    enum: [text]
+                  text:
+                    type: string
+                    minLength: 1
+                additionalProperties: true
+              - type: object
+                required: [type, image_url]
+                properties:
+                  type:
+                    type: string
+                    enum: [image_url]
+                  image_url:
+                    type: object
+                    required: [url]
+                    properties:
+                      url:
+                        type: string
+                        format: uri
+                        pattern: "^https://"
+                    additionalProperties: true
+                additionalProperties: true
+              - type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+                    format: uri
+                    pattern: "^https://"
+                additionalProperties: true
+              - type: object
+                additionalProperties: true
+      additionalProperties: false
+    MiniMaxVideoTaskResponse:
+      type: object
+      required:
+        - ok
+        - businessTaskId
+        - providerTaskId
+        - requestedModel
+        - actualModel
+        - mode
+        - duration
+        - resolution
+        - billingRef
+        - status
+      properties:
+        ok: {const: true}
+        businessTaskId: {type: string, minLength: 1}
+        providerTaskId: {type: string}
+        requestedModel: {type: string, minLength: 1}
+        actualModel: {type: string, minLength: 1}
+        mode:
+          type: string
+          const: video_generation
+        duration:
+          type: integer
+          minimum: 4
+          maximum: 15
+        resolution:
+          type: string
+          enum: [768P, 2K]
+        billingRef: {type: string}
+        status:
+          type: string
+          enum: [submitting, pending, processing, failed, cancelled, awaiting_actual_cost]
+        traceId: {type: string, minLength: 1}
+        failureStage: {type: string}
+        error: {type: string}
+        resultUrl:
+          type: string
+          format: uri
+          pattern: "^https://"
+        providerResultUrl:
+          type: string
+          format: uri
+          pattern: "^https://"
+        createdAt: {type: number}
+        updatedAt: {type: number}
       additionalProperties: true
     GeminiAudioRequest:
       type: object

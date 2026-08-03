@@ -55,6 +55,7 @@ def load_server(ark_error=PRIVACY_ERROR, gateway_error="", gateway_outcomes=None
         "_comic_real_person_video_fallback_models",
         "_comic_video_fallback_params",
         "_advance_ai_comic_video_fallback",
+        "_is_matrix_video_replacement_project",
         "_comic_storyboard_tts_url_from_task",
         "_comic_remux_video_with_storyboard_tts",
         "_finalize_ai_comic_fallback_video_audio",
@@ -201,6 +202,7 @@ def load_server(ark_error=PRIVACY_ERROR, gateway_error="", gateway_outcomes=None
         "_find_recent_duplicate_character_task": lambda *args, **kwargs: None,
         "_find_recent_duplicate_storyboard_video_task": lambda *args, **kwargs: None,
         "_charge_local_ai_model_call": charge,
+        "_is_minimax_h3_comic_model": lambda model: str(model or "").strip().lower() == "minimax-h3",
         "_ark_should_route": lambda model: str(model).startswith("doubao-seedance"),
         "_comic_collect_video_reference_urls": lambda data: (
             list(data.get("action_flow_images") or []),
@@ -253,39 +255,24 @@ class AICanvasRealPersonFallbackTest(unittest.TestCase):
             target_type="storyboard",
         )
 
-    def test_exact_ark_privacy_error_falls_back_to_vidu_first(self):
+    def test_exact_ark_privacy_error_fails_without_fallback_model(self):
         module = load_server()
 
         task = self._submit(module)
 
-        self.assertEqual(len(module.gateway_calls), 1)
-        fallback = module.gateway_calls[0]
-        self.assertEqual(fallback["model"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(fallback["params"]["first_frame_image"], "https://assets.example/first-frame.png")
-        self.assertNotIn("sound_file", fallback["params"])
-        self.assertNotIn("audio_file", fallback["params"])
-        self.assertNotIn("reference_audio_file", fallback["params"])
-        self.assertNotIn("lip_sync_required", fallback["params"])
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(module.gateway_calls, [])
         self.assertEqual([item["model"] for item in module.charges], [
             "doubao-seedance-2-0-260128",
-            "vidu/viduq3-mix_reference2video",
         ])
         self.assertEqual(len(module.refunds), 1)
-        self.assertEqual(task["requested_model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(task["actual_model"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(task["fallback_model"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(task["fallback_reason"], "InputImageSensitiveContentDetected.PrivacyInformation")
-        self.assertTrue(task["fallback_applied"])
         response = module._ai_comic_task_response(task)
-        self.assertEqual(response["requested_model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(response["actualModel"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(response["fallback_reason"], "InputImageSensitiveContentDetected.PrivacyInformation")
-        self.assertTrue(response["fallbackApplied"])
-        self.assertEqual(response["fallback_candidates"], list(module.COMIC_REAL_PERSON_VIDEO_FALLBACK_MODELS))
-        self.assertEqual(response["fallbackIndex"], 0)
-        self.assertEqual(response["fallback_history"][-1]["model"], "vidu/viduq3-mix_reference2video")
+        self.assertEqual(task["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(response["actualModel"], "doubao-seedance-2-0-260128")
+        self.assertFalse(response["fallbackApplied"])
+        self.assertEqual(response["fallback_candidates"], [])
 
-    def test_privacy_rejection_falls_back_through_models_in_order(self):
+    def test_privacy_rejection_does_not_fallback_through_models(self):
         module = load_server(gateway_outcomes={
             "vidu/viduq3-mix_reference2video": RuntimeError("Vidu rejected"),
             "wan2.7-shouweizhen": RuntimeError("Wan rejected"),
@@ -295,50 +282,26 @@ class AICanvasRealPersonFallbackTest(unittest.TestCase):
 
         task = self._submit(module)
 
-        self.assertEqual([item["model"] for item in module.gateway_calls], [
-            "vidu/viduq3-mix_reference2video",
-            "wan2.7-shouweizhen",
-            "kling-v3-omni-shouweizhen",
-            "pixverse-v6-shouweizhen",
-        ])
-        self.assertEqual(task["status"], "pending")
-        self.assertEqual(task["actual_model"], "pixverse-v6-shouweizhen")
-        self.assertEqual(task["fallback_index"], 3)
-        self.assertEqual([item["model"] for item in task["fallback_history"]], [
-            "doubao-seedance-2-0-260128",
-            "vidu/viduq3-mix_reference2video",
-            "wan2.7-shouweizhen",
-            "kling-v3-omni-shouweizhen",
-            "pixverse-v6-shouweizhen",
-        ])
-        self.assertEqual(len(module.refunds), 4)
+        self.assertEqual(module.gateway_calls, [])
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(len(module.refunds), 1)
 
-    def test_seedance_audio_duration_limit_falls_back_to_vidu(self):
+    def test_seedance_audio_duration_limit_fails_without_fallback_model(self):
         module = load_server(AUDIO_DURATION_ERROR)
 
         task = self._submit(module)
 
-        self.assertEqual(task["status"], "pending")
-        self.assertEqual(task["requested_model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(task["actual_model"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(task["fallback_reason"], "InvalidParameter.AudioDurationExceeded")
-        self.assertEqual([item["model"] for item in module.gateway_calls], [
-            "vidu/viduq3-mix_reference2video",
-        ])
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(module.gateway_calls, [])
+        self.assertEqual(len(module.refunds), 1)
 
-    def test_seedance_policy_violation_falls_back_to_vidu(self):
+    def test_seedance_policy_violation_fails_without_fallback_model(self):
         module = load_server(POLICY_VIOLATION_ERROR)
 
         task = self._submit(module)
 
-        self.assertEqual(task["status"], "pending")
-        self.assertEqual(task["requested_model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(task["actual_model"], "vidu/viduq3-mix_reference2video")
-        self.assertEqual(task["fallback_reason"], "InputImageSensitiveContentDetected.PolicyViolation")
-        self.assertEqual([item["model"] for item in module.gateway_calls], [
-            "vidu/viduq3-mix_reference2video",
-        ])
-        self.assertNotIn("sound_file", module.gateway_calls[0]["params"])
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(module.gateway_calls, [])
         self.assertEqual(len(module.refunds), 1)
 
     def test_first_last_frame_fallback_models_drop_audio_and_extra_images(self):
@@ -367,7 +330,7 @@ class AICanvasRealPersonFallbackTest(unittest.TestCase):
             self.assertNotIn("reference_audio_file", params)
             self.assertNotIn("lip_sync_required", params)
 
-    def test_accepted_fallback_task_advances_in_place_after_remote_failure(self):
+    def test_accepted_fallback_task_does_not_advance_after_remote_failure(self):
         module = load_server()
         task = {
             "id": "ai-original-task",
@@ -395,14 +358,10 @@ class AICanvasRealPersonFallbackTest(unittest.TestCase):
 
         advanced = module._advance_ai_comic_video_fallback(task, "Vidu remote task failed")
 
-        self.assertIs(advanced, task)
-        self.assertEqual(task["id"], "ai-original-task")
-        self.assertEqual(task["status"], "pending")
-        self.assertEqual(task["actual_model"], "wan2.7-shouweizhen")
-        self.assertEqual(task["fallback_index"], 1)
-        self.assertEqual(module.gateway_calls[-1]["model"], "wan2.7-shouweizhen")
+        self.assertIsNone(advanced)
+        self.assertEqual(module.gateway_calls, [])
 
-    def test_refresh_remote_failure_advances_fallback_without_changing_local_task_id(self):
+    def test_refresh_remote_failure_marks_failed_without_fallback_advance(self):
         module = load_server(status_payload={
             "state": "failed",
             "status": "failed",
@@ -437,10 +396,8 @@ class AICanvasRealPersonFallbackTest(unittest.TestCase):
 
         self.assertIs(refreshed, task)
         self.assertEqual(task["id"], "ai-original-task")
-        self.assertEqual(task["status"], "pending")
-        self.assertEqual(task["actual_model"], "wan2.7-shouweizhen")
-        self.assertEqual(task["fallback_index"], 1)
-        self.assertEqual(module.gateway_calls[-1]["model"], "wan2.7-shouweizhen")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(module.gateway_calls, [])
 
     def test_unrelated_ark_error_does_not_fallback(self):
         module = load_server("InvalidParameter: resolution is invalid")

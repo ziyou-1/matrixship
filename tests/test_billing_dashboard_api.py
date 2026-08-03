@@ -1,3 +1,4 @@
+import builtins
 import importlib.util
 import io
 import json
@@ -16,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 SERVER = BACKEND / "central_server.py"
 NEW_LEDGER_PARAMS = ("startDate", "endDate", "type", "status", "page", "pageSize")
+RUNTIME_REQUIREMENTS = (
+    "jsonschema==4.23.0",
+    "PyMySQL==1.1.1",
+    "passlib[bcrypt]==1.7.4",
+)
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -33,9 +39,35 @@ def load_server_module():
     )
     spec = importlib.util.spec_from_file_location("central_server_dashboard_under_test", SERVER)
     module = importlib.util.module_from_spec(spec)
-    with mock.patch.dict(os.environ, {"CENTRAL_LOAD_DOTENV": "0"}):
+    with mock.patch.dict(
+        os.environ,
+        {"CENTRAL_LOAD_DOTENV": "0", "MAINDB_ENABLED": "0"},
+    ):
         spec.loader.exec_module(module)
     return module
+
+
+def load_server_module_with_maindb_probe(enabled, import_error=None):
+    calls = []
+    real_import = builtins.__import__
+
+    def import_probe(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "maindb":
+            calls.append(name)
+            if import_error is not None:
+                raise import_error
+        return real_import(name, globals, locals, fromlist, level)
+
+    spec = importlib.util.spec_from_file_location(
+        "central_server_dashboard_import_probe", SERVER
+    )
+    module = importlib.util.module_from_spec(spec)
+    with mock.patch.dict(
+        os.environ,
+        {"CENTRAL_LOAD_DOTENV": "0", "MAINDB_ENABLED": str(enabled)},
+    ), mock.patch("builtins.__import__", side_effect=import_probe):
+        spec.loader.exec_module(module)
+    return module, calls
 
 
 def cn_timestamp(day, hour=12):
@@ -45,11 +77,21 @@ def cn_timestamp(day, hour=12):
 
 
 class FakeMainDb:
-    def __init__(self, rows=None, error=None, configured=True, configured_error=None):
+    def __init__(
+        self,
+        rows=None,
+        error=None,
+        configured=True,
+        configured_error=None,
+        balance=92.0,
+        balance_error=None,
+    ):
         self.rows = list(rows or [])
         self.error = error
         self.configured_value = configured
         self.configured_error = configured_error
+        self.balance = balance
+        self.balance_error = balance_error
         self.calls = []
 
     def configured(self):
@@ -62,6 +104,11 @@ class FakeMainDb:
         if self.error:
             raise self.error
         return self.rows
+
+    def get_balance_strict(self, user_id):
+        if self.balance_error:
+            raise self.balance_error
+        return self.balance
 
 
 class FakeLogger:
@@ -152,11 +199,14 @@ class BillingDashboardApiTest(unittest.TestCase):
             mock.patch.object(self.server, "maindb_on", return_value=enabled),
             mock.patch.object(self.server, "get_balance", return_value=92.0),
             mock.patch.object(self.server, "json_log", return_value='{"errorId":"err-complete"}'),
+            mock.patch.object(
+                self.server, "MAINDB_ENABLED", enabled, create=True
+            ),
         )
 
     def test_analytics_payload_uses_active_consumption_days(self):
         patches = self.dashboard_patches()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             payload = self.server.billing_dashboard_payload(
                 44,
                 {
@@ -175,10 +225,16 @@ class BillingDashboardApiTest(unittest.TestCase):
 
     def test_parameterized_ledger_filters_and_paginates(self):
         patches = self.dashboard_patches()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             payload = self.server.billing_dashboard_payload(
                 44,
-                {"status": ["refunded"], "page": ["1"], "pageSize": ["20"]},
+                {
+                    "startDate": ["2026-07-01"],
+                    "endDate": ["2026-07-30"],
+                    "status": ["refunded"],
+                    "page": ["1"],
+                    "pageSize": ["20"],
+                },
                 analytics=False,
             )
 
@@ -189,47 +245,142 @@ class BillingDashboardApiTest(unittest.TestCase):
     def test_collection_filters_state_by_current_user_and_reports_counts(self):
         patches = self.dashboard_patches()
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             records, meta = self.server.collect_billing_records(44, period)
 
         self.assertEqual(meta, {"sourceRows": 3, "deduplicatedRows": 3})
         self.assertNotIn("secret-fixture", json.dumps(records, default=str))
 
+    def test_maindb_import_failure_is_tracked_and_billing_fails_closed(self):
+        import_error = ImportError("database password=secret-fixture")
+        server, calls = load_server_module_with_maindb_probe("1", import_error)
+        period = server.parse_period(
+            {"startDate": "2026-07-01", "endDate": "2026-07-30"}
+        )
+
+        self.assertEqual(calls, ["maindb"])
+        self.assertIs(server.MAINDB_IMPORT_ERROR, import_error)
+        with mock.patch.object(server, "STATE", self.state):
+            with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
+                server.collect_billing_records(44, period)
+
+        fake_logger = FakeLogger()
+        with mock.patch.object(server, "logger", fake_logger):
+            payload, status = server._billing_api_error(
+                44, RuntimeError("billing_data_source_failed")
+            )
+        self.assertEqual((status, payload["error"]), (503, "billing_data_source_failed"))
+        self.assertNotIn("secret-fixture", "".join(fake_logger.rows))
+
+    def test_explicitly_disabled_maindb_skips_import_and_uses_local_source(self):
+        server, calls = load_server_module_with_maindb_probe(
+            "0", AssertionError("disabled main DB must not be imported")
+        )
+        period = server.parse_period(
+            {"startDate": "2026-07-01", "endDate": "2026-07-30"}
+        )
+
+        self.assertFalse(server.MAINDB_ENABLED)
+        self.assertIsNone(server.MAINDB_IMPORT_ERROR)
+        self.assertEqual(calls, [])
+        with mock.patch.object(server, "STATE", self.state):
+            records, meta = server.collect_billing_records(44, period)
+        self.assertEqual((len(records), meta["sourceRows"]), (3, 3))
+
+    def test_configured_usage_success_and_strict_balance_failure_is_fatal(self):
+        fake = FakeMainDb(
+            rows=[], balance_error=RuntimeError("balance secret-fixture unavailable")
+        )
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
+                mock.patch.object(self.server, "maindb_on", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
+                self.server.billing_dashboard_payload(
+                    44,
+                    {"startDate": ["2026-07-01"], "endDate": ["2026-07-30"]},
+                    analytics=True,
+                )
+
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_exact_billing_runtime_dependency_locks_exist_in_both_files(self):
+        for relative_path in (
+            "backend/requirements.txt",
+            "backend/requirements.deploy.txt",
+        ):
+            with self.subTest(relative_path=relative_path):
+                lines = [
+                    line.strip()
+                    for line in (ROOT / relative_path).read_text(encoding="utf-8").splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
+                for expected in RUNTIME_REQUIREMENTS:
+                    package = expected.split("==", 1)[0].lower()
+                    matching = [
+                        line for line in lines
+                        if line.split("==", 1)[0].lower() == package
+                    ]
+                    self.assertEqual(matching, [expected])
+
     def test_configured_maindb_failure_returns_error_not_partial_totals(self):
         fake = FakeMainDb(error=RuntimeError("database secret-fixture unavailable"))
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
 
-        with mock.patch.object(self.server, "maindb", fake), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
                 self.server.collect_billing_records(44, period)
 
-    def test_absent_or_unconfigured_maindb_is_supported_without_querying_it(self):
+    def test_explicitly_disabled_maindb_is_supported_without_querying_it(self):
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
         unconfigured = FakeMainDb(
             error=AssertionError("unconfigured source must not be queried"), configured=False
         )
 
         with self.subTest("absent"):
-            with mock.patch.object(self.server, "maindb", None), \
+            with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                    mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                    mock.patch.object(self.server, "maindb", None), \
                     mock.patch.object(self.server, "maindb_on", return_value=False):
                 records, meta = self.server.collect_billing_records(44, period)
 
             self.assertEqual((len(records), meta["sourceRows"]), (3, 3))
 
         with self.subTest("unconfigured"):
-            with mock.patch.object(self.server, "maindb", unconfigured), \
+            with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                    mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                    mock.patch.object(self.server, "maindb", unconfigured), \
                     mock.patch.object(self.server, "maindb_on", return_value=False):
                 records, meta = self.server.collect_billing_records(44, period)
 
             self.assertEqual(unconfigured.calls, [])
             self.assertEqual((len(records), meta["sourceRows"]), (3, 3))
 
+    def test_enabled_but_unconfigured_maindb_fails_closed(self):
+        period = self.server.parse_period(
+            {"startDate": "2026-07-01", "endDate": "2026-07-30"}
+        )
+        unconfigured = FakeMainDb(configured=False)
+
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", unconfigured), \
+                mock.patch.object(self.server, "maindb_on", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
+                self.server.collect_billing_records(44, period)
+
+        self.assertEqual(unconfigured.calls, [])
+
     def test_configured_but_unavailable_maindb_is_fatal_before_local_totals(self):
         fake = FakeMainDb(error=AssertionError("disabled source must not be queried"))
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
 
-        with mock.patch.object(self.server, "maindb", fake), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
                 self.server.collect_billing_records(44, period)
@@ -240,7 +391,9 @@ class BillingDashboardApiTest(unittest.TestCase):
         fake = FakeMainDb(configured_error=RuntimeError("configuration unavailable"))
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
 
-        with mock.patch.object(self.server, "maindb", fake), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "billing_data_source_failed"):
                 self.server.collect_billing_records(44, period)
@@ -251,7 +404,9 @@ class BillingDashboardApiTest(unittest.TestCase):
         fake = FakeMainDb(rows=[{}] * 50001)
         period = self.server.parse_period({"startDate": "2026-07-01", "endDate": "2026-07-30"})
 
-        with mock.patch.object(self.server, "maindb", fake), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "billing_record_limit_exceeded"):
                 self.server.collect_billing_records(44, period)
@@ -260,7 +415,7 @@ class BillingDashboardApiTest(unittest.TestCase):
 
     def test_normalized_query_is_strictly_validated(self):
         patches = self.dashboard_patches()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             with self.assertRaises(ValidationError):
                 self.server.billing_dashboard_payload(
                     44, {"page": ["1"], "pageSize": ["25"]}, analytics=False
@@ -289,7 +444,9 @@ class BillingDashboardApiTest(unittest.TestCase):
 
     def test_completion_log_has_only_the_allowed_non_secret_context(self):
         fake_log = mock.Mock(return_value='{"errorId":"err-complete"}')
-        with mock.patch.object(self.server, "maindb", None), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", None), \
                 mock.patch.object(self.server, "maindb_on", return_value=False), \
                 mock.patch.object(self.server, "get_balance", return_value=92.0), \
                 mock.patch.object(self.server, "json_log", fake_log):
@@ -347,6 +504,89 @@ class BillingDashboardApiTest(unittest.TestCase):
         self.assertEqual(helper.call_args.args[1], {"startDate": ["2026-07-01"]})
         self.assertTrue(helper.call_args.kwargs["analytics"])
 
+    def test_default_owner_real_dashboard_routes_return_exact_inf_balance(self):
+        paths = (
+            (
+                "/api/billing/analytics?startDate=2026-07-01&endDate=2026-07-30",
+                lambda payload: payload["metrics"]["balance"],
+            ),
+            (
+                "/api/billing/ledger?startDate=2026-07-01&endDate=2026-07-30&page=1&pageSize=20",
+                lambda payload: payload["balance"],
+            ),
+        )
+        for path, balance_from in paths:
+            with self.subTest(path=path):
+                handler = FakeHttpHandler(path)
+                with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                        mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                        mock.patch.object(self.server, "maindb", None), \
+                        mock.patch.object(self.server, "require_user", return_value=True), \
+                        mock.patch.object(
+                            self.server,
+                            "current_user",
+                            return_value={"id": "user-owner"},
+                        ), \
+                        mock.patch.object(self.server, "json_log", return_value="{}"):
+                    self.server.Handler.do_GET(handler)
+
+                payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+                self.assertEqual(handler.status, 200)
+                self.assertEqual(balance_from(payload), "inf")
+
+    def test_default_owner_legacy_balance_route_returns_exact_inf_balance(self):
+        handler = FakeHttpHandler("/api/account/balance")
+        with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                mock.patch.object(self.server, "require_user", return_value=True), \
+                mock.patch.object(
+                    self.server,
+                    "current_user",
+                    return_value={"id": "user-owner", "phone": ""},
+                ):
+            self.server.Handler.do_GET(handler)
+
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(payload["balance"], "inf")
+
+    def test_legacy_balance_route_strict_failure_returns_503(self):
+        handler = FakeHttpHandler("/api/account/balance")
+        fake = FakeMainDb(balance_error=RuntimeError("balance secret-fixture unavailable"))
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
+                mock.patch.object(self.server, "maindb_on", return_value=True), \
+                mock.patch.object(self.server, "require_user", return_value=True), \
+                mock.patch.object(self.server, "current_user", return_value={"id": 44}):
+            self.server.Handler.do_GET(handler)
+
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(handler.status, 503)
+        self.assertEqual(payload["error"], "billing_data_source_failed")
+        self.assertNotIn("balance", payload)
+        self.assertNotIn("secret-fixture", json.dumps(payload))
+
+    def test_strict_balance_failure_real_route_returns_503(self):
+        handler = FakeHttpHandler(
+            "/api/billing/analytics?startDate=2026-07-01&endDate=2026-07-30"
+        )
+        fake = FakeMainDb(
+            rows=[], balance_error=RuntimeError("balance secret-fixture unavailable")
+        )
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
+                mock.patch.object(self.server, "maindb_on", return_value=True), \
+                mock.patch.object(self.server, "require_user", return_value=True), \
+                mock.patch.object(self.server, "current_user", return_value={"id": 44}):
+            self.server.Handler.do_GET(handler)
+
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(handler.status, 503)
+        self.assertEqual(payload["error"], "billing_data_source_failed")
+        self.assertNotIn("metrics", payload)
+        self.assertNotIn("secret-fixture", json.dumps(payload))
+
     def test_query_and_schema_errors_map_to_redacted_400_response(self):
         error = self.server.BillingQueryError("invalid_date", "invalid date")
         responses, _helper, logged = self.invoke_get(
@@ -392,7 +632,9 @@ class BillingDashboardApiTest(unittest.TestCase):
         fake_logger = FakeLogger()
         invalid_server_payload = {"internalValue": "secret-fixture"}
 
-        with mock.patch.object(self.server, "require_user", return_value=True), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", False, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "require_user", return_value=True), \
                 mock.patch.object(self.server, "current_user", return_value={"id": 44}), \
                 mock.patch.object(self.server, "maindb_on", return_value=False), \
                 mock.patch.object(self.server, "get_balance", return_value=92.0), \
@@ -442,7 +684,9 @@ class BillingDashboardApiTest(unittest.TestCase):
         fake = FakeMainDb(error=AssertionError("unavailable source must not be queried"))
         responses = []
 
-        with mock.patch.object(self.server, "maindb", fake), \
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True, create=True), \
+                mock.patch.object(self.server, "MAINDB_IMPORT_ERROR", None, create=True), \
+                mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=False), \
                 mock.patch.object(self.server, "require_user", return_value=True), \
                 mock.patch.object(self.server, "current_user", return_value={"id": 44}), \

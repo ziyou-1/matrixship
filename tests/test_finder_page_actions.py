@@ -40,6 +40,21 @@ class FinderPageActionsTest(unittest.TestCase):
         self.assertIn("def _mark_followed", block)
         self.assertIn('btn.setText("已跟进")', block)
 
+    def test_finder_open_profile_uses_local_executor_account_profile(self):
+        source = CLIENT.read_text(encoding="utf-8")
+        start = source.index("    def _open_profile", source.index("class FinderPage"))
+        end = source.index("\n    def ", start + 10)
+        block = source[start:end]
+
+        self.assertIn("account_id = self._require_finder_account()", block)
+        self.assertIn("platform = self._pf()", block)
+        self.assertIn('local_api("POST", "/api/cloud-login/open-url"', block)
+        self.assertIn('"accountId": account_id', block)
+        self.assertIn('"url": u', block)
+        self.assertIn('"platform": platform', block)
+        self.assertNotIn('"platform": self._pf()', block)
+        self.assertNotIn("QDesktopServices.openUrl", block)
+
     def test_finder_action_buttons_are_compact_for_table_cells(self):
         source = CLIENT.read_text(encoding="utf-8")
         start = source.index("class FinderPage")
@@ -128,6 +143,15 @@ class FinderPageActionsTest(unittest.TestCase):
         self.assertIn('if tag == "dm_followup":', block)
         self.assertIn("self.target.setText", block)
         self.assertIn("已带入获客线索主页链接", block)
+
+    def test_xhs_lead_does_not_enter_douyin_dm_followup(self):
+        source = CLIENT.read_text(encoding="utf-8")
+        start = source.index("def _go_dm_followup", source.index("class FinderPage"))
+        end = source.index("\n    def ", start + 10)
+        block = source[start:end]
+        self.assertIn('if self._pf() != "douyin":', block)
+        self.assertIn("目前仅支持抖音客户主页", block)
+        self.assertIn("return", block)
 
 
 class FinderAccountLoadingTest(unittest.TestCase):

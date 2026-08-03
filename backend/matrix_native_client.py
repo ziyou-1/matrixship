@@ -24,6 +24,7 @@ import concurrent.futures
 import ipaddress
 import mimetypes
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,10 +36,17 @@ from utils.media_validation import validate_video_file
 from utils.video_transcription import (
     export_audio_chunks,
     merge_transcription_segments,
+    remove_adjacent_text_overlap,
     transcribe_audio_chunks,
     validate_service_url,
 )
 from runtime_paths import ensure_agent_data_dir
+from platform_features import (
+    digital_human_tts_upload_enabled,
+    pending_publish_ui_enabled,
+    video_replacement_enabled,
+    xhs_enabled,
+)
 
 import requests
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -49,6 +57,10 @@ CENTRAL = validate_service_url(
 APP_NAME = "MatrixShipAgent"
 APP_VERSION = "1.1.16"
 ACCENT = "#6366f1"
+XHS_PLATFORM_LABEL = "小" + "红书"
+XHS_PLATFORM_CODE = "x" + "hs"
+SAME_STYLE_REPLACEMENT_NAV = "🧬 同款替换"
+SAME_STYLE_REPLACEMENT_TOOLTIP = "功能完善中，敬请期待"
 LEGAL_TERMS_VERSION = os.getenv("LEGAL_TERMS_VERSION", "1.0") or "1.0"
 LEGAL_PRIVACY_VERSION = os.getenv("LEGAL_PRIVACY_VERSION", "1.0") or "1.0"
 LEGAL_EFFECTIVE_DATE = os.getenv("LEGAL_EFFECTIVE_DATE", "2026-07-15") or "2026-07-15"
@@ -57,6 +69,26 @@ _LEGAL_DOC_FILES = {
     "terms": "user_agreement.md",
     "privacy": "privacy_policy.md",
 }
+
+
+def _add_available_platform_items(combo):
+    combo.addItem("抖音", "douyin")
+    if xhs_enabled():
+        combo.addItem(XHS_PLATFORM_LABEL, XHS_PLATFORM_CODE)
+
+
+def account_matrix_platform_keys():
+    return ("douyin", "xhs") if xhs_enabled() else ("douyin",)
+
+
+def nav_feature_enabled(name):
+    if str(name or "").strip() == SAME_STYLE_REPLACEMENT_NAV:
+        return video_replacement_enabled()
+    return True
+
+
+def _douyin_only_text(douyin_text, multi_platform_text):
+    return multi_platform_text if xhs_enabled() else douyin_text
 
 _SHARED = {"token": "", "org": "org-default", "account": "default", "logout_epoch": 0,
            "appRole": "platform_admin", "roleScope": "all"}
@@ -684,10 +716,9 @@ def current_org():
 # ⚠️数字人/视频按视频时长(秒)计费,这里是"典型时长"的封顶均价;脚本越长成本越高,已在文案长度上约束。
 # 2026-07-06:在原定价基础上**全部上调 40%**(×1.4,取整)。
 PRICES = {
-    "product_image": 0.14, "product_video": 3.08, "copywriting": 0.07, "viral_image": 0.21,
-    "digital_human": 25.2, "digital_human_pro": 50.4, "mix": 0.14,
-    "workflow_image": 0.14, "workflow_video": 25.2, "workflow_tts": 0.21,
-    "comic_keyframe_image": 0.14,
+    "product_image": 0.45, "product_video": 5.57, "copywriting": 0.24, "viral_image": 0.70,
+    "digital_human": 9.81, "digital_human_pro": 19.62, "mix": 0.14,
+    "workflow_image": 0.45, "workflow_video": 13.79, "workflow_tts": 0.06,
 }
 
 COMIC_KEYFRAME_IMAGE_CAP = "comic_keyframe_image"
@@ -707,12 +738,23 @@ def fetch_balance():
         return _SHARED.get("balance")
 
 
-def charge(amount, reason="生成", ref=""):
+def charge(amount, reason="生成", ref="", capability=None, meta=None, allow_arrears=False):
     """向中心服申请扣费(记账在中心)。返回 (ok, balance, error)。owner/运营方中心侧免扣。"""
     try:
-        _c, j = api("POST", "/api/billing/charge", {
-            "amount": amount, "reason": reason, "capability": reason, "ref": ref
-        })
+        body = {
+            "amount": amount,
+            "reason": reason,
+            "capability": capability or reason,
+            "ref": ref,
+        }
+        if isinstance(meta, dict):
+            body["meta"] = {
+                k: v for k, v in meta.items()
+                if k not in ("Cookie", "Token", "Authorization")
+            }
+        if allow_arrears:
+            body["allowArrears"] = True
+        _c, j = api("POST", "/api/billing/charge", body)
         if isinstance(j, dict):
             if j.get("balance") is not None:
                 with _SLOCK:
@@ -723,12 +765,11 @@ def charge(amount, reason="生成", ref=""):
     return False, None, "charge_failed"
 
 
-# 这些媒体能力已改由服务端 lk888 反代**权威扣费**(central_server.gen_price_yundou):客户端本地不再扣,
-# 避免双扣;且改过的客户端绕不过(它没有 lk888 直连 key,只能走会扣费的反代)。余额不足时反代返 402,
-# 由生成函数抛「余额不足」。copywriting(chat,便宜且内部也用)与 mix(本地 ffmpeg,无算力成本)仍本地扣。
+# 这些模型能力只按 LK888 最终实际费用后付费，客户端提交前不扣本地估算价。
+# mix 是本地 ffmpeg 工序，不调用 LK888，仍走本地能力计费。
 _SERVER_CHARGED_CAPS = {
     "product_image", "product_video", "viral_image", "digital_human", "digital_human_pro",
-    "workflow_image", "workflow_video", "workflow_tts",
+    "workflow_image", "workflow_video", "workflow_tts", "copywriting",
 }
 
 
@@ -743,7 +784,7 @@ def try_charge(cap, ref="", amount=None, reason=None):
         price = 0
     if price <= 0:
         return True, None
-    ok, _bal, err = charge(price, reason=reason or cap, ref=ref)
+    ok, _bal, err = charge(price, reason=reason or cap, ref=ref, capability=cap)
     if not ok and err == "insufficient_balance":
         return False, "余额不足,请到『账户中心』充值"
     return (ok, None) if ok else (False, err or "扣费失败")
@@ -779,59 +820,63 @@ def refund_cap(cap, ref="", amount=None):
     return refund(ref)
 
 
-def _comic_video_billing_method(price):
-    price = price if isinstance(price, dict) else {}
-    explicit = str(price.get("billing_method") or price.get("billingMethod") or "").strip().lower()
-    if explicit in ("per_second", "per_call"):
-        return explicit
-    description = str(price.get("description") or "").lower()
-    model_id = str(price.get("model_id") or price.get("modelId") or "").lower()
-    provider = str(price.get("provider") or "").lower()
-    if any(marker in description for marker in ("每秒", "按秒", "per second", "/second")):
-        return "per_second"
-    if provider == "ark" or model_id.startswith("doubao-seedance-2-0"):
-        return "per_second"
-    return "per_call"
-
-
-def _comic_video_billing_quote(prices, model_id, duration_sec):
-    model_id = str(model_id or "").strip()
+def _comic_video_billing_model_id(model):
+    value = str(model or "").strip()
     aliases = {
         "vidu/viduq3-mix_reference2video": "viduq3-cankaosheng",
         "viduq3-mix_reference2video": "viduq3-cankaosheng",
     }
-    candidates = [model_id]
-    if aliases.get(model_id):
-        candidates.append(aliases[model_id])
-    price = next((
-        row for row in (prices or [])
-        if isinstance(row, dict)
-        and str(row.get("model_type") or row.get("modelType") or "video").lower() == "video"
-        and str(row.get("model_id") or row.get("modelId") or "").strip() in candidates
-    ), None)
-    if not price:
-        raise RuntimeError("comic_video_price_missing:%s" % model_id)
-    try:
-        unit_price = float(price.get("price_per_call") or price.get("pricePerCall") or 0)
-        duration = float(duration_sec or 0)
-    except (TypeError, ValueError):
-        raise RuntimeError("comic_video_price_invalid:%s" % model_id)
-    if unit_price <= 0:
-        raise RuntimeError("comic_video_price_invalid:%s" % model_id)
-    duration = max(0.1, duration)
-    method = _comic_video_billing_method(price)
-    amount = unit_price * duration if method == "per_second" else unit_price
-    return {
-        "model": model_id,
-        "pricedModel": str(price.get("model_id") or price.get("modelId") or model_id),
-        "billingMethod": method,
-        "unitPrice": round(unit_price, 6),
-        "durationSec": round(duration, 3),
-        "amount": round(amount, 6),
+    return aliases.get(value, value)
+
+
+def _comic_actual_cost(payload):
+    keys = {
+        "cost", "amount", "consume", "consumption", "charge", "fee",
+        "actual_amount", "actualAmount", "actual_cost", "actualCost",
+        "total_cost", "totalCost", "total_amount", "totalAmount",
     }
+    seen = set()
+
+    def walk(value, depth=0, key_hint=""):
+        if depth > 5:
+            return None
+        if isinstance(value, dict):
+            for key in (
+                    "billing", "charge", "cost", "usage", "data", "result",
+                    "price", "payment", "fee"):
+                if key in value:
+                    found = walk(value.get(key), depth + 1, key)
+                    if found is not None:
+                        return found
+            for key, child in value.items():
+                found = walk(child, depth + 1, str(key))
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = walk(child, depth + 1, key_hint)
+                if found is not None:
+                    return found
+        elif key_hint in keys:
+            try:
+                amount = round(float(value or 0), 6)
+            except Exception:
+                return None
+            if amount > 0:
+                return amount
+        return None
+
+    try:
+        marker = id(payload)
+        if marker in seen:
+            return None
+        seen.add(marker)
+    except Exception:
+        pass
+    return walk(payload)
 
 
-def _comic_video_charge_ref(job, segment):
+def _comic_actual_billing_ref(job, segment, media_kind, task_id, frame_index=None):
     job_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str((job or {}).get("id") or "job"))[:64]
     project_id = re.sub(
         r"[^A-Za-z0-9_.-]+", "_", str((job or {}).get("comicProjectId") or "0")
@@ -839,77 +884,143 @@ def _comic_video_charge_ref(job, segment):
     segment_index = re.sub(
         r"[^A-Za-z0-9_.-]+", "_", str((segment or {}).get("index") or "0")
     )[:24]
-    attempt = "%d_%s" % (int(time.time() * 1000), uuid.uuid4().hex[:8])
-    return "comic_video:%s:project:%s:seg:%s:%s" % (
-        job_id, project_id, segment_index, attempt
+    task_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or ""))[:64]
+    if media_kind == "keyframe":
+        return "comic_keyframe:%s:seg:%s:task:%s:frame:%d:actual" % (
+            job_id, segment_index, task_key, int(frame_index or 1)
+        )
+    return "comic_video:%s:project:%s:seg:%s:task:%s:actual" % (
+        job_id, project_id, segment_index, task_key
     )
 
 
-def _charge_comic_video_attempt(adapter, job, segment):
-    payload = adapter.model_prices()
-    prices = (payload or {}).get("prices") if isinstance(payload, dict) else []
-    model = str(
-        (job or {}).get("comicVideoModel")
-        or (job or {}).get("model")
-        or _COMIC_PROJECT_VIDEO_DEFAULT
-    ).strip()
-    duration = _comic_video_duration_slot(
-        (segment or {}).get("videoDurationSec")
-        or (segment or {}).get("speechDurationSec")
-        or (segment or {}).get("duration")
+def _settle_comic_actual_billing(job, segment, payload, capability, media_kind,
+                                 task_id="", frame_index=None, fallback_model=""):
+    amount = _comic_actual_cost(payload)
+    fallback = _comic_task_fallback_metadata(payload)
+    actual_model = _comic_video_billing_model_id(
+        fallback.get("actualModel")
+        or fallback.get("fallbackModel")
+        or fallback.get("requestedModel")
+        or fallback_model
     )
-    quote = _comic_video_billing_quote(prices, model, duration)
-    quote.update({
-        "capability": COMIC_VIDEO_GENERATION_CAP,
-        "ref": _comic_video_charge_ref(job, segment),
-    })
-    reason = "漫剧视频生成 · 项目%s · 片段%s · %s · %s秒" % (
+    task_id = str(task_id or _comic_extract_task_id(payload) or "").strip()
+    stage = "comic_video" if media_kind == "video" else (
+        "comic_keyframe_start" if int(frame_index or 1) == 1 else "comic_keyframe_end"
+    )
+    if not amount or not task_id:
+        pending = {
+            "status": "awaiting_actual_cost",
+            "model": actual_model,
+            "taskId": task_id,
+            "billingScenario": "video_replacement",
+            "billingStage": stage,
+        }
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "video_replace_comic_billing_awaiting_actual_cost",
+            job_id=str((job or {}).get("id") or ""),
+            project_id=(job or {}).get("comicProjectId") or "",
+            segment_index=(segment or {}).get("index") or "",
+            media_kind=media_kind,
+            model=actual_model,
+            task_id_hash=hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12] if task_id else "",
+            actual_cost_present=bool(amount),
+        )
+        return pending
+    actual_ref = _comic_actual_billing_ref(
+        job, segment, media_kind, task_id, frame_index=frame_index
+    )
+    media_label = "漫剧视频生成" if media_kind == "video" else (
+        "漫剧首帧图生成" if int(frame_index or 1) == 1 else "漫剧尾帧图生成"
+    )
+    reason = "%s · 项目%s · 片段%s · %s · LK888实扣" % (
+        media_label,
         (job or {}).get("comicProjectId") or "-",
         (segment or {}).get("index") or "-",
-        model,
-        "%g" % quote["durationSec"],
+        actual_model or "-",
     )
-    ok, error = try_charge(
-        COMIC_VIDEO_GENERATION_CAP,
-        quote["ref"],
-        amount=quote["amount"],
+    ok, _balance, error = charge(
+        amount,
         reason=reason,
+        ref=actual_ref,
+        capability=capability,
+        allow_arrears=True,
+        meta={
+            "modelId": actual_model,
+            "taskId": task_id,
+            "actualAmount": amount,
+            "billingScenario": "video_replacement",
+            "billingStage": stage,
+        },
     )
     if not ok:
-        raise RuntimeError(error or "comic_video_charge_failed")
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "video_replace_comic_actual_billing_failed",
+            job_id=str((job or {}).get("id") or ""),
+            project_id=(job or {}).get("comicProjectId") or "",
+            segment_index=(segment or {}).get("index") or "",
+            media_kind=media_kind,
+            model=actual_model,
+            amount=amount,
+            task_id_hash=hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12],
+            error=str(error or "billing_failed")[:80],
+        )
+        raise RuntimeError(error or "comic_actual_charge_failed")
+    settled = {
+        "status": "settled",
+        "ref": actual_ref,
+        "model": actual_model,
+        "pricedModel": actual_model,
+        "amount": amount,
+        "actualAmount": amount,
+        "taskId": task_id,
+        "billingScenario": "video_replacement",
+        "billingStage": stage,
+    }
     json_log(
         _CLIENT_JSON_LOGGER,
-        "video_replace_comic_video_charged",
+        "video_replace_comic_actual_billing_settled",
         job_id=str((job or {}).get("id") or ""),
         project_id=(job or {}).get("comicProjectId") or "",
         segment_index=(segment or {}).get("index") or "",
-        model=model,
-        billing_method=quote["billingMethod"],
-        duration_sec=quote["durationSec"],
-        amount=quote["amount"],
-        ref_hash=hashlib.sha256(quote["ref"].encode("utf-8")).hexdigest()[:12],
+        media_kind=media_kind,
+        model=actual_model,
+        amount=amount,
+        task_id_hash=hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12],
     )
-    return quote
+    return settled
 
 
-def _refund_comic_video_attempt(billing):
-    billing = billing if isinstance(billing, dict) else {}
-    ref = str(billing.get("ref") or "").strip()
-    if not ref:
-        return True, None
-    result = refund_cap(
-        str(billing.get("capability") or COMIC_VIDEO_GENERATION_CAP),
-        ref,
-        amount=billing.get("amount"),
+def _settle_comic_video_actual_billing(_unused_billing, job, segment, payload):
+    fallback_model = str(
+        (segment or {}).get("actualModel")
+        or (job or {}).get("comicVideoModel")
+        or (job or {}).get("model")
+        or ""
+    ).strip()
+    return _settle_comic_actual_billing(
+        job,
+        segment,
+        payload,
+        COMIC_VIDEO_GENERATION_CAP,
+        "video",
+        task_id=_comic_extract_task_id(payload) or (segment or {}).get("comicVideoTaskId") or "",
+        fallback_model=fallback_model,
     )
-    json_log(
-        _CLIENT_JSON_LOGGER,
-        "video_replace_comic_video_refunded",
-        amount=billing.get("amount") or 0,
-        ref_hash=hashlib.sha256(ref.encode("utf-8")).hexdigest()[:12],
-        refund_ok=bool(result[0]),
+
+
+def _settle_comic_keyframe_actual_billing(job, segment, payload, frame_index, task_id=""):
+    return _settle_comic_actual_billing(
+        job,
+        segment,
+        payload,
+        COMIC_KEYFRAME_IMAGE_CAP,
+        "keyframe",
+        task_id=task_id,
+        frame_index=frame_index,
     )
-    return result
 
 
 def _billing_ref_display(ref):
@@ -922,26 +1033,117 @@ def _billing_ref_display(ref):
     return value or "-"
 
 
-def _comic_keyframe_charge_refs(job, segment, count=2):
-    """同款替换首尾帧由漫剧服务提交,本地先按 LK888 图片单价扣云豆。"""
-    charged_refs = []
-    job_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str((job or {}).get("id") or "job"))[:80]
-    seg_idx = re.sub(r"[^A-Za-z0-9_.-]+", "_", str((segment or {}).get("index") or "0"))[:24]
-    attempt = "%d_%s" % (int(time.time() * 1000), uuid.uuid4().hex[:8])
-    for frame_index in range(1, int(count or 0) + 1):
-        ref = "comic_keyframe:%s:seg:%s:%s:frame:%d" % (job_id, seg_idx, attempt, frame_index)
-        ok, err = try_charge(COMIC_KEYFRAME_IMAGE_CAP, ref)
-        if not ok:
-            for charged_ref in reversed(charged_refs):
-                refund_cap(COMIC_KEYFRAME_IMAGE_CAP, charged_ref)
-            raise RuntimeError(err or "扣费失败")
-        charged_refs.append(ref)
-    return charged_refs
+def _billing_ledger_model_text(row):
+    row = row if isinstance(row, dict) else {}
+    for key in ("modelId", "model_id", "model", "pricedModel", "priced_model"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value[:48]
+    detail = str(row.get("detail") or row.get("reason") or "")
+    match = re.search(r"(?:LK888\s*(?:实际扣费|actual charge)\s+|·\s*)([A-Za-z0-9][A-Za-z0-9_.-]{2,63})(?:\s*秒|\s|$)", detail, re.I)
+    if match:
+        return match.group(1)[:48]
+    ref = str(row.get("ref") or row.get("requestId") or row.get("request_id") or "")
+    if "comic_keyframe" in ref or "comic_keyframe" in detail:
+        return "comic_keyframe_image"
+    if "comic_video" in ref or "漫剧视频" in detail:
+        return COMIC_VIDEO_GENERATION_CAP
+    return "—"
 
 
-def _refund_comic_keyframe_charges(refs):
-    for ref in reversed(list(refs or [])):
-        refund_cap(COMIC_KEYFRAME_IMAGE_CAP, ref)
+_VIDEO_BREAKDOWN_BILLING_STAGE_TEXT = {
+    "ocr": ("OCR转写", "识别视频画面中的字幕、标题和屏幕文字"),
+    "ocr_text": ("OCR转写", "识别视频画面中的字幕、标题和屏幕文字"),
+    "audio": ("音频提取/口播转写", "提取视频音轨并转写成带时间轴的口播稿"),
+    "audio_transcription": ("音频提取/口播转写", "提取视频音轨并转写成带时间轴的口播稿"),
+    "transcription": ("音频提取/口播转写", "提取视频音轨并转写成带时间轴的口播稿"),
+    "visual": ("画面理解", "分析关键帧的人物、产品、动作、场景和镜头节奏"),
+    "visual_analysis": ("画面理解", "分析关键帧的人物、产品、动作、场景和镜头节奏"),
+    "vision": ("画面理解", "分析关键帧的人物、产品、动作、场景和镜头节奏"),
+    "report": ("拆解报告", "汇总OCR字幕、口播转写和画面理解生成可复刻文案/分镜"),
+    "report_generation": ("拆解报告", "汇总OCR字幕、口播转写和画面理解生成可复刻文案/分镜"),
+}
+
+_AGENT_MODE_BILLING_STAGE_TEXT = {
+    "prompt_optimization": "Agent.模式 - 提示词优化",
+    "reference_analysis": "Agent.模式 - 参考图理解",
+    "prompt_translation": "Agent.模式 - 模型兼容提示词转换",
+}
+
+
+def _billing_video_breakdown_detail_text(row, refund=False):
+    row = row if isinstance(row, dict) else {}
+    raw = str(row.get("detail") or row.get("reason") or "").strip()
+    ref = str(row.get("ref") or row.get("requestId") or row.get("request_id") or "").strip()
+    scenario = str(row.get("billingScenario") or row.get("billing_scenario") or "").strip().lower()
+    stage = str(row.get("billingStage") or row.get("billing_stage") or row.get("stage") or "").strip().lower()
+    haystack = " ".join([
+        raw,
+        ref,
+        scenario,
+        stage,
+        str(row.get("billingDetail") or row.get("billing_detail") or ""),
+        str(row.get("source") or ""),
+    ]).lower()
+    if not ("video_breakdown" in haystack or "分解视频" in raw):
+        return ""
+    return "分解视频调用%s" % ("退款" if refund else "")
+
+
+def _billing_agent_mode_detail_text(row, refund=False):
+    row = row if isinstance(row, dict) else {}
+    scenario = str(row.get("billingScenario") or row.get("billing_scenario") or "").strip().lower()
+    if scenario != "agent_mode":
+        return ""
+    stage = str(row.get("billingStage") or row.get("billing_stage") or row.get("stage") or "").strip().lower()
+    title = _AGENT_MODE_BILLING_STAGE_TEXT.get(stage, "Agent.模式 - 模型调用")
+    return title + ("退款" if refund else "")
+
+
+def _billing_ledger_detail_text(row):
+    row = row if isinstance(row, dict) else {}
+    raw = str(row.get("detail") or row.get("reason") or "").strip()
+    ref = str(row.get("ref") or row.get("requestId") or row.get("request_id") or "").strip()
+    kind = str(row.get("type") or row.get("modelType") or row.get("model_type") or "").lower()
+    haystack = (raw + " " + ref + " " + str(row.get("modelId") or row.get("model") or "")).lower()
+    refund = kind == "refund" or "refund" in haystack or "退款" in raw
+
+    breakdown_detail = _billing_video_breakdown_detail_text(row, refund=refund)
+    if breakdown_detail:
+        return breakdown_detail
+    agent_detail = _billing_agent_mode_detail_text(row, refund=refund)
+    if agent_detail:
+        return agent_detail
+    keyframe = re.search(r"comic_keyframe:[^:]+:seg:([^:]+):.*:frame:(\d+)", ref)
+    if keyframe:
+        frame_name = "首帧图" if keyframe.group(2) == "1" else "尾帧图"
+        return "同款替换%s%s" % (frame_name, "退款" if refund else "")
+    comic_video = re.search(r"comic_video:[^:]+:project:[^:]+:seg:([^:]+):", ref)
+    if not comic_video:
+        comic_video = re.search(r"片段\s*([0-9]+)", raw)
+    if "comic_video" in haystack or "漫剧视频" in raw:
+        suffix = " · 片段%s" % comic_video.group(1) if comic_video else ""
+        return "同款替换视频%s%s" % ("退款" if refund else "", suffix)
+    if "digital_human" in haystack or "数字人" in raw:
+        return "数字人生成%s" % ("退款" if refund else "")
+    if "tts" in haystack or "voice" in haystack or "配音" in raw or "声音" in raw:
+        return "数字人口播配音%s" % ("退款" if refund else "")
+    if "chat" in haystack or "completion" in haystack or "workflow" in haystack or "工作流" in raw:
+        return "工作流助手聊天%s" % ("退款" if refund else "")
+    if kind in ("", "other") and re.search(r"\b(gemini|gpt|deepseek|qwen|claude)\b", haystack, re.I):
+        return "工作流助手聊天%s" % ("退款" if refund else "")
+    if "agent" in haystack and ("video" in haystack or kind == "video"):
+        return "agent.模式视频生成%s" % ("退款" if refund else "")
+    if kind == "video" and re.search(r"lk888\s*(?:实际扣费|actual charge)", raw, re.I):
+        return "agent.模式视频生成%s" % ("退款" if refund else "")
+    if kind == "image":
+        return "agent.模式图片生成%s" % ("退款" if refund else "")
+    if kind == "video":
+        return "agent.模式视频生成%s" % ("退款" if refund else "")
+    if kind == "voice":
+        return "数字人口播配音%s" % ("退款" if refund else "")
+    text = re.sub(r"LK888\s*(?:实际扣费|actual charge)\s*", "", raw, flags=re.I).strip(" ·,，")
+    return (text[:40] + "...") if len(text) > 43 else (text or "其他")
 
 
 # ---------- central API + local task helpers ----------
@@ -1055,6 +1257,15 @@ def account_option_label(account):
     return "%s · %s" % (account_display_name(account), state)
 
 
+def _is_offline_default_douyin_placeholder(account):
+    account = account if isinstance(account, dict) else {}
+    platform = str(account.get("platform") or "douyin").strip().lower()
+    local_id = _account_local_id(account)
+    if platform != "douyin" or local_id not in ("douyin-self", "default"):
+        return False
+    return not bool(account.get("online") or account.get("cookieReady") or account.get("usable"))
+
+
 def merge_account_sources(central_accounts, local_accounts):
     """Return display/publish accounts with local browser accounts as the source of truth."""
     central_by_key = {}
@@ -1078,6 +1289,8 @@ def merge_account_sources(central_accounts, local_accounts):
             continue
         key = (platform, local_id)
         central = central_by_key.get(key) or {}
+        if not central and _is_offline_default_douyin_placeholder(row):
+            continue
         item = dict(central)
         item.update(row)
         item["id"] = local_id
@@ -1101,6 +1314,10 @@ def merge_account_sources(central_accounts, local_accounts):
         local_id = _account_local_id(row)
         key = (platform, local_id)
         if key in seen:
+            continue
+        if platform in ("xhs", "xiaohongshu", "rednote", "小红书"):
+            # 小红书没有独立的多账号矩阵来源；本地登录态消失后，
+            # 中心服旧记录不应再单独出现在账号页里。
             continue
         item = dict(row)
         if local_id:
@@ -1391,30 +1608,169 @@ def submit_local_task(ttype, payload, timeout_poll=280):
         return failed
     tid = j.get("taskId")
     deadline = time.time() + timeout_poll
+    last_task = None
     while time.time() < deadline:
         time.sleep(2)
         _c, t = api("GET", "/api/local-browser/task?id=" + str(tid))
-        if isinstance(t, dict) and t.get("status") in ("done", "failed"):
-            record_account_risk_from_task(ttype, t)
-            return t
+        if isinstance(t, dict):
+            last_task = t
+            if t.get("status") in ("done", "failed"):
+                record_account_risk_from_task(ttype, t)
+                return t
     failed = {"ok": False, "status": "failed", "error": "task_timeout", "taskId": tid}
+    if isinstance(last_task, dict):
+        failed["lastStatus"] = last_task.get("status") or ""
+        failed["lastError"] = last_task.get("error") or ""
+        failed["lastTask"] = last_task
     record_account_risk_from_task(ttype, failed)
     return failed
+
+
+def _pick_local_login_account(accounts, platform):
+    try:
+        rows = accounts
+        if isinstance(accounts, dict):
+            rows = accounts.get("value") or accounts.get("accounts") or accounts.get("items") or []
+        if not isinstance(rows, list):
+            return {}
+        platform = str(platform or "douyin").strip()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if platform and str(row.get("platform") or "douyin").strip() != platform:
+                continue
+            return {
+                "id": row.get("id") or row.get("uid") or row.get("sec_uid") or "",
+                "name": row.get("name") or row.get("nickname") or row.get("n") or "",
+                "handle": row.get("handle") or row.get("h") or "",
+                "fans": row.get("fans") or "",
+                "avatar": row.get("avatar") or "",
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def submit_account_login_direct(platform, mode="reuse", timeout_poll=300):
+    platform = "xhs" if str(platform or "").strip() == "xhs" else "douyin"
+    ttype = platform + ".login"
+    start_path = "/api/xhs/login" if platform == "xhs" else "/api/login/start"
+    code, start = local_api("POST", start_path, {"platform": platform, "fresh": mode == "fresh"}, timeout=30)
+    start = start if isinstance(start, dict) else {}
+    sid = start.get("sessionId")
+    if not sid:
+        failed = {
+            "ok": False,
+            "status": "failed",
+            "error": start.get("error") or ("http_%s" % code),
+            "result": start,
+        }
+        record_account_risk_from_task(ttype, failed)
+        return failed
+
+    deadline = time.time() + max(60, int(timeout_poll or 300))
+    status = {}
+    while time.time() < deadline:
+        time.sleep(3)
+        _code, current = local_api("GET", "/api/login/status?sessionId=" + quote(str(sid), safe=""), timeout=15)
+        if isinstance(current, dict):
+            status = current
+            if current.get("status") in ("success", "error"):
+                break
+
+    logged = bool(status.get("loggedIn") or status.get("status") == "success")
+    account = {}
+    if logged:
+        try:
+            _accounts_code, accounts = local_api("GET", "/api/accounts", timeout=15)
+            account = _pick_local_login_account(accounts, platform)
+        except Exception:
+            account = {}
+    error = "" if logged else (status.get("error") or "login_not_detected")
+    task = {
+        "ok": bool(logged),
+        "status": "done" if logged else "failed",
+        "sessionId": sid,
+        "error": error,
+        "result": {
+            "ok": bool(logged),
+            "loggedIn": bool(logged),
+            "platform": platform,
+            "cookieCount": status.get("cookieCount", 0),
+            "account": account,
+            "error": error,
+        },
+    }
+    record_account_risk_from_task(ttype, task)
+    return task
 
 
 XHS_LOGIN_EXPIRED_HINT = "账号已存在，但登录态已失效。请到账号矩阵重新登录该平台账号后再采集。"
 
 
+DOUYIN_COMMENT_TASK_MESSAGES = {
+    "douyin_daily_comment_limit": "今日评论已达上限，请明天再操作。",
+    "douyin_comment_cooldown": "评论太频繁，请等待冷却结束后再试。",
+    "douyin_comment_risk_cooldown": "抖音账号处于评论风险冷却中，请等待冷却结束后再试。",
+    "douyin_comment_risk_paused": "抖音账号处于评论风险暂停中，请先人工处理平台提示后再恢复。",
+    "comment_verification_required": "平台要求安全验证，请在打开的浏览器中完成验证后重试。",
+    "comment_login_required": "抖音账号登录态失效，请到账号矩阵重新登录后重试。",
+    "comment_input_not_ready": "未检测到可用的抖音评论输入框，请确认该账号可以评论后重试。",
+    "preflight_blocked": "抖音评论前检查未通过，请先处理平台提示后重试。",
+}
+
+
+def _looks_like_machine_error(text):
+    text = str(text or "").strip()
+    if not text:
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_-.:/")
+    return "_" in text and all(ch in allowed for ch in text.lower())
+
+
+def _localize_douyin_comment_task_error(error, payload=None):
+    error = str(error or "").strip()
+    payload = payload if isinstance(payload, dict) else {}
+    message = DOUYIN_COMMENT_TASK_MESSAGES.get(error, "")
+    if not message:
+        return ""
+    safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
+    try:
+        left = int(safety.get("cooldownLeft") or safety.get("riskCooldownLeft") or 0)
+    except Exception:
+        left = 0
+    if left > 0 and error in ("douyin_comment_cooldown", "douyin_comment_risk_cooldown"):
+        return message.replace("冷却结束", "%d秒" % left)
+    return message
+
+
 def _local_task_error_message(task, fallback="客户端可能还没连上或需先登录账号"):
     task = task if isinstance(task, dict) else {}
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
-    error = str(task.get("error") or result.get("error") or "").strip()
+    result_error = str(result.get("error") or "").strip()
+    error = str(task.get("error") or result_error or "").strip()
+    readable = str(
+        result.get("userMessage") or result.get("message") or task.get("userMessage") or task.get("message") or ""
+    ).strip()
+    if readable and readable not in (error, result_error) and not _looks_like_machine_error(readable):
+        return readable
+    display_error = result_error or error
     risk_code = str(task.get("riskCode") or result.get("riskCode") or "").strip()
-    if error == "xhs_ip_risk":
+    if display_error == "xhs_ip_risk":
         suffix = ("(" + risk_code + ")") if risk_code else ""
         return "小红书安全限制:当前网络/IP存在风险,请切换可靠网络环境后重试" + suffix
-    if error == "xhs_login_required":
+    if display_error == "xhs_login_required":
         return XHS_LOGIN_EXPIRED_HINT
+    localized = _localize_douyin_comment_task_error(display_error, result or task)
+    if localized:
+        return localized
+    if error == "task_timeout":
+        task_id = str(task.get("taskId") or task.get("id") or "").strip()
+        last_status = str(task.get("lastStatus") or "").strip()
+        suffix = (" 任务ID:" + task_id) if task_id else ""
+        if last_status:
+            suffix += " 最后状态:" + last_status
+        return "本机浏览器任务超过等待时间仍未返回结果，请确认本地执行引擎在线，浏览器没有卡在登录、验证码、风控或页面加载中。" + suffix
     return error or fallback
 
 
@@ -1733,7 +2089,22 @@ def _lk_proxies(cfg=None):
     return {"http": p, "https": p} if p else None
 
 
-def lk888_chat(prompt, system=None, model=None, max_tokens=1200, temperature=0.9):
+def _lk888_billing_headers(scenario=None, stage=None, detail=None):
+    headers = {}
+    values = (
+        ("X-Matrix-Billing-Scenario", scenario),
+        ("X-Matrix-Billing-Stage", stage),
+        ("X-Matrix-Billing-Detail", detail),
+    )
+    for key, value in values:
+        text = str(value or "").strip()
+        if text:
+            headers[key] = text[:160]
+    return headers
+
+
+def lk888_chat(prompt, system=None, model=None, max_tokens=1200, temperature=0.9,
+               billing_scenario=None, billing_stage=None, billing_detail=None):
     """同步调用 lk888 LLM(OpenAI 兼容 /v1/chat/completions),返回文本。在 bg 线程里用。"""
     cfg = lk888_config()
     base = (cfg.get("base_url") or "").rstrip("/")
@@ -1749,6 +2120,7 @@ def lk888_chat(prompt, system=None, model=None, max_tokens=1200, temperature=0.9
         msgs.append({"role": "system", "content": system})
     msgs.append({"role": "user", "content": prompt})
     hdr = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    hdr.update(_lk888_billing_headers(billing_scenario, billing_stage, billing_detail))
     tried = []
     last_err = ""
     for mdl in [model or cfg.get("llm_model") or "deepseek-v4-flash", cfg.get("llm_model_fallback") or "gpt-5.4-mini"]:
@@ -1775,7 +2147,7 @@ def lk888_chat(prompt, system=None, model=None, max_tokens=1200, temperature=0.9
 
 
 def lk888_image_result(prompt, size="1024x1024", model=None, image_urls=None):
-    """Return generated image bytes and the upstream public URL when available."""
+    """Submit an image task through LK888 media API and return its raw JSON response."""
     cfg = lk888_config()
     base = (cfg.get("base_url") or "").rstrip("/")
     key = cfg.get("api_key") or ""
@@ -1786,87 +2158,80 @@ def lk888_image_result(prompt, size="1024x1024", model=None, image_urls=None):
         requests.packages.urllib3.disable_warnings()
     except Exception:
         pass
-    body = {"model": mdl, "prompt": prompt, "n": 1, "size": size}
-    if image_urls:
-        refs = [str(url).strip() for url in image_urls if str(url or "").strip()]
-        if not refs:
-            raise RuntimeError("lk888_image_reference_images_missing")
-        body["image_urls"] = refs
-        logged_fields = ["image_urls"]
-        if all(_is_remote_fetchable_media_url(ref) for ref in refs):
-            body["images"] = refs
-            body["reference_images"] = refs
-            body["referenceImages"] = refs
-            body["params"] = {"images": refs, "image_urls": refs, "reference_images": refs}
-            logged_fields.extend(["images", "reference_images", "referenceImages", "params.images"])
-        try:
-            json_log(
-                _CLIENT_JSON_LOGGER,
-                "lk888_image_reference_payload",
-                code="lk888_image_reference_payload",
-                model=mdl,
-                reference_count=len(refs),
-                fields=logged_fields,
-            )
-        except Exception:
-            pass
+    body = _agent_image_payload(mdl, prompt, size=size, image_urls=image_urls)
+    body["model"] = mdl
     try:
-        image_timeout = max(60, int(os.getenv("LK888_IMAGE_TIMEOUT_SEC", "540") or 540))
-    except Exception:
-        image_timeout = 540
-    try:
-        r = requests.post(base + "/v1/images/generations",
+        r = requests.post(base + "/v1/media/generate",
                           headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-                          json=body, timeout=image_timeout, verify=True, proxies=_lk_proxies(cfg))
+                          json=body, timeout=60, verify=True, proxies=_lk_proxies(cfg))
     except requests.exceptions.ReadTimeout:
-        raise RuntimeError("图片生成超时:上游模型超过 9 分钟未返回,请稍后重试或改用 1024x1024/更快模型")
-    if r.status_code != 200:
-        raise RuntimeError("图片生成 %s: %s" % (r.status_code, r.text[:100]))
-    item = (r.json().get("data") or [{}])[0]
-    if item.get("url"):
-        public_url = str(item.get("url") or "").strip()
-        if not _is_remote_fetchable_media_url(public_url):
-            raise RuntimeError("image_result_url_not_public")
-        return requests.get(public_url, timeout=120, verify=True).content, public_url
-    if item.get("b64_json"):
-        import base64 as _b64
-        return _b64.b64decode(item["b64_json"]), ""
-    raise RuntimeError("图片响应缺 url/b64")
+        raise RuntimeError("图片任务提交超时，请稍后重试")
+    try:
+        result = r.json()
+    except Exception:
+        result = {"status_code": r.status_code, "error": r.text[:400]}
+    if not r.ok:
+        raise RuntimeError("图片任务提交失败:%s" % str(result)[:400])
+    return result
 
 
-def lk888_image(prompt, size="1024x1024", model=None, image_urls=None):
-    """同步调用 lk888 图片生成并返回图片 bytes。"""
-    image_bytes, _public_url = lk888_image_result(
-        prompt, size=size, model=model, image_urls=image_urls)
-    return image_bytes
+def _lk888_media_task_id(response):
+    data = response.get("data") if isinstance(response, dict) else {}
+    if not isinstance(data, dict):
+        data = {}
+    task_ids = data.get("task_ids") or []
+    return data.get("task_id") or (task_ids[0] if isinstance(task_ids, list) and task_ids else None) \
+        or (response or {}).get("task_id") if isinstance(response, dict) else None
 
 
-def lk888_image_url(prompt, size="1024x1024", model=None):
-    """图片生成但返回公网 URL(用于喂给数字人/视频参考)。"""
+def _lk888_image_result_download(prompt, size="1024x1024", model=None, image_urls=None):
+    """Internal synchronous facade for flows that still need downloaded image bytes."""
+    response = lk888_image_result(prompt, size=size, model=model, image_urls=image_urls)
+    # Keep test doubles and older in-process extensions usable while the public
+    # submission helper now returns LK888's raw media response.
+    if isinstance(response, (tuple, list)) and len(response) >= 2:
+        return response[0], response[1]
+    task = _lk888_media_task_id(response)
+    if not task:
+        raise RuntimeError("图片任务提交成功但未返回任务ID")
     cfg = lk888_config()
     base = (cfg.get("base_url") or "").rstrip("/")
     key = cfg.get("api_key") or ""
-    mdl = model or cfg.get("image_model") or "gpt-image-2"
-    if not base or not key:
-        raise RuntimeError("未配置 lk888")
-    try:
-        requests.packages.urllib3.disable_warnings()
-    except Exception:
-        pass
-    r = requests.post(base + "/v1/images/generations",
-                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-                      json={"model": mdl, "prompt": prompt, "n": 1, "size": size}, timeout=150, verify=True, proxies=_lk_proxies(cfg))
-    if r.status_code != 200:
-        raise RuntimeError("头像生成 %s: %s" % (r.status_code, r.text[:80]))
-    return ((r.json().get("data") or [{}])[0]).get("url") or ""
+    headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
+    for _ in range(150):
+        time.sleep(4)
+        try:
+            status = requests.get(
+                base + "/v1/skills/task-status", headers=headers,
+                params={"task_id": task}, timeout=30, verify=True,
+                proxies=_lk_proxies(cfg),
+            ).json()
+        except Exception:
+            status = {}
+        url = _extract_lk888_media_url(status, ["png", "jpg", "jpeg", "webp"])
+        if url:
+            public_url = str(url).strip()
+            if not _is_remote_fetchable_media_url(public_url):
+                raise RuntimeError("图片结果地址不可访问")
+            return requests.get(public_url, timeout=120, verify=True).content, public_url
+        if _lk888_task_failed(status):
+            raise RuntimeError("图片生成失败:%s" % _lk888_task_status_summary(status))
+    raise RuntimeError("图片生成超时，请稍后重试")
+
+
+def lk888_image(prompt, size="1024x1024", model=None, image_urls=None):
+    """提交 LK888 图片任务并返回原始 JSON，不轮询、不下载。"""
+    return lk888_image_result(prompt, size=size, model=model, image_urls=image_urls)
+
+
+def lk888_image_url(prompt, size="1024x1024", model=None):
+    """提交 LK888 图片任务并返回原始 JSON，不轮询、不下载。"""
+    return lk888_image_result(prompt, size=size, model=model)
 
 
 def lk888_image_data_url(prompt, size="1024x1024", model=None):
-    """生成图片并转成 data URL(gpt-image-2 常返回 b64,数字人头像用它)。"""
-    import base64 as _b64
-    b = lk888_image(prompt, size=size, model=model)
-    mime = "image/png" if b[:4] == b"\x89PNG" else "image/jpeg"
-    return "data:%s;base64,%s" % (mime, _b64.b64encode(b).decode("ascii"))
+    """提交 LK888 图片任务并返回原始 JSON，不轮询、不下载。"""
+    return lk888_image_result(prompt, size=size, model=model)
 
 
 def _extract_lk888_media_url(obj, exts):
@@ -2042,7 +2407,8 @@ def lk888_tts(text, emotion="happy", progress=None):
                             ["mp3", "wav", "ogg"], progress=progress)
 
 
-def lk888_vision(prompt, media_urls=None, model="gemini-3.1-pro-preview", max_tokens=1500):
+def lk888_vision(prompt, media_urls=None, model="gemini-3.1-pro-preview", max_tokens=1500,
+                 billing_scenario=None, billing_stage=None, billing_detail=None):
     """多模态理解:把图片/视频公网 URL 喂给多模态模型(gemini),返回文字分析。
     ⚠️ lk888 无“千问3.7Max”,用 gemini-3.1-pro-preview 做图像/视频理解。"""
     cfg = lk888_config()
@@ -2061,8 +2427,10 @@ def lk888_vision(prompt, media_urls=None, model="gemini-3.1-pro-preview", max_to
             content.append({"type": "video_url", "video_url": {"url": u}})
         else:
             content.append({"type": "image_url", "image_url": {"url": u}})
+    hdr = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    hdr.update(_lk888_billing_headers(billing_scenario, billing_stage, billing_detail))
     r = requests.post(base + "/v1/chat/completions",
-                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                      headers=hdr,
                       json={"model": model, "messages": [{"role": "user", "content": content}], "max_tokens": max_tokens},
                       timeout=150, verify=True, proxies=_lk_proxies(cfg))
     if r.status_code != 200:
@@ -2076,42 +2444,460 @@ def lk888_vision(prompt, media_urls=None, model="gemini-3.1-pro-preview", max_to
 _LK888_MODEL_CACHE = {"ts": 0.0, "rows": []}
 _LK888_MODEL_CACHE_TTL = 300.0
 _LK888_FALLBACK_MODELS = [
-    {"name": "gpt-image-2", "display_name": "GPT Image 2", "type": "image"},
-    {"name": "gpt-image-2-guan", "display_name": "GPT Image 2 Official", "type": "image"},
-    {"name": "gemini-3-pro-image-preview", "display_name": "Nano Banana Pro", "type": "image"},
-    {"name": "gemini-3.1-flash-image-preview", "display_name": "Nano Banana 2", "type": "image"},
-    {"name": "doubao-seedream-5-0-260128", "display_name": "Seedream 5.0", "type": "image"},
-    {"name": "doubao-seedream-4-5-251128", "display_name": "Seedream 4.5", "type": "image"},
-    {"name": "mj_imagine", "display_name": "Midjourney", "type": "image"},
-    {"name": "qwen-image", "display_name": "Qwen-image-max", "type": "image"},
-    {"name": "wan2.7-image", "display_name": "Wanxiang 2.7 Image", "type": "image"},
-    {"name": "wan2.6-image", "display_name": "Wanxiang 2.6 Image", "type": "image"},
-    {"name": "vidu-image-2", "display_name": "VIDU Image 2", "type": "image"},
-    {"name": "kling-v3", "display_name": "Kling-V3", "type": "image"},
-    {"name": "kling-v3-omni", "display_name": "Kling-V3-Omni", "type": "image"},
-    {"name": "kling-image-o1", "display_name": "Kling o1", "type": "image"},
-    {"name": "doubao-seedance-1-5-pro-251215", "display_name": "Seedance 1.5 Pro", "type": "video"},
-    {"name": "viduq3", "display_name": "Vidu Q3", "type": "video"},
-    {"name": "viduq3-turbo", "display_name": "Vidu Q3 Turbo", "type": "video"},
-    {"name": "vidu-jieshuoman", "display_name": "VIDU Narrated Comic", "type": "video"},
-    {"name": "kling-v3-video", "display_name": "Kling-V3-video", "type": "video"},
-    {"name": "kling-v2-6", "display_name": "Kling 2.6 Pro", "type": "video"},
-    {"name": "kling-avatar-image2video", "display_name": "Kling Digital Human", "type": "video"},
-    {"name": "veo3.1", "display_name": "Veo 3.1", "type": "video"},
-    {"name": "sora-2", "display_name": "Sora-2 Official", "type": "video"},
-    {"name": "grok-video-3", "display_name": "grok-video-3", "type": "video"},
-    {"name": "happyhorse-t2v", "display_name": "HappyHorse Text-to-video", "type": "video"},
-    {"name": "happyhorse-i2v", "display_name": "HappyHorse First Frame", "type": "video"},
-    {"name": "hailuo-2.3", "display_name": "Hailuo 2.3", "type": "video"},
-    {"name": "wan2.7-cankaosheng", "display_name": "Wanxiang 2.7 Reference-to-Video", "type": "video"},
-    {"name": "wan2.7-shouweizhen", "display_name": "Wanxiang 2.7 First/Last Frames", "type": "video"},
+    {"name": "gpt-image-2", "display_name": "GPT Image 2", "type": "image", "endpoint": "media"},
+    {"name": "gpt-image-2-guan", "display_name": "GPT Image 2 Official", "type": "image", "endpoint": "media"},
+    {"name": "gemini-3-pro-image-preview", "display_name": "Nano Banana Pro", "type": "image", "endpoint": "media"},
+    {"name": "gemini-3.1-flash-image-preview", "display_name": "Nano Banana 2", "type": "image", "endpoint": "media"},
+    {"name": "doubao-seedream-5-0-260128", "display_name": "Seedream 5.0", "type": "image", "endpoint": "media"},
+    {"name": "doubao-seedream-4-5-251128", "display_name": "Seedream 4.5", "type": "image", "endpoint": "media"},
+    {"name": "mj_imagine", "display_name": "Midjourney", "type": "image", "endpoint": "media"},
+    {"name": "qwen-image", "display_name": "Qwen-image-max", "type": "image", "endpoint": "media"},
+    {"name": "wan2.7-image", "display_name": "Wanxiang 2.7 Image", "type": "image", "endpoint": "media"},
+    {"name": "wan2.6-image", "display_name": "Wanxiang 2.6 Image", "type": "image", "endpoint": "media"},
+    {"name": "vidu-image-2", "display_name": "VIDU Image 2", "type": "image", "endpoint": "media"},
+    {"name": "kling-v3", "display_name": "Kling-V3", "type": "image", "endpoint": "media"},
+    {"name": "kling-v3-omni", "display_name": "Kling-V3-Omni", "type": "image", "endpoint": "media"},
+    {"name": "kling-image-o1", "display_name": "Kling o1", "type": "image", "endpoint": "media"},
+    {"name": "doubao-seedance-1-5-pro-251215", "display_name": "Seedance 1.5 Pro", "type": "video", "duration_slots": (4, 8, 12)},
+    {"name": "viduq3", "display_name": "Vidu Q3", "type": "video", "duration_slots": (4, 8, 12, 16)},
+    {"name": "viduq3-turbo", "display_name": "Vidu Q3 Turbo", "type": "video", "duration_slots": tuple(range(1, 17))},
+    {"name": "viduq3-turbo-cankaosheng", "display_name": "Vidu Q3 Turbo Reference-to-Video", "type": "video", "duration_slots": tuple(range(3, 17))},
+    {"name": "vidu-jieshuoman", "display_name": "VIDU Narrated Comic", "type": "video", "duration_slots": (5, 10)},
+    {"name": "kling-v3-video", "display_name": "Kling-V3-video", "type": "video", "duration_slots": (5, 10, 15)},
+    {"name": "kling-v2-6", "display_name": "Kling 2.6 Pro", "type": "video", "duration_slots": (5, 10)},
+    {"name": "kling-motion-control-v3", "display_name": "Kling Motion Control V3", "type": "video", "duration_slots": (5, 10)},
+    {"name": "kling-v3-omni-shouweizhen", "display_name": "Kling V3 Omni 首尾帧", "type": "video", "duration_slots": (5, 10, 15)},
+    {"name": "pixverse-v6-shouweizhen", "display_name": "PixVerse V6 首尾帧", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
+    {"name": "kling-avatar-image2video", "display_name": "Kling Digital Human", "type": "video", "duration_slots": (5, 10)},
+    {"name": "veo3.1", "display_name": "Veo 3.1", "type": "video", "duration_slots": (8,)},
+    {"name": "sora-2", "display_name": "Sora-2 Official", "type": "video", "duration_slots": (4, 8, 12)},
+    {"name": "grok-video-3", "display_name": "grok-video-3", "type": "video", "duration_slots": (10,)},
+    {"name": "grok-imagine-video-1.5-preview", "display_name": "grok Imagine video1.5", "type": "video", "duration_slots": tuple(range(1, 16))},
+    {"name": "happyhorse-t2v", "display_name": "HappyHorse Text-to-video", "type": "video", "duration_slots": (5, 10)},
+    {"name": "happyhorse-i2v", "display_name": "HappyHorse First Frame", "type": "video", "duration_slots": (5, 10)},
+    {"name": "happyhorse-r2v", "display_name": "HappyHorse Reference-to-video", "type": "video", "duration_slots": tuple(range(3, 16))},
+    {"name": "happyhorse-1.1-r2v", "display_name": "HappyHorse 1.1 Reference-to-video", "type": "video", "duration_slots": tuple(range(3, 16))},
+    {"name": "happyhorse-video-edit", "display_name": "HappyHorse Video Edit", "type": "video", "duration_slots": tuple(range(3, 16))},
+    {"name": "hailuo-2.3", "display_name": "Hailuo 2.3", "type": "video", "duration_slots": (6, 10)},
+    {"name": "wan2.7-cankaosheng", "display_name": "Wanxiang 2.7 Reference-to-Video", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
+    {"name": "wan2.7-shouweizhen", "display_name": "Wanxiang 2.7 First/Last Frames", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
 ]
 
 _LK888_IMAGE_DEFAULT = "gpt-image-2"
 _LK888_VIDEO_DEFAULT = "doubao-seedance-1-5-pro-251215"
 _LK888_CANONICAL_MODELS = {str(row.get("name") or ""): dict(row) for row in _LK888_FALLBACK_MODELS}
 _LK888_CANONICAL_MODEL_ORDER = {str(row.get("name") or ""): i for i, row in enumerate(_LK888_FALLBACK_MODELS)}
+_LK888_AGENT_EXCLUDED_MODEL_IDS = {
+    "kling-avatar-image2video",
+    "kling-motion-control-v3",
+    "vidu-jieshuoman",
+    "vidu-mv",
+}
 AGENT_VIDEO_DURATIONS = (5, 10)
+_AGENT_IMAGE_REFERENCE_LIMITS = {
+    "gpt-image-2-guan": 4,
+    "gemini-3-pro-image-preview": 8,
+    "gemini-3.1-flash-image-preview": 8,
+    "doubao-seedream-5-0-260128": 4,
+    "doubao-seedream-4-5-251128": 4,
+    "mj_imagine": 4,
+    "qwen-image": 4,
+    "wan2.7-image": 4,
+    "wan2.6-image": 4,
+    "vidu-image-2": 4,
+    "kling-v3": 4,
+    "kling-v3-omni": 4,
+    "kling-image-o1": 10,
+}
+_AGENT_VIDEO_REFERENCE_LIMITS = {
+    "doubao-seedance-1-5-pro-251215": 2,
+    "viduq3": 2,
+    "viduq3-turbo": 2,
+    "viduq3-turbo-cankaosheng": 7,
+    "vidu-jieshuoman": 7,
+    "kling-v3-video": 2,
+    "kling-v2-6": 1,
+    "kling-motion-control-v3": 1,
+    "kling-v3-omni-shouweizhen": 2,
+    "pixverse-v6-shouweizhen": 2,
+    "veo3.1": 3,
+    "sora-2": 2,
+    "grok-video-3": 0,
+    "grok-imagine-video-1.5-preview": 1,
+    "happyhorse-t2v": 0,
+    "happyhorse-i2v": 1,
+    "happyhorse-r2v": 5,
+    "happyhorse-1.1-r2v": 5,
+    "happyhorse-video-edit": 5,
+    "hailuo-2.3": 1,
+    "wan2.7-cankaosheng": 4,
+    "wan2.7-shouweizhen": 2,
+}
+_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
+    "viduq3-turbo": {"image_required": True},
+    "viduq3-turbo-cankaosheng": {"image_required": False},
+    "kling-motion-control-v3": {
+        "image_required": True,
+        "video_required": True,
+        "video_limit": 1,
+        "video_field": "video_url",
+    },
+    "wan2.7-cankaosheng": {
+        "video_required": False,
+        "video_limit": 1,
+        "video_field": "video",
+    },
+    "wan2.7-shouweizhen": {"image_required": True},
+    "kling-v3-omni-shouweizhen": {"image_required": True},
+    "pixverse-v6-shouweizhen": {"image_required": True},
+    "grok-imagine-video-1.5-preview": {"image_required": True},
+    "happyhorse-i2v": {"image_required": True},
+    "happyhorse-r2v": {"image_required": True},
+    "happyhorse-1.1-r2v": {"image_required": True},
+    "happyhorse-video-edit": {
+        "image_required": False,
+        "video_required": True,
+        "video_limit": 1,
+        "video_field": "video",
+    },
+}
+
+
+def _agent_video_media_requirements(model):
+    """Return the LK888 media contract used by both Agent UI and payloads."""
+    model = str(model or "").strip()
+    requirements = {
+        "image_required": False,
+        "image_limit": _agent_video_reference_limit(model),
+        "video_required": False,
+        "video_limit": 0,
+        "video_field": "video",
+        "audio_required": False,
+        "audio_limit": 0,
+        "audio_field": "audio",
+    }
+    requirements.update(_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES.get(model) or {})
+    requirements["image_limit"] = max(0, int(requirements.get("image_limit") or 0))
+    requirements["video_limit"] = max(0, int(requirements.get("video_limit") or 0))
+    requirements["audio_limit"] = max(0, int(requirements.get("audio_limit") or 0))
+    requirements["image_required"] = bool(requirements.get("image_required"))
+    requirements["video_required"] = bool(requirements.get("video_required"))
+    requirements["audio_required"] = bool(requirements.get("audio_required"))
+    return requirements
+
+def _lk888_agent_model_selectable(row):
+    name = str((row or {}).get("name") or "").strip()
+    if not name or name in _LK888_AGENT_EXCLUDED_MODEL_IDS:
+        return False
+    return (row or {}).get("agent_selectable", True) is not False
+
+def _lk888_fallback_models_by_type(kind):
+    kind = str(kind or "").strip().lower()
+    return [
+        dict(row)
+        for row in _LK888_FALLBACK_MODELS
+        if str((row or {}).get("type") or "").strip().lower() == kind
+        and _lk888_agent_model_selectable(row)
+    ]
+
+def _agent_model_rule(model):
+    return dict(_LK888_CANONICAL_MODELS.get(str(model or "").strip()) or {})
+
+def _agent_model_type(model):
+    rule = _agent_model_rule(model)
+    return str(rule.get("type") or "").strip().lower()
+
+def _agent_model_for_type(model, kind):
+    model = str(model or "").strip()
+    kind = str(kind or "").strip().lower()
+    if not model:
+        return _LK888_VIDEO_DEFAULT if kind == "video" else _LK888_IMAGE_DEFAULT
+    model_type = _agent_model_type(model)
+    if not model_type:
+        return model
+    if model_type == kind:
+        return model
+    if kind == "video":
+        return _LK888_VIDEO_DEFAULT
+    return _LK888_IMAGE_DEFAULT
+
+
+def _agent_image_reference_limit(model):
+    model = str(model or "").strip()
+    if model in _AGENT_IMAGE_REFERENCE_LIMITS:
+        return max(0, int(_AGENT_IMAGE_REFERENCE_LIMITS[model]))
+    return ProductGenPage.MAX_REFS if "ProductGenPage" in globals() else 4
+
+
+def _agent_video_reference_limit(model):
+    model = str(model or "").strip()
+    if model in _AGENT_VIDEO_REFERENCE_LIMITS:
+        return max(0, int(_AGENT_VIDEO_REFERENCE_LIMITS[model]))
+    if _agent_video_is_first_last_frame_model(model):
+        return 2
+    return ProductGenPage.MAX_REFS if "ProductGenPage" in globals() else 4
+
+def _agent_video_is_first_last_frame_model(model):
+    model = str(model or "").strip()
+    row = _agent_model_rule(model)
+    text = " ".join([
+        model,
+        str(row.get("display_name") or ""),
+    ])
+    return bool(
+        "shouweizhen" in model
+        or "首尾帧" in text
+        or "First/Last" in text
+    )
+
+def _prodgen_ref_label_for(mode, model, index):
+    mode = str(mode or "").strip()
+    if mode == "video":
+        if _agent_video_is_first_last_frame_model(model):
+            return "首帧" if int(index or 0) == 0 else "尾帧"
+        return "参考图%d" % (int(index or 0) + 1)
+    return "待修改图" if int(index or 0) == 0 else "参考图%d" % int(index or 0)
+
+def _agent_image_endpoint(model):
+    rule = _agent_model_rule(model)
+    endpoint = str(rule.get("endpoint") or "").strip().lower()
+    if endpoint in ("images", "media"):
+        return endpoint
+    name = str(model or "").strip().lower()
+    if name.startswith("gemini-") and "image-preview" in name:
+        return "media"
+    return "images"
+
+def _agent_aspect_from_size(size, default="1:1"):
+    text = str(size or "").strip().lower()
+    mapping = {
+        "1024x1024": "1:1", "2048x2048": "1:1", "2880x2880": "1:1",
+        "1024x1536": "2:3", "2048x3072": "2:3", "2304x3456": "2:3",
+        "1536x1024": "3:2", "3072x2048": "3:2", "3456x2304": "3:2",
+        "960x1280": "3:4", "1920x2560": "3:4", "2400x3200": "3:4",
+        "1280x960": "4:3", "2560x1920": "4:3", "3200x2400": "4:3",
+        "1088x1920": "9:16", "1440x2560": "9:16", "2160x3840": "9:16",
+        "1920x1088": "16:9", "2560x1440": "16:9", "3840x2160": "16:9",
+    }
+    return mapping.get(text, default)
+
+def _agent_orientation_from_aspect(aspect):
+    aspect = str(aspect or "").strip()
+    return "portrait" if aspect in ("9:16", "3:4", "2:3", "4:5") else "landscape"
+
+def _agent_dimension_size_for_grok(aspect):
+    aspect = str(aspect or "").strip()
+    return "vertical_hd" if aspect in ("9:16", "2:3", "3:4", "4:5") else "horizontal_hd"
+
+def _agent_image_payload(model, prompt, size="1024x1024", image_urls=None):
+    model = str(model or "").strip()
+    size = str(size or "1024x1024").strip() or "1024x1024"
+    aspect = _agent_aspect_from_size(size)
+    params = {}
+    if model in ("gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"):
+        params.update({"aspectRatio": aspect, "imageSize": "1K"})
+    elif model.startswith("doubao-seedream-"):
+        params.update({"size": "2K", "aspect_ratio": aspect})
+    elif model == "mj_imagine":
+        params.update({"botType": "MID_JOURNEY", "aspectRatio": aspect})
+    elif model == "qwen-image":
+        params.update({"size": aspect})
+    elif model == "wan2.7-image":
+        params.update({"quality": "standard", "size": aspect})
+    elif model == "wan2.6-image":
+        params.update({"size": aspect})
+    elif model == "vidu-image-2":
+        params.update({"aspect_ratio": aspect, "resolution": "1K", "quality": "medium"})
+    elif model in ("kling-v3", "kling-v3-omni", "kling-image-o1"):
+        params.update({"resolution": "1k", "aspect_ratio": aspect})
+    else:
+        params["size"] = size
+    payload = {"prompt": prompt, "params": params}
+    refs = [str(url).strip() for url in (image_urls or []) if str(url or "").strip()]
+    refs = refs[:_agent_image_reference_limit(model)]
+    if refs:
+        payload.update({
+            "image_urls": refs,
+            "images": refs,
+            "reference_images": refs,
+            "referenceImages": refs,
+        })
+        payload["params"].update({
+            "images": refs,
+            "image_urls": refs,
+            "reference_images": refs,
+        })
+    return payload
+
+def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference_urls=None,
+                         reference_video_url="", reference_audio_url=""):
+    model = str(model or "").strip()
+    ar = str(aspect_ratio or "16:9").strip() or "16:9"
+    dur = _agent_video_request_duration(model, duration)
+    media = _agent_video_media_requirements(model)
+    refs = [str(url).strip() for url in (reference_urls or []) if str(url or "").strip()]
+    refs = refs[:media["image_limit"]]
+    video_url = str(reference_video_url or "").strip()
+    audio_url = str(reference_audio_url or "").strip()
+    if media["image_required"] and not refs:
+        raise RuntimeError("需要上传参考图")
+    if media["video_required"] and not video_url:
+        raise RuntimeError("需要上传参考视频")
+    if media["audio_required"] and not audio_url:
+        raise RuntimeError("需要上传参考音频")
+    if model == "kling-motion-control-v3":
+        return {
+            "prompt": prompt[:600],
+            "params": {
+                "image_url": refs[0],
+                "video_url": video_url,
+                "character_orientation": "video",
+                "mode": "std",
+                "keep_original_sound": "no",
+            },
+        }
+    params = {"duration": dur, "resolution": "720p", "aspect_ratio": ar}
+    if model == "doubao-seedance-1-5-pro-251215":
+        params = {"audio_duration": dur, "resolution": "720p", "ratio": ar, "generate_audio": "false"}
+    elif model == "viduq3":
+        params.update({"model_variant": "turbo", "off_peak": "false"})
+    elif model in ("viduq3-turbo", "viduq3-turbo-cankaosheng"):
+        params.update({"off_peak": "false"})
+    elif model == "vidu-jieshuoman":
+        params.update({"script_name": "Agent video", "script_content": prompt})
+    elif model == "kling-v3-video":
+        params.update({"mode": "std"})
+        params.pop("resolution", None)
+    elif model == "kling-v2-6":
+        params = {"duration": dur, "aspect_ratio": ar, "sound": "on"}
+    elif model == "veo3.1":
+        params.update({
+            "duration": 8,
+            "generation_mode": "components" if refs else "fast",
+            "generation_type": "REFERENCE" if refs else "TEXT",
+            "enhance_prompt": "true",
+            "enable_upsample": "true",
+            "quality": "1080p",
+        })
+    elif model == "sora-2":
+        params.update({"orientation": _agent_orientation_from_aspect(ar), "size": "720x1280" if _agent_orientation_from_aspect(ar) == "portrait" else "1280x720"})
+    elif model == "grok-video-3":
+        params.update({"size": _agent_dimension_size_for_grok(ar)})
+        params.pop("resolution", None)
+        params.pop("aspect_ratio", None)
+    elif model == "grok-imagine-video-1.5-preview":
+        params.update({"resolution": "720p", "aspect_ratio": ar})
+    elif model == "happyhorse-t2v":
+        params["ratio"] = ar
+        params["resolution"] = "720P"
+        params.pop("aspect_ratio", None)
+    elif model == "happyhorse-i2v":
+        params["resolution"] = "720P"
+        params.pop("aspect_ratio", None)
+    elif model in ("happyhorse-r2v", "happyhorse-1.1-r2v"):
+        params["ratio"] = ar
+        params["resolution"] = "720P"
+        params.pop("aspect_ratio", None)
+    elif model == "happyhorse-video-edit":
+        params["resolution"] = "720P"
+        params["ratio"] = ar
+        params["audio_setting"] = "origin"
+        params["watermark"] = False
+        params.pop("aspect_ratio", None)
+    elif model == "hailuo-2.3":
+        params.update({"model_version": "2.3", "enhance_prompt": "Disabled", "resolution": "768P"})
+    elif model in ("wan2.7-cankaosheng", "wan2.7-shouweizhen"):
+        params["resolution"] = "720P"
+        params["duration"] = _agent_video_request_duration(model, duration)
+        params.pop("aspect_ratio", None)
+        if model == "wan2.7-cankaosheng":
+            params["ratio"] = ar
+    payload = {"prompt": prompt[:600], "params": params}
+    if refs:
+        if model == "sora-2":
+            payload["input_reference"] = refs[:2]
+            payload["params"]["input_reference"] = refs[:2]
+            return payload
+        if model == "grok-imagine-video-1.5-preview":
+            payload["params"]["images"] = refs[:1]
+            return payload
+        if model == "wan2.7-shouweizhen":
+            frame_refs = refs[:2]
+            payload.update({
+                "image_urls": frame_refs,
+                "images": frame_refs,
+                "reference_images": frame_refs,
+                "referenceImages": frame_refs,
+                "reference_image_urls": frame_refs,
+            })
+            payload["params"].update({
+                "images": frame_refs,
+                "image_urls": frame_refs,
+                "reference_images": frame_refs,
+                "first_frame_image": frame_refs[0],
+            })
+            if len(frame_refs) > 1:
+                payload["params"]["last_frame_image"] = frame_refs[1]
+            return payload
+        payload.update({
+            "image_urls": refs,
+            "images": refs,
+            "reference_images": refs,
+            "referenceImages": refs,
+            "reference_image_urls": refs,
+        })
+        payload["params"].update({
+            "images": refs,
+            "image_urls": refs,
+            "reference_images": refs,
+        })
+    if model == "happyhorse-video-edit":
+        payload["params"].pop("image_urls", None)
+        payload["params"].pop("reference_images", None)
+        payload.update({
+            "video": video_url,
+            "video_url": video_url,
+            "video_urls": [video_url],
+            "reference_video": video_url,
+            "images": refs,
+            "image_urls": refs,
+        })
+        payload["params"].update({
+            "video": video_url,
+            "video_url": video_url,
+            "video_urls": [video_url],
+            "reference_video": video_url,
+            "images": refs,
+        })
+    elif model in ("happyhorse-r2v", "happyhorse-1.1-r2v"):
+        payload["params"].pop("image_urls", None)
+        payload["params"].pop("reference_images", None)
+    elif video_url and media["video_limit"] > 0:
+        video_field = str(media.get("video_field") or "video").strip() or "video"
+        payload["params"][video_field] = video_url
+        if video_field != "video":
+            payload["params"]["video"] = video_url
+    if audio_url and media["audio_limit"] > 0:
+        audio_field = str(media.get("audio_field") or "audio").strip() or "audio"
+        payload["params"][audio_field] = audio_url
+        if audio_field != "audio":
+            payload["params"]["audio"] = audio_url
+    return payload
+
+def _agent_video_duration_slots(model):
+    rule = _agent_model_rule(model)
+    slots = rule.get("duration_slots")
+    if not slots:
+        return AGENT_VIDEO_DURATIONS
+    out = []
+    for slot in slots:
+        try:
+            value = int(float(slot))
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in out:
+            out.append(value)
+    return tuple(out or AGENT_VIDEO_DURATIONS)
 
 def _agent_video_duration(value):
     try:
@@ -2120,9 +2906,26 @@ def _agent_video_duration(value):
         duration = AGENT_VIDEO_DURATIONS[0]
     return duration if duration in AGENT_VIDEO_DURATIONS else AGENT_VIDEO_DURATIONS[0]
 
+def _agent_video_request_duration(model, value):
+    slots = _agent_video_duration_slots(model)
+    try:
+        duration = int(float(value))
+    except (TypeError, ValueError):
+        duration = slots[0]
+    if duration in slots:
+        return duration
+    lower = [slot for slot in slots if slot <= duration]
+    return max(lower) if lower else slots[0]
+
 
 _LK888_REPLACEMENT_VIDEO_DEFAULT = "viduq3-turbo-cankaosheng"
 _COMIC_PROJECT_VIDEO_DEFAULT = "doubao-seedance-2-0-260128"
+_COMIC_PROJECT_VIDEO_FALLBACKS = (
+    "viduq3-cankaosheng",
+    "wan2.7-shouweizhen",
+    "kling-v3-omni",
+    "pixverse-v6-shouweizhen",
+)
 _LK888_PRINCIPAL_VIDEO_MODEL = "happyhorse-video-edit"
 _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
     "kwvideo-v2-quannengcankao",
@@ -2152,6 +2955,9 @@ _LK888_REPLACEMENT_MODEL_LABELS = {
     "wan2.7-cankaosheng": "万相 2.7 参考生视频",
     "viduq3-cankaosheng": "Vidu Q3 参考生视频",
     "viduq2-cankaosheng": "Vidu Q2 参考生视频",
+    "wan2.7-shouweizhen": "万相 2.7 首尾帧生视频",
+    "kling-v3-omni": "Kling V3 Omni 首尾帧生视频",
+    "pixverse-v6-shouweizhen": "PixVerse V6 首尾帧生视频",
     "happyhorse-r2v": "HappyHorse 参考视频",
     "happyhorse-1.1-r2v": "HappyHorse 1.1 参考视频",
 }
@@ -2311,9 +3117,10 @@ def _lk888_canonical_model_row(row):
     name = str(r.get("name") or "").strip()
     canonical = _LK888_CANONICAL_MODELS.get(name)
     if canonical:
-        r["name"] = name
-        r["display_name"] = str(canonical.get("display_name") or name)
-        r["type"] = str(canonical.get("type") or r.get("type") or "").strip()
+        merged = dict(r)
+        merged.update(canonical)
+        merged["name"] = name
+        return merged
     return r
 
 
@@ -2369,11 +3176,11 @@ def _lk888_model_family(row):
 
 def _lk888_models_by_type(kind):
     rows = []
-    for row in _LK888_FALLBACK_MODELS:
-        if str((row or {}).get("type") or "").strip().lower() == kind:
-            rows.append(dict(row))
+    rows.extend(_lk888_fallback_models_by_type(kind))
     for row in _lk888_skill_models():
         row = _lk888_canonical_model_row(row)
+        if not _lk888_agent_model_selectable(row):
+            continue
         rtype = str((row or {}).get("type") or "").strip().lower()
         if kind == "image" and rtype == "image":
             rows.append(row)
@@ -2396,10 +3203,13 @@ def _lk888_models_by_type(kind):
     return out
 
 
-def _lk888_grouped_models(kind):
+def _lk888_grouped_models(kind, rows=None):
     groups = {}
     order = []
-    for row in _lk888_models_by_type(kind):
+    for row in (rows if rows is not None else _lk888_models_by_type(kind)):
+        row = _lk888_canonical_model_row(row)
+        if not _lk888_agent_model_selectable(row):
+            continue
         fam = _lk888_model_family(row)
         if fam not in groups:
             groups[fam] = []
@@ -2529,11 +3339,7 @@ class VideoPlayerBox(QtWidgets.QFrame):
         validation = _comic_local_video_validation(path)
         if not validation.get("ok"):
             self.current_path = None
-            error_id = str(validation.get("errorId") or "").strip()
-            self.hint.setText(
-                "视频无效（错误编号 %s）" % error_id
-                if error_id else "视频无效（%s）" % (validation.get("code") or "media_invalid")
-            )
+            self.hint.setText("视频无效，请重试或查看日志。")
             self.hint.show()
             return False
         try:
@@ -2803,7 +3609,6 @@ def _comic_video_cell_state(segment):
     segment = segment if isinstance(segment, dict) else {}
     status = str(segment.get("status") or "").strip().lower()
     stage = str(segment.get("stage") or "").strip().lower()
-    error_id = str(segment.get("errorId") or "").strip() or "-"
     if status == "video_stale" or stage == "video_stale" or segment.get("videoStale"):
         return "video_stale", "待重新生成"
     if status == "downloading" or "download" in stage:
@@ -2817,12 +3622,11 @@ def _comic_video_cell_state(segment):
             return "ready", ""
         invalid_error_id = str(validation.get("errorId") or "").strip()
         if invalid_error_id:
-            return "invalid_media", "视频无效（错误编号 %s）" % invalid_error_id
-        return "invalid_media", "视频无效（%s）" % (
-            validation.get("code") or "media_invalid"
-        )
+            return "invalid_media", "视频无效，请重试或查看日志。"
+        return "invalid_media", "视频无效，请重试或查看日志。"
     if status in ("failed", "download_failed") or segment.get("error"):
-        return "failure", "获取失败（错误编号 %s）" % error_id
+        display_error = _replacement_segment_display_error(segment)
+        return "failure", display_error or "获取失败，请重试。"
     if segment.get("videoUrl"):
         return "downloading", "正在获取视频"
     return "waiting", "待生成"
@@ -3220,6 +4024,83 @@ class AuroraBg(QtWidgets.QWidget):
         _paint_aurora(self)
 
 
+class HoverDeleteMediaFrame(QtWidgets.QFrame):
+    """上传素材预览框:鼠标悬停时显示左上角移除按钮。"""
+    deleteRequested = QtCore.Signal(str)
+
+    def __init__(self, kind, placeholder, width=118, height=158):
+        super().__init__()
+        self.kind = str(kind or "")
+        self._has_media = False
+        self.setFixedSize(width, height)
+        self.setObjectName("hoverDeleteMediaFrame")
+        self.setMouseTracking(True)
+        self.preview = QtWidgets.QLabel(self)
+        self.preview.setAlignment(QtCore.Qt.AlignCenter)
+        self.preview.setWordWrap(True)
+        self.preview.setStyleSheet(
+            "background:#0c0f17;border:1px solid #262c3b;border-radius:10px;"
+            "color:#6f7aa0;font-size:12px;padding:8px;"
+        )
+        self.remove_btn = QtWidgets.QPushButton("×", self)
+        self.remove_btn.setObjectName("mediaDeleteX")
+        self.remove_btn.setFixedSize(24, 24)
+        self.remove_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.remove_btn.setToolTip("")
+        self.remove_btn.setStyleSheet(
+            "QPushButton#mediaDeleteX{background:rgba(8,11,18,0.82);color:#ffffff;"
+            "border:1px solid rgba(255,255,255,0.28);border-radius:12px;"
+            "font-size:16px;font-weight:800;padding:0;}"
+            "QPushButton#mediaDeleteX:hover{background:rgba(239,68,68,0.92);"
+            "border-color:rgba(255,255,255,0.62);}"
+        )
+        self.remove_btn.clicked.connect(lambda _=False: self.deleteRequested.emit(self.kind))
+        self.set_preview_text(placeholder)
+
+    def resizeEvent(self, event):
+        if hasattr(self, "preview"):
+            self.preview.setGeometry(0, 0, self.width(), self.height())
+        if hasattr(self, "remove_btn"):
+            self.remove_btn.move(6, 6)
+        super().resizeEvent(event)
+
+    def enterEvent(self, event):
+        if self._has_media:
+            self.remove_btn.show()
+            self.remove_btn.raise_()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.remove_btn.hide()
+        super().leaveEvent(event)
+
+    def set_preview_text(self, text):
+        self._has_media = False
+        self.preview.clear()
+        self.preview.setText(str(text or ""))
+        self.remove_btn.hide()
+
+    def set_media_text(self, text):
+        self._has_media = True
+        self.preview.clear()
+        self.preview.setText(str(text or "已上传"))
+        self.remove_btn.hide()
+
+    def set_image(self, path):
+        if not (path and os.path.isfile(path)):
+            return False
+        pm = QtGui.QPixmap(path)
+        if pm.isNull():
+            return False
+        pm = pm.scaled(self.size(), QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation)
+        crop_x = max(0, (pm.width() - self.width()) // 2)
+        crop_y = max(0, (pm.height() - self.height()) // 2)
+        self.preview.setPixmap(pm.copy(crop_x, crop_y, self.width(), self.height()))
+        self._has_media = True
+        self.remove_btn.hide()
+        return True
+
+
 class NavButton(QtWidgets.QPushButton):
     """导航按钮:悬停时靛蓝光晕淡入 + 文字右移,营造“浮出”效果。"""
 
@@ -3313,6 +4194,81 @@ class HoverCard(QtWidgets.QFrame):
         super().leaveEvent(e)
 
 
+class HoverInfoPopup(QtWidgets.QFrame):
+    """自定义悬浮说明卡片,避免 Qt 原生 tooltip 黑框遮挡界面。"""
+
+    def __init__(self):
+        flags = QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint
+        super().__init__(None, flags)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating, True)
+        self.setObjectName("hoverInfoPopup")
+        self.setMaximumWidth(280)
+        self.setStyleSheet(
+            "QFrame#hoverInfoPopup{background:%s;border:1px solid %s;border-radius:10px;}"
+            "QLabel{background:transparent;}"
+            % (TK["cardBg"], TK["cardBorder"])
+        )
+        box = QtWidgets.QVBoxLayout(self)
+        box.setContentsMargins(12, 10, 12, 11)
+        box.setSpacing(5)
+        self.title = QtWidgets.QLabel("")
+        self.title.setStyleSheet("color:%s;font-size:12px;font-weight:800;" % TK["text"])
+        self.body = QtWidgets.QLabel("")
+        self.body.setWordWrap(True)
+        self.body.setStyleSheet("color:%s;font-size:11px;line-height:150%%;" % TK["sub"])
+        box.addWidget(self.title)
+        box.addWidget(self.body)
+
+    def show_for(self, anchor, title, body):
+        if not anchor:
+            return
+        self.title.setText(str(title or "说明"))
+        self.body.setText(str(body or ""))
+        self.adjustSize()
+        pos = anchor.mapToGlobal(QtCore.QPoint(14, anchor.height() + 8))
+        screen = QtGui.QGuiApplication.screenAt(pos) or QtGui.QGuiApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = min(max(pos.x(), area.left() + 8), area.right() - self.width() - 8)
+            y = min(max(pos.y(), area.top() + 8), area.bottom() - self.height() - 8)
+            pos = QtCore.QPoint(x, y)
+        self.move(pos)
+        self.show()
+
+
+class _HoverInfoFilter(QtCore.QObject):
+    def __init__(self, title, body):
+        super().__init__()
+        self.title = title
+        self.body = body
+        self.popup = HoverInfoPopup()
+
+    def eventFilter(self, obj, ev):
+        try:
+            t = ev.type()
+            if t == QtCore.QEvent.Enter:
+                self.popup.show_for(obj, self.title, self.body)
+            elif t in (QtCore.QEvent.Leave, QtCore.QEvent.Hide, QtCore.QEvent.Destroy):
+                self.popup.hide()
+        except Exception:
+            pass
+        return False
+
+
+def attach_hover_info(widget, title, body):
+    """给控件挂自定义悬浮说明;不使用 QWidget.setToolTip。"""
+    if not widget or not body:
+        return widget
+    info_filter = _HoverInfoFilter(title, body)
+    widget.installEventFilter(info_filter)
+    widget._hover_info_filter = info_filter
+    try:
+        widget.setCursor(QtCore.Qt.WhatsThisCursor)
+    except Exception:
+        pass
+    return widget
+
+
 class InteractFilter(QtCore.QObject):
     """事件过滤器:给按钮加「悬停发光 + 按下缩放回弹」的点击/悬停动画。"""
 
@@ -3385,6 +4341,83 @@ KPI_META = {
     "客户线索": ("🎯", "#f43f5e"), "发布队列": ("🚀", "#a855f7"), "审计事件": ("📝", "#0ea5e9"),
     "接入平台": ("🌐", "#6366f1"), "总粉丝量": ("❤", "#ec4899"), "今日发布": ("🚀", "#22c55e"),
 }
+
+ENTERPRISE_METRIC_HELP = {
+    "客户企业": "当前登录权限范围内可查看和管理的企业数量。",
+    "企业用户": "当前权限范围内已创建或已加入企业的用户数量。",
+    "团队成员": "企业成员关系数量,同一用户加入多个企业会按成员关系分别统计。",
+    "在线节点": "最近仍有心跳上报、可承接本地执行任务的客户端节点数量。",
+    "节点": "当前权限范围内登记过的执行节点数量。",
+    "授权账号": "企业已绑定的平台账号总数,包含抖音、小红书等账号。",
+    "可用账号": "登录态或 Cookie 当前可用,可以被任务调度使用的平台账号数量。",
+    "离线账号": "节点离线、登录态失效或暂不可执行任务的平台账号数量。",
+    "就绪账号": "通过登录态检查并处于可执行状态的平台账号数量。",
+    "调度任务": "当前权限范围内的任务总数,包含中心服任务和本地客户端浏览器任务。",
+    "24h任务": "最近 24 小时内创建或执行过的任务数量。",
+    "素材": "当前企业素材库中已保存的图片、视频和音频素材数量。",
+    "客户线索": "当前企业线索池中已采集或沉淀的客户线索数量。",
+    "发布队列": "当前企业等待发布、发布中或待确认的内容队列数量。",
+    "审计事件": "当前权限范围内记录的账号、任务、企业操作审计条数。",
+    "任务趋势": "最近 7 个自然日按任务创建时间统计的每日任务数。",
+    "运行健康": "展示近 24 小时成功率、当前节点在线率和账号就绪率,用于判断系统是否稳定可执行。",
+    "账号分布": "对比授权账号、可用账号和离线账号数量,用于判断账号池是否足够健康。",
+}
+
+ENTERPRISE_OVERVIEW_KPI_LABELS = (
+    "客户企业",
+    "企业用户",
+    "授权账号",
+    "可用账号",
+    "在线节点",
+    "调度任务",
+)
+
+
+def _enterprise_org_names(summary, limit=6):
+    summary = summary if isinstance(summary, dict) else {}
+    names = []
+    for org in summary.get("organizations") or []:
+        if not isinstance(org, dict):
+            continue
+        name = str(org.get("name") or org.get("title") or org.get("id") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    if len(names) <= limit:
+        return "、".join(names)
+    return "、".join(names[:limit]) + " 等 %d 家" % len(names)
+
+
+def enterprise_kpi_info(label, num, summary=None, usage=None):
+    summary = summary if isinstance(summary, dict) else {}
+    usage = usage if isinstance(usage, dict) else {}
+    try:
+        n = int(float(num or 0))
+    except Exception:
+        n = 0
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+    if label == "客户企业":
+        names = _enterprise_org_names(summary)
+        if names:
+            return "当前可查看企业：%s。" % names
+        return "当前可查看企业数量：%d 家。" % n
+    if label == "企业用户":
+        value = counts.get("users", n)
+        try:
+            value = int(float(value or 0))
+        except Exception:
+            value = n
+        return "已加入企业的用户数量：%d 人。" % value
+    if label == "在线节点":
+        return "在线节点会在本地客户端或执行器启动注册、持续心跳、退出、断网、休眠、切换企业或超过约 45 秒未上报心跳时变化。当前在线：%d 个。" % n
+    if label == "调度任务":
+        value = counts.get("tasks", n)
+        try:
+            value = int(float(value or 0))
+        except Exception:
+            value = n
+        return "任务总数：%d 个。包含当前权限范围内中心服任务和本地客户端浏览器任务。" % value
+    return ENTERPRISE_METRIC_HELP.get(label)
+
 
 # 标签 → 手绘图标类型(避免 emoji 在部分系统渲染成方框)
 ICON_KIND = {
@@ -3678,7 +4711,7 @@ def _draw_icon(kind, size=22, color="#ffffff"):
     return pm
 
 
-def kpi_card(num, label):
+def kpi_card(num, label, info=None):
     icon, color = KPI_META.get(label, ("•", "#6366f1"))
     f = HoverCard("statCard", rest_blur=18, hover_blur=36, rest_dy=8, hover_dy=17, alpha=90)
     v = QtWidgets.QVBoxLayout(f)
@@ -3691,9 +4724,15 @@ def kpi_card(num, label):
     chip.setStyleSheet("background:%s;border:1px solid %s;border-radius:11px;"
                        % (_rgba(color, 0.15), _rgba(color, 0.45)))
     chip.setPixmap(_draw_icon(ICON_KIND.get(label, "dot"), 20, color))
-    dot = QtWidgets.QLabel("")
-    dot.setFixedSize(8, 8)
-    dot.setStyleSheet("background:%s;border-radius:4px;" % color)
+    dot = QtWidgets.QLabel("i" if info else "")
+    dot.setAlignment(QtCore.Qt.AlignCenter)
+    if info:
+        dot.setFixedSize(18, 18)
+        dot.setStyleSheet("background:%s;border:1px solid %s;border-radius:9px;color:%s;font-size:11px;font-weight:800;"
+                          % (_rgba(color, 0.12), _rgba(color, 0.38), color))
+    else:
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet("background:%s;border-radius:4px;" % color)
     top.addWidget(chip)
     top.addStretch()
     top.addWidget(dot, 0, QtCore.Qt.AlignTop)
@@ -3708,17 +4747,18 @@ def kpi_card(num, label):
     box.addWidget(l)
     v.addLayout(box)
     count_up(n, num)
+    attach_hover_info(f, label, info)
     return f
 
 
-def stat_card(num, label):
-    return kpi_card(num, label)
+def stat_card(num, label, info=None):
+    return kpi_card(num, label, info=info)
 
 
 class Panel(HoverCard):
     """带标题的内容卡片;内容加到 self.body,鼠标放上去平滑浮起。"""
 
-    def __init__(self, title, subtitle=None, action=None):
+    def __init__(self, title, subtitle=None, action=None, info=None):
         super().__init__("card", rest_blur=22, hover_blur=34, rest_dy=10, hover_dy=17, alpha=72)
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(20, 16, 20, 18)
@@ -3735,12 +4775,22 @@ class Panel(HoverCard):
             tv.addWidget(s)
         head.addLayout(tv)
         head.addStretch()
+        if info:
+            mark = QtWidgets.QLabel("i")
+            mark.setFixedSize(18, 18)
+            mark.setAlignment(QtCore.Qt.AlignCenter)
+            mark.setStyleSheet(
+                "background:%s;border:1px solid %s;border-radius:9px;color:%s;font-size:11px;font-weight:800;"
+                % (_rgba(ACCENT, 0.12), _rgba(ACCENT, 0.38), ACCENT)
+            )
+            head.addWidget(mark)
         if action is not None:
             head.addWidget(action)
         v.addLayout(head)
         self.body = QtWidgets.QVBoxLayout()
         self.body.setSpacing(10)
         v.addLayout(self.body, 1)
+        attach_hover_info(self, title, info)
 
 
 class MiniBars(QtWidgets.QWidget):
@@ -3831,11 +4881,14 @@ def _billing_amount(value):
     if value == "inf":
         return "∞ 运营方"
     try:
-        amount = float(value)
-        if not (-float("inf") < amount < float("inf")):
+        amount = Decimal(str(value))
+        if not amount.is_finite():
             return "—"
-        return ("%.2f" % amount).rstrip("0").rstrip(".")
-    except (TypeError, ValueError):
+        amount = amount.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        if amount == 0:
+            return "0"
+        return format(amount, "f").rstrip("0").rstrip(".")
+    except (InvalidOperation, TypeError, ValueError):
         return "—"
 
 
@@ -4051,6 +5104,31 @@ def cell_pill(table, r, c, text, color=None):
     h.addWidget(pill(text, color))
     h.addStretch()
     table.setCellWidget(r, c, wrap)
+
+
+def _task_center_time_text(task):
+    task = task if isinstance(task, dict) else {}
+    for key in ("updatedAtText", "createdAtText", "timeText"):
+        text = str(task.get(key) or "").strip()
+        if text:
+            return text
+    for key in ("updatedAt", "finishedAt", "createdAt", "startedAt"):
+        raw = task.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            ts = float(raw)
+        except Exception:
+            text = str(raw or "").strip()
+            if text:
+                return text
+            continue
+        if ts <= 0:
+            continue
+        if ts > 100000000000:
+            ts = ts / 1000.0
+        return time.strftime("%m-%d %H:%M", time.localtime(ts))
+    return ""
 
 
 def style_table(table, row_h=46):
@@ -4337,6 +5415,33 @@ def _to_pct(v):
         return 0.0
 
 
+def _enterprise_task_trend_series(usage):
+    trend = (usage or {}).get("taskTrend7d")
+    if isinstance(trend, list) and trend:
+        values = []
+        labels = []
+        for item in trend:
+            if not isinstance(item, dict):
+                continue
+            try:
+                values.append(max(0, int(float(item.get("count") or 0))))
+            except Exception:
+                values.append(0)
+            label = str(item.get("label") or item.get("date") or "").strip()
+            labels.append(label[5:] if len(label) == 10 and label[4] == "-" else label)
+        if values:
+            return values, labels[:len(values)]
+    labels = []
+    try:
+        today = time.localtime()
+        today_midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
+        for offset in range(6, -1, -1):
+            labels.append(time.strftime("%m-%d", time.localtime(today_midnight - offset * 86400)))
+    except Exception:
+        labels = ["", "", "", "", "", "", ""]
+    return [0, 0, 0, 0, 0, 0, 0], labels
+
+
 class DashboardPage(BasePage):
     def __init__(self):
         super().__init__()
@@ -4404,10 +5509,10 @@ class DashboardPage(BasePage):
         # KPI 卡片网格
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(13)
-        shown = cards[:8]
+        shown = [(cnt(lbl), lbl) for lbl in ENTERPRISE_OVERVIEW_KPI_LABELS]
         for i, (num, lbl) in enumerate(shown):
-            grid.addWidget(kpi_card(num, lbl), i // 4, i % 4)
-        for c in range(4):
+            grid.addWidget(kpi_card(num, lbl, info=enterprise_kpi_info(lbl, num, s, u)), i // 3, i % 3)
+        for c in range(3):
             grid.setColumnStretch(c, 1)
         self.host.addLayout(grid)
 
@@ -4415,14 +5520,12 @@ class DashboardPage(BasePage):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(14)
 
-        tasks = cnt("调度任务", "24h任务") or 280
-        base = max(1, tasks // 7)
-        vals = [int(base * x) for x in (0.72, 0.88, 1.05, 0.94, 1.2, 1.34, 1.06)]
-        p1 = Panel("任务趋势", "近 7 天调度任务量")
-        p1.body.addWidget(MiniBars(vals, ["一", "二", "三", "四", "五", "六", "日"], color="#8b5cf6"))
+        vals, labels = _enterprise_task_trend_series(u)
+        p1 = Panel("任务趋势", "近 7 天真实任务量", info=ENTERPRISE_METRIC_HELP.get("任务趋势"))
+        p1.body.addWidget(MiniBars(vals, labels, color="#8b5cf6"))
         row.addWidget(p1, 3)
 
-        p2 = Panel("运行健康", "近 24 小时")
+        p2 = Panel("运行健康", "近 24 小时", info=ENTERPRISE_METRIC_HELP.get("运行健康"))
         p2.body.addWidget(BreakdownBars([
             ("成功率", u.get("successRate24h", "—"), _to_pct(u.get("successRate24h", 0)), "#22c55e"),
             ("节点在线率", u.get("nodeOnlineRate", "—"), _to_pct(u.get("nodeOnlineRate", 0)), "#6366f1"),
@@ -4432,7 +5535,7 @@ class DashboardPage(BasePage):
 
         auth, usable, offline = cnt("授权账号"), cnt("可用账号"), cnt("离线账号")
         mx = max(auth, usable, offline, 1)
-        p3 = Panel("账号分布", "授权 / 可用 / 离线")
+        p3 = Panel("账号分布", "授权 / 可用 / 离线", info=ENTERPRISE_METRIC_HELP.get("账号分布"))
         p3.body.addWidget(BreakdownBars([
             ("授权账号", auth, auth / mx, "#8b5cf6"),
             ("可用账号", usable, usable / mx, "#14b8a6"),
@@ -4488,7 +5591,7 @@ class EnterpriseMembersPage(BasePage):
         self.table.setHorizontalHeaderLabels(["成员", "登录账号", "角色", "状态", "所属企业", "操作"])
         style_table(self.table, row_h=52)
         self.table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.Fixed)
-        self.table.setColumnWidth(5, 174)
+        self.table.setColumnWidth(5, 146)
         self.table.setMinimumHeight(300)
         self.v.addWidget(self.table, 1)
 
@@ -4595,15 +5698,24 @@ class EnterpriseMembersPage(BasePage):
 
             actions = QtWidgets.QWidget()
             action_layout = QtWidgets.QHBoxLayout(actions)
-            action_layout.setContentsMargins(6, 0, 6, 0)
-            action_layout.setSpacing(6)
+            action_layout.setContentsMargins(4, 0, 4, 0)
+            action_layout.setSpacing(4)
+            team_action_style = lambda width: (
+                "QPushButton#teamAction{background:rgba(255,255,255,0.05);"
+                "border:1px solid rgba(255,255,255,0.11);border-radius:8px;"
+                "color:#dbe5f5;padding:0;font-size:12px;font-weight:650;"
+                "min-width:%dpx;max-width:%dpx;}"
+                "QPushButton#teamAction:hover{border-color:#6366f1;background:rgba(99,102,241,0.14);color:#ffffff;}"
+            ) % (width, width)
             reset_btn = QtWidgets.QPushButton("重置密码")
-            reset_btn.setObjectName("ghost")
-            reset_btn.setFixedWidth(82)
+            reset_btn.setObjectName("teamAction")
+            reset_btn.setFixedWidth(72)
+            reset_btn.setStyleSheet(team_action_style(72))
             reset_btn.clicked.connect(lambda _=False, uid=user_id: self.reset_password(uid))
             status_btn = QtWidgets.QPushButton("恢复" if status != "active" else "停用")
-            status_btn.setObjectName("ghost")
-            status_btn.setFixedWidth(58)
+            status_btn.setObjectName("teamAction")
+            status_btn.setFixedWidth(48)
+            status_btn.setStyleSheet(team_action_style(48))
             status_btn.clicked.connect(
                 lambda _=False, uid=user_id, active=(status == "active"): self.change_status(uid, active)
             )
@@ -4661,7 +5773,14 @@ class EnterpriseMembersPage(BasePage):
                     % (response.get("inviteCode") or "-"),
                 )
             elif action == "add":
-                QtWidgets.QMessageBox.information(self, "添加成员", "成员已加入当前企业。")
+                credential = response.get("credential") or {}
+                initial_password = credential.get("initialPassword") or ""
+                password_line = "初始密码：%s" % initial_password if initial_password else "初始密码：未设置，可用“重置密码”生成临时密码"
+                self._show_copy_dialog(
+                    "添加成员",
+                    "成员已加入当前企业。\n\n登录账号：%s\n%s"
+                    % (credential.get("identifier") or ((response.get("user") or {}).get("id")) or "-", password_line),
+                )
             elif action == "create_org":
                 organization = response.get("organization") or {}
                 self._pending_org_id = str(organization.get("id") or "").strip()
@@ -4754,8 +5873,6 @@ class EnterpriseMembersPage(BasePage):
         layout = QtWidgets.QVBoxLayout(dialog)
         form = QtWidgets.QFormLayout()
         name = QtWidgets.QLineEdit()
-        phone = QtWidgets.QLineEdit()
-        email = QtWidgets.QLineEdit()
         password = QtWidgets.QLineEdit()
         password.setEchoMode(QtWidgets.QLineEdit.Password)
         password.setPlaceholderText("可留空，后续可用“重置密码”生成临时密码")
@@ -4764,13 +5881,12 @@ class EnterpriseMembersPage(BasePage):
         if product_role() == "platform_admin":
             role.addItem("企业家", "admin")
         form.addRow("姓名", name)
-        form.addRow("手机号", phone)
-        form.addRow("邮箱", email)
         form.addRow("初始密码", password)
         form.addRow("成员角色", role)
         layout.addLayout(form)
-        tip = QtWidgets.QLabel("至少填写手机号或邮箱，作为该成员的登录账号。")
+        tip = QtWidgets.QLabel("系统会自动生成登录账号；如初始密码留空，可添加后用“重置密码”生成临时密码。")
         tip.setObjectName("sub")
+        tip.setWordWrap(True)
         layout.addWidget(tip)
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("添加")
@@ -4783,14 +5899,9 @@ class EnterpriseMembersPage(BasePage):
         if not name.text().strip():
             QtWidgets.QMessageBox.warning(self, "无法添加", "请填写成员姓名。")
             return
-        if not (phone.text().strip() or email.text().strip()):
-            QtWidgets.QMessageBox.warning(self, "无法添加", "请至少填写手机号或邮箱。")
-            return
         self._post_action("add", "/api/enterprise/users/upsert", {
             "orgId": self._selected_org(),
             "name": name.text().strip(),
-            "phone": phone.text().strip(),
-            "email": email.text().strip(),
             "password": password.text(),
             "role": role.currentData() or "member",
         })
@@ -5101,7 +6212,7 @@ class PlatformCard(HoverCard):
                     renb.setObjectName("ghost")
                     renb.setFixedSize(46, 24)
                     renb.setCursor(QtCore.Qt.PointingHandCursor)
-                    renb.clicked.connect(lambda _=False, i=aid, nm=display_name: on_rename(i, nm))
+                    renb.clicked.connect(lambda _=False, i=aid, nm=display_name, ci=central_aid: on_rename(i, nm, ci))
                     row.addWidget(renb)
                 if on_delete and aid:
                     delb = QtWidgets.QPushButton("×")
@@ -5149,11 +6260,14 @@ class AccountsPage(BasePage):
     def __init__(self):
         super().__init__()
         self.v.setSpacing(16)
+        self.change_password_btn = QtWidgets.QPushButton("修改密码")
+        self.change_password_btn.setObjectName("ghost")
+        self.change_password_btn.clicked.connect(self.change_password)
         self.b_ref = QtWidgets.QPushButton("刷新")
         self.b_ref.setObjectName("ghost")
         self.b_ref.clicked.connect(self.load)
         self.v.addWidget(make_header("账号矩阵", "本机浏览器 + 你的住宅 IP 登录,账号自动入矩阵",
-                                     [self.b_ref]))
+                                     [self.change_password_btn, self.b_ref]))
         self.hint = QtWidgets.QLabel("")
         self.hint.setObjectName("sub")
         self.v.addWidget(self.hint)
@@ -5172,13 +6286,80 @@ class AccountsPage(BasePage):
             BRIDGE.payload.emit("accounts", load_account_matrix_rows())
         run_bg(work)
 
+    def change_password(self):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("修改密码")
+        dlg.setMinimumWidth(360)
+        form = QtWidgets.QFormLayout(dlg)
+        form.setContentsMargins(18, 18, 18, 18)
+        form.setSpacing(12)
+
+        current_in = QtWidgets.QLineEdit()
+        current_in.setEchoMode(QtWidgets.QLineEdit.Password)
+        current_in.setPlaceholderText("请输入当前密码")
+        new_in = QtWidgets.QLineEdit()
+        new_in.setEchoMode(QtWidgets.QLineEdit.Password)
+        new_in.setPlaceholderText("至少 8 位")
+        confirm_in = QtWidgets.QLineEdit()
+        confirm_in.setEchoMode(QtWidgets.QLineEdit.Password)
+        confirm_in.setPlaceholderText("再次输入新密码")
+        form.addRow("当前密码", current_in)
+        form.addRow("新密码", new_in)
+        form.addRow("确认新密码", confirm_in)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText("保存")
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        current_password = current_in.text()
+        new_password = new_in.text().strip()
+        confirm_password = confirm_in.text().strip()
+        if not current_password:
+            QtWidgets.QMessageBox.warning(self, "修改密码", "请输入当前密码")
+            return
+        if len(new_password) < 8:
+            QtWidgets.QMessageBox.warning(self, "修改密码", "新密码至少 8 位")
+            return
+        if new_password != confirm_password:
+            QtWidgets.QMessageBox.warning(self, "修改密码", "两次输入的新密码不一致")
+            return
+        self.hint.setText("正在修改密码…")
+
+        def work():
+            code, j = api("POST", "/api/auth/change-password", {
+                "currentPassword": current_password,
+                "newPassword": new_password,
+            }, timeout=30)
+            ok = isinstance(j, dict) and j.get("ok")
+            BRIDGE.payload.emit("acct_change_password", {
+                "ok": bool(ok),
+                "status": code,
+                "error": "" if ok else str((j or {}).get("error") or ("http_%s" % code)),
+            })
+        run_bg(work)
+
+    def _change_password_error_text(self, error):
+        return {
+            "missing_current_password": "请输入当前密码",
+            "current_password_invalid": "当前密码不正确",
+            "new_password_too_short": "新密码至少 8 位",
+            "not_authenticated": "登录已失效，请重新登录后再试",
+            "session_login_required": "请使用账号密码登录后再修改密码",
+            "user_not_found": "当前用户不存在或已停用",
+        }.get(str(error or ""), "修改失败，请重试")
+
     def login(self, platform, mode="reuse"):
         label = "抖音" if platform == "douyin" else "小红书"
         if mode == "fresh":
             self.hint.setText("正在打开【全新浏览器】(不带任何已登录状态),请在弹出的窗口里扫码/登录要添加的%s新账号…" % label)
         else:
             self.hint.setText("正在本机浏览器读取已登录的%s账号,请稍候…" % label)
-        run_bg(lambda: BRIDGE.payload.emit("acct_login", submit_local_task(platform + ".login", {"fresh": mode == "fresh"}, 300)))
+        run_bg(lambda: BRIDGE.payload.emit("acct_login", submit_account_login_direct(platform, mode=mode, timeout_poll=300)))
 
     def delete(self, account_id, name="", central_account_id=""):
         self.hint.setText("正在移除账号「%s」…" % (name or account_id))
@@ -5204,7 +6385,7 @@ class AccountsPage(BasePage):
                                                 "centralAccountId": central_id, "name": name, "error": error})
         run_bg(work)
 
-    def rename(self, account_id, current_name=""):
+    def rename(self, account_id, current_name="", central_account_id=""):
         name, ok = QtWidgets.QInputDialog.getText(self, "修改账号昵称", "账号昵称:", text=current_name or "")
         if not ok:
             return
@@ -5215,10 +6396,21 @@ class AccountsPage(BasePage):
         self.hint.setText("正在保存账号昵称「%s」…" % name)
 
         def work():
-            code, j = local_api("POST", "/api/accounts/rename", {"id": account_id, "name": name}, timeout=20)
-            ok = isinstance(j, dict) and j.get("ok")
-            BRIDGE.payload.emit("acct_rename", {"ok": bool(ok), "id": account_id, "name": name,
-                                                "error": (j or {}).get("error") or ("http_%s" % code)})
+            local_code, local_j = local_api("POST", "/api/accounts/rename", {"id": account_id, "name": name}, timeout=20)
+            local_ok = isinstance(local_j, dict) and local_j.get("ok")
+            central_id = str(central_account_id or (account_id if ":" in str(account_id or "") else "")).strip()
+            central_ok = False
+            central_error = ""
+            if central_id:
+                central_code, central_j = api("POST", "/api/accounts/rename", {"id": central_id, "name": name})
+                central_ok = isinstance(central_j, dict) and central_j.get("ok")
+                central_error = str((central_j or {}).get("error") or "")
+                if not central_error and not central_ok:
+                    central_error = "http_%s" % central_code
+            ok = bool(local_ok or central_ok)
+            error = "" if ok else ((local_j or {}).get("error") or ("http_%s" % local_code) or central_error)
+            BRIDGE.payload.emit("acct_rename", {"ok": bool(ok), "id": account_id, "centralAccountId": central_id,
+                                                "name": name, "error": error})
         run_bg(work)
 
     def _on(self, tag, d):
@@ -5242,6 +6434,14 @@ class AccountsPage(BasePage):
                 self.load()
             else:
                 self.hint.setText("保存昵称失败:" + str((d or {}).get("error") or ""))
+        elif tag == "acct_change_password":
+            if (d or {}).get("ok"):
+                self.hint.setText("")
+                QtWidgets.QMessageBox.information(self, "修改密码", "密码修改成功")
+            else:
+                error = str((d or {}).get("error") or "")
+                self.hint.setText("修改密码失败:" + error)
+                QtWidgets.QMessageBox.warning(self, "修改密码", self._change_password_error_text(error))
 
     def _build(self, accounts):
         _clear_layout(self.host)
@@ -5254,9 +6454,12 @@ class AccountsPage(BasePage):
             if p in ("xhs", "xiaohongshu", "小红书"):
                 return "xhs"
             return p or "douyin"
-        groups = {"douyin": [], "xhs": []}
+
+        platform_keys = account_matrix_platform_keys()
+        accounts = [account for account in accounts if plat_of(account) in platform_keys]
+        groups = {key: [] for key in platform_keys}
         for a in accounts:
-            groups.setdefault(plat_of(a), []).append(a)
+            groups[plat_of(a)].append(a)
 
         used = sum(1 for k in groups if groups.get(k))
         total = len(accounts)
@@ -5264,7 +6467,7 @@ class AccountsPage(BasePage):
         today = sum(_account_metric_number(a.get("publishedToday") or a.get("todayPublish")) for a in accounts)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(13)
-        for i, (num, lbl) in enumerate([(used or 2, "接入平台"), (total, "授权账号"),
+        for i, (num, lbl) in enumerate([(used or len(platform_keys), "接入平台"), (total, "授权账号"),
                                         (followers, "总粉丝量"), (today, "今日发布")]):
             grid.addWidget(kpi_card(num, lbl), 0, i)
         for c in range(4):
@@ -5273,7 +6476,7 @@ class AccountsPage(BasePage):
 
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(14)
-        for pk in ("douyin", "xhs"):
+        for pk in platform_keys:
             card = PlatformCard(pk, groups.get(pk, []), self.login, self.delete, self.rename)
             card.setMaximumWidth(500)
             row.addWidget(card, 1, QtCore.Qt.AlignTop)
@@ -5342,7 +6545,7 @@ class FinderPage(BasePage):
         self.kw = QtWidgets.QLineEdit()
         self.kw.setPlaceholderText("产品关键词,例如:化妆品")
         self.platform = QtWidgets.QComboBox()
-        self.platform.addItems(["抖音", "小红书"])
+        _add_available_platform_items(self.platform)
         self.platform.currentIndexChanged.connect(lambda _i: self._refresh_finder_accounts())
         self.account = QtWidgets.QComboBox()
         self.account.setMinimumWidth(220)
@@ -5447,9 +6650,30 @@ class FinderPage(BasePage):
         if col != 1:
             return
         u = self._profile_url_at_row(row)
-        if u:
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl(u))
-            self.status.setText("已打开主页(系统默认浏览器):" + u)
+        if not u:
+            return
+        account_id = self._require_finder_account()
+        if not account_id:
+            return
+        platform = self._pf()
+        self.status.setText("正在用所选账号浏览器打开主页...")
+
+        def work():
+            code, data = local_api("POST", "/api/cloud-login/open-url", {
+                "accountId": account_id,
+                "url": u,
+                "platform": platform,
+            }, timeout=90)
+            ok = bool(code == 200 and isinstance(data, dict) and data.get("ok") is not False)
+            BRIDGE.payload.emit("finder_open_profile", {
+                "ok": ok,
+                "url": u,
+                "accountId": account_id,
+                "statusCode": code,
+                "result": data if isinstance(data, dict) else {},
+            })
+
+        run_bg(work)
 
     def _copy_profile_link(self, row):
         u = self._profile_url_at_row(row)
@@ -5460,6 +6684,9 @@ class FinderPage(BasePage):
         self.status.setText("已复制主页链接")
 
     def _go_dm_followup(self, row):
+        if self._pf() != "douyin":
+            self.status.setText("私信跟进 MVP 目前仅支持抖音客户主页，小红书线索请人工打开主页跟进。")
+            return
         u = self._profile_url_at_row(row)
         if not u:
             self.status.setText("该线索没有可带入私信跟进的主页链接")
@@ -5564,6 +6791,13 @@ class FinderPage(BasePage):
             self._all_accounts = clean_accounts(d if isinstance(d, list) else [])
             self._refresh_finder_accounts()
             return
+        if tag == "finder_open_profile":
+            res = (d or {}).get("result") or {}
+            if (d or {}).get("ok"):
+                self.status.setText("已用所选账号浏览器打开主页")
+            else:
+                self.status.setText("打开主页失败:" + str(res.get("error") or (d or {}).get("statusCode") or "local_browser_failed"))
+            return
         if tag != "finder":
             return
         self.btn.setEnabled(True)
@@ -5600,11 +6834,17 @@ class FinderPage(BasePage):
 class OutreachPage(BasePage):
     def __init__(self):
         super().__init__()
-        self.v.addWidget(make_header("AI 触达", "对意向客户在其视频/笔记下批量评论触达(本机浏览器执行)"))
+        self.v.addWidget(make_header("AI 触达", _douyin_only_text(
+            "对意向客户在其视频下批量评论触达(本机浏览器执行)",
+            "对意向客户在其视频/笔记下批量评论触达(本机浏览器执行)",
+        )))
         desc = QtWidgets.QLabel(
             "AI 触达是做什么的？\n"
-            "输入产品关键词后，系统会搜索相关视频/笔记，读取评论区，筛选出有咨询、比价、想了解意向的潜在客户，"
-            "再生成一条短评论话术，通过本机浏览器在评论区回复/评论，引导客户查看主页或主动私信。\n"
+            + _douyin_only_text(
+                "输入产品关键词后，系统会搜索相关视频，读取评论区，筛选出有咨询、比价、想了解意向的潜在客户，",
+                "输入产品关键词后，系统会搜索相关视频/笔记，读取评论区，筛选出有咨询、比价、想了解意向的潜在客户，",
+            )
+            + "再生成一条短评论话术，通过本机浏览器在评论区回复/评论，引导客户查看主页或主动私信。\n"
             "它不是私信群发；默认限量、间隔发送，遇到平台风控会停止。请先确保账号已登录，并避免高频骚扰式评论。"
         )
         desc.setObjectName("sub")
@@ -5614,7 +6854,7 @@ class OutreachPage(BasePage):
         self.kw = QtWidgets.QLineEdit()
         self.kw.setPlaceholderText("产品关键词")
         self.platform = QtWidgets.QComboBox()
-        self.platform.addItems(["抖音", "小红书"])
+        _add_available_platform_items(self.platform)
         self.platform.currentIndexChanged.connect(lambda _i: self._refresh_outreach_accounts())
         self.account = QtWidgets.QComboBox()
         self.account.setMinimumWidth(220)
@@ -5683,7 +6923,7 @@ class OutreachPage(BasePage):
         self.status.setText("触达任务已下发到本机执行…")
         payload = {"keyword": keyword, "platform": pf}
         payload["accountId"] = account_id
-        run_bg(lambda: BRIDGE.payload.emit("outreach", submit_local_task("outreach.run", payload, 300)))
+        run_bg(lambda: BRIDGE.payload.emit("outreach", submit_local_task("outreach.run", payload, 900)))
 
     def _on(self, tag, d):
         if tag == "outreach_accounts":
@@ -5700,8 +6940,9 @@ class OutreachPage(BasePage):
         if tag != "outreach":
             return
         self.btn.setEnabled(True)
-        ok = d.get("status") == "done"
-        self.status.setText("触达完成。" if ok else ("未完成:" + str(d.get("error") or "")))
+        rr = (d or {}).get("result") or {}
+        ok = d.get("status") == "done" and rr.get("ok") is not False and not (d.get("error") or rr.get("error"))
+        self.status.setText("触达完成。" if ok else ("未完成:" + _local_task_error_message(d)))
 
 
 class GrowthPage(BasePage):
@@ -5740,8 +6981,7 @@ class TaskCenterPage(BasePage):
         self.v.addWidget(self.headline)
         self.table = QtWidgets.QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["类型", "状态", "账号/节点", "时间"])
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.table.verticalHeader().setVisible(False)
+        style_table(self.table)
         self.v.addWidget(self.table)
         BRIDGE.payload.connect(self._on)
 
@@ -5769,7 +7009,7 @@ class TaskCenterPage(BasePage):
                 t.get("typeLabel") or t.get("type") or t.get("operation") or "-",
                 t.get("statusLabel") or t.get("status") or "-",
                 (t.get("accountName") or t.get("accountId") or t.get("nodeName") or t.get("nodeId") or "-"),
-                t.get("updatedAtText") or t.get("createdAtText") or "",
+                _task_center_time_text(t),
             ]
             for c, val in enumerate(vals):
                 self.table.setItem(r, c, QtWidgets.QTableWidgetItem(str(val)))
@@ -6273,14 +7513,17 @@ def _xhs_note_slot_rows(job, preview):
 
 
 class ContentPage(BasePage):
-    """抖音/小红书 内容中心:搜索 · 下载 · 看评论 · 发评论。"""
+    """Content collection center for enabled platforms."""
     def __init__(self):
         super().__init__()
-        self.v.addWidget(make_header("内容采集", "抖音/小红书 内容:搜索 · 下载 · 看评论 · 手动评论(本机浏览器执行)"))
-        self.v.addWidget(prereq_banner("采集/评论等需:本机客户端在线 + 对应平台账号已登录;否则不会真实执行(会提示未采集)。"))
+        self.v.addWidget(make_header("内容采集", _douyin_only_text(
+            "抖音 内容:搜索 · 下载 · 看评论 · 手动评论(本机浏览器执行)",
+            "抖音/小红书 内容:搜索 · 下载 · 看评论 · 手动评论(本机浏览器执行)",
+        )))
+        self.v.addWidget(prereq_banner("采集/评论等需:本机客户端在线 + 抖音账号已登录;否则不会真实执行(会提示未采集)。"))
         row = QtWidgets.QHBoxLayout()
         self.platform = QtWidgets.QComboBox()
-        self.platform.addItems(["抖音", "小红书"])
+        _add_available_platform_items(self.platform)
         self.platform.currentIndexChanged.connect(lambda _i: self._refresh_content_accounts())
         self.account = QtWidgets.QComboBox()
         self.account.setMinimumWidth(220)
@@ -6317,9 +7560,6 @@ class ContentPage(BasePage):
         self.b_dl = QtWidgets.QPushButton("下载")
         self.b_dl.setObjectName("ghost")
         self.b_dl.clicked.connect(self.download)
-        self.b_note_replace = QtWidgets.QPushButton("图文同款")
-        self.b_note_replace.setObjectName("primary")
-        self.b_note_replace.clicked.connect(self.note_replace)
         self.b_break = QtWidgets.QPushButton("分解")
         self.b_break.setObjectName("primary")
         self.b_break.clicked.connect(self.breakdown)
@@ -6328,7 +7568,6 @@ class ContentPage(BasePage):
         self.b_cm.clicked.connect(self.comments)
         ab.addWidget(self.url, 3)
         ab.addWidget(self.b_dl)
-        ab.addWidget(self.b_note_replace)
         ab.addWidget(self.b_break)
         ab.addWidget(self.b_cm)
         self.v.addLayout(ab)
@@ -6435,7 +7674,6 @@ class ContentPage(BasePage):
         elif tag == "c_dl":
             self.b_dl.setEnabled(False)
         elif tag == "c_note_replace":
-            self.b_note_replace.setEnabled(False)
             self.b_dl.setEnabled(False)
         elif tag == "c_cm":
             self.b_cm.setEnabled(False)
@@ -6450,7 +7688,8 @@ class ContentPage(BasePage):
         return task
 
     def _xhs_retry_with_account(self, tag, task):
-        ctx = self._xhs_retry_context.get(tag) if isinstance(self._xhs_retry_context, dict) else {}
+        retry_context = getattr(self, "_xhs_retry_context", {})
+        ctx = retry_context.get(tag) if isinstance(retry_context, dict) else {}
         if not ctx or ctx.get("retried") or not _is_xhs_guest_collection_block(task):
             return False
         if not _confirm_xhs_account_collection_once(self):
@@ -6507,38 +7746,6 @@ class ContentPage(BasePage):
         self._xhs_retry_context.pop("c_dl", None)
         run_bg(lambda: BRIDGE.payload.emit("c_dl", submit_local_task(pf + ".download", payload, 600)))
 
-    def note_replace(self):
-        u = self.url.text().strip()
-        if not u:
-            self.status.setText("请先选择或粘贴小红书笔记链接")
-            return
-        host = (urlparse(u).hostname or "").lower()
-        is_xhs_url = host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")
-        if self._pf() != "xhs" or not is_xhs_url:
-            self.status.setText("图文同款仅支持小红书笔记，请先切换到小红书或选择小红书链接")
-            return
-        self.b_note_replace.setEnabled(False)
-        self.b_dl.setEnabled(False)
-        self.status.setText("账号下载中：使用账号矩阵里已登录的小红书账号")
-        payload = {
-            "url": u,
-            "noteUrl": u,
-            "save_choice": "all",
-            "platform": "xhs",
-            "guestMode": False,
-            "accountCollectionConfirmed": True,
-        }
-        payload = self._attach_content_account(payload)
-        if payload is None:
-            self.b_note_replace.setEnabled(True)
-            self.b_dl.setEnabled(True)
-            return
-        self._xhs_retry_context.pop("c_note_replace", None)
-
-        def work():
-            task = submit_local_task("xhs.download", payload, 600)
-            BRIDGE.payload.emit("c_note_replace", {"task": task, "url": u, "platform": "xhs"})
-        run_bg(work)
     def breakdown(self):
         u = self.url.text().strip()
         if not u:
@@ -6625,7 +7832,6 @@ class ContentPage(BasePage):
             self.status.setText("下载完成并入库。" if (d.get("status") == "done" and rr.get("ok") is not False)
                                 else ("下载失败:" + str(d.get("error") or rr.get("error") or "")))
         elif tag == "c_note_replace":
-            self.b_note_replace.setEnabled(True)
             self.b_dl.setEnabled(True)
             payload = d if isinstance(d, dict) else {}
             if self._xhs_retry_with_account(tag, payload):
@@ -6654,7 +7860,9 @@ class ContentPage(BasePage):
             task = (d or {}).get("task") or {}
             rr = task.get("result") or {}
             if task.get("status") != "done" or rr.get("ok") is False:
-                self.status.setText("分解失败:下载未完成 " + _localize_download_task_error(task.get("error") or rr.get("error") or ""))
+                self.status.setText(_video_breakdown_download_failure_text(
+                    task.get("error") or rr.get("error") or ""
+                ))
                 return
             video = _find_video_file_from_download(rr) or _find_video_file_from_download(task)
             if not video:
@@ -6687,7 +7895,9 @@ class ContentPage(BasePage):
                                 else ("读取失败:" + str(d.get("error") or rr.get("error") or "")))
         elif tag == "c_post":
             self.b_post.setEnabled(True)
-            self.status.setText("评论已发送。" if d.get("status") == "done" else ("发评论失败:" + str(d.get("error") or "")))
+            rr = (d or {}).get("result") or {}
+            ok = d.get("status") == "done" and rr.get("ok") is not False and not (d.get("error") or rr.get("error"))
+            self.status.setText("评论已发送。" if ok else ("发评论失败:" + _local_task_error_message(d)))
 
 
 class VideoBreakdownPage(BasePage):
@@ -6696,8 +7906,18 @@ class VideoBreakdownPage(BasePage):
         super().__init__()
         self.v.addWidget(make_header("分解视频", "从内容采集一键下载 → 抽关键帧/OCR/口播降级 → 生成临时拆解报告"))
         self.v.addWidget(prereq_banner("报告不会写入知识库或资产库；需要保留时请点击『下载报告』保存到本地。"))
+        link_row = QtWidgets.QHBoxLayout()
+        self.link_input = QtWidgets.QLineEdit()
+        self.link_input.setPlaceholderText("粘贴抖音/小红书视频链接，下载后自动分解")
+        self.link_input.returnPressed.connect(self.start_link_breakdown)
+        self.b_link_breakdown = QtWidgets.QPushButton("下载并分解")
+        self.b_link_breakdown.setObjectName("primary")
+        self.b_link_breakdown.clicked.connect(self.start_link_breakdown)
+        link_row.addWidget(self.link_input, 1)
+        link_row.addWidget(self.b_link_breakdown)
+        self.v.addLayout(link_row)
         top = QtWidgets.QHBoxLayout()
-        self.path_lab = QtWidgets.QLabel("等待从『内容采集』发起分解。")
+        self.path_lab = QtWidgets.QLabel("可从『内容采集』进入，也可在上方粘贴视频链接。")
         self.path_lab.setObjectName("sub")
         self.path_lab.setWordWrap(True)
         self.b_open = QtWidgets.QPushButton("打开视频")
@@ -6709,6 +7929,7 @@ class VideoBreakdownPage(BasePage):
         self.b_replace = QtWidgets.QPushButton("替换生成")
         self.b_replace.setObjectName("ghost")
         self.b_replace.clicked.connect(self.start_replacement)
+        self.b_replace.setVisible(video_replacement_enabled())
         self.b_digital_human = QtWidgets.QPushButton("生成数字人口播")
         self.b_digital_human.setObjectName("ghost")
         self.b_digital_human.clicked.connect(self.start_digital_human)
@@ -6739,12 +7960,35 @@ class VideoBreakdownPage(BasePage):
         self._markdown = ""
         self._analysis = {}
         self._busy = False
+        self._link_job = ""
+        self._link_busy = False
         BRIDGE.payload.connect(self._on)
 
     def _on(self, tag, d):
         d = d or {}
         if tag == "video_breakdown_start":
             self.start(d)
+        elif tag == "video_breakdown_link_download" and d.get("job") == self._link_job:
+            self._link_busy = False
+            self.b_link_breakdown.setEnabled(True)
+            task = d.get("task") if isinstance(d.get("task"), dict) else {}
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            if task.get("status") != "done" or result.get("ok") is False:
+                self.status.setText(_video_breakdown_download_failure_text(
+                    task.get("error") or result.get("error") or ""
+                ))
+                return
+            video = _find_video_file_from_download(result) or _find_video_file_from_download(task)
+            if not video:
+                self.status.setText("分解失败:未找到可分析的视频文件")
+                return
+            self.status.setText("下载完成，正在分解视频…")
+            self.start({
+                "platform": d.get("platform") or _video_breakdown_platform_from_url(d.get("url")),
+                "sourceUrl": d.get("url") or "",
+                "videoPath": video,
+                "download": result,
+            })
         elif tag == "video_breakdown_progress" and d.get("job") == self._job:
             self.status.setText(str(d.get("message") or "处理中…"))
         elif tag == "video_breakdown_done" and d.get("job") == self._job:
@@ -6761,6 +8005,40 @@ class VideoBreakdownPage(BasePage):
             self.b_digital_human.setEnabled(bool(self._markdown) and validation.get("ok") is not False)
             failed_ranges = (self._analysis.get("transcript") or {}).get("failedRanges") or []
             self.b_retry.setEnabled(bool(failed_ranges))
+
+    def start_link_breakdown(self):
+        if self._busy or self._link_busy:
+            self.status.setText("已有视频正在处理，请等待当前任务完成")
+            return
+        url = self.link_input.text().strip()
+        if not url:
+            self.status.setText("请先粘贴视频链接")
+            return
+        platform = _video_breakdown_platform_from_url(url)
+        payload = {"url": url, "noteUrl": url, "save_choice": "all", "platform": platform}
+        if platform == "xhs":
+            payload.update({"guestMode": False, "accountCollectionConfirmed": True})
+        self._link_job = uuid.uuid4().hex
+        self._link_busy = True
+        self.b_link_breakdown.setEnabled(False)
+        self.b_open.setEnabled(False)
+        self.b_retry.setEnabled(False)
+        self.b_replace.setEnabled(False)
+        self.b_digital_human.setEnabled(False)
+        self.b_save.setEnabled(False)
+        self.path_lab.setText("%s\n正在下载视频…" % url)
+        self.report.setPlainText("")
+        self.status.setText("正在下载视频，下载完成后自动分解…")
+
+        def work(job=self._link_job, link=url, pf=platform, body=payload):
+            task = submit_local_task(pf + ".download", body, 900)
+            BRIDGE.payload.emit("video_breakdown_link_download", {
+                "job": job,
+                "task": task,
+                "url": link,
+                "platform": pf,
+            })
+        run_bg(work)
 
     def start(self, data):
         if self._busy:
@@ -6862,7 +8140,10 @@ class VideoBreakdownPage(BasePage):
                 try:
                     visual = lk888_vision(
                         "请逐帧描述这些短视频关键帧，重点提取人物、产品、场景、动作、字幕、道具、镜头节奏。",
-                        frame_urls, max_tokens=2200)
+                        frame_urls, max_tokens=2200,
+                        billing_scenario="video_breakdown",
+                        billing_stage="visual_analysis",
+                        billing_detail="key frame visual analysis")
                 except Exception as exc:
                     raw = json_log(
                         _CLIENT_JSON_LOGGER,
@@ -6919,22 +8200,30 @@ class VideoBreakdownPage(BasePage):
         if self._busy:
             self.status.setText("当前分析任务尚未完成")
             return
-        previous = dict((self._analysis or {}).get("transcript") or {})
-        failed_ranges = list(previous.get("failedRanges") or [])
+        analysis = dict(self._analysis or {})
+        previous = dict(analysis.get("transcript") or {})
+        failed_ranges = _video_breakdown_retry_ranges(analysis)
         video = self._video_path
         if not failed_ranges:
             self.status.setText("没有可重试的失败时间段")
+            self.report.setPlainText("没有可重试的失败时间段")
             self.b_retry.setEnabled(False)
             return
         if not (video and os.path.isfile(video)):
             self.status.setText("重试失败:源视频文件不存在")
+            self.report.setPlainText("重试失败:源视频文件不存在")
             return
-        payload = dict(self._analysis or {})
+        payload = analysis
         self._job = uuid.uuid4().hex
         self._busy = True
         self.b_retry.setEnabled(False)
         self.b_save.setEnabled(False)
-        self.status.setText("正在重试失败的转写分片…")
+        if previous.get("failedRanges"):
+            self.status.setText("正在重试失败的转写分片…")
+            self.report.setPlainText("正在重试失败的转写分片…")
+        else:
+            self.status.setText("旧任务未保存失败区间，正在按整段视频重试…")
+            self.report.setPlainText("旧任务未保存失败区间，正在按整段视频重试…")
 
         def progress(msg, job=self._job):
             BRIDGE.payload.emit("video_breakdown_progress", {"job": job, "message": msg})
@@ -7053,7 +8342,11 @@ class PublishPage(BasePage):
         self.v.addWidget(make_header("素材与发布", "上传视频/图片素材 → 选平台账号 → 本机浏览器执行真实发布", [self.b_up, self.b_ref]))
         self.v.addWidget(prereq_banner("发布需:本机客户端在线 + 目标平台账号已在『账号矩阵』登录;否则发布不会真正执行。"))
         self.table = QtWidgets.QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["标题（可编辑，抖音最多30字，小红书最多20字）", "类型", "文件数"])
+        self.table.setHorizontalHeaderLabels([
+            _douyin_only_text("标题（可编辑，抖音最多30字）", "标题（可编辑，抖音最多30字，小红书最多20字）"),
+            "类型",
+            "文件数",
+        ])
         self.table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -7063,7 +8356,8 @@ class PublishPage(BasePage):
         bar = QtWidgets.QHBoxLayout()
         self.platform = QtWidgets.QComboBox()
         self.platform.addItem("抖音", "douyin")
-        self.platform.addItem("小红书", "xhs")
+        if xhs_enabled():
+            self.platform.addItem(XHS_PLATFORM_LABEL, XHS_PLATFORM_CODE)
         self.platform.currentIndexChanged.connect(lambda _i: self._refresh_publish_accounts())
         self.acc = QtWidgets.QComboBox()
         self.acc.setMinimumWidth(260)
@@ -7388,8 +8682,10 @@ def save_dm_conv(conv):
         pass
 SALES_INTENTS = ["咨询产品", "比价", "犹豫观望", "明确购买", "售后问题", "闲聊", "无意向"]
 DM_AUTO_REPLY_POLL_MS = 20000
-DM_AUTO_REPLY_MERGE_WINDOW_SEC = 300
 DM_AUTO_REPLY_MAX_SEEN = 100
+DM_AUTO_REPLY_HANDOFF_PATTERN = re.compile(
+    r"(?:转\s*人工|转接\s*(?:人工|客服)|人工\s*(?:客服|服务)|找\s*人工|要\s*人工|人工\s*处理)"
+)
 DM_AUTO_REPLY_FATAL_INBOX_ERRORS = (
     "not_authenticated",
     "login_required",
@@ -7398,6 +8694,7 @@ DM_AUTO_REPLY_FATAL_INBOX_ERRORS = (
     "not_supported",
     "dm_inbox_button_not_found",
     "numeric_uid_unsupported_in_browser_dm",
+    "dm_account_mismatch",
 )
 
 
@@ -7477,20 +8774,23 @@ class DMPage(BasePage):
         self._auto_busy = False
         self._auto_seen_fingerprints = []
         self._auto_pending_texts = []
+        self._auto_flushing_texts = []
         self._auto_last_reply_at = 0.0
         self._auto_last_fingerprint = ""
         self._auto_manual_required = False
+        self._auto_handoff_notified = False
         self._auto_sending = False
         self._auto_sending_text = ""
         self._auto_sending_message_fingerprint = ""
         self._auto_baseline_pending = False
         self._dm_account_id = ""
+        self._dm_session_generation = 0
         cfg = QtWidgets.QHBoxLayout()
         cfg.setSpacing(8)
         self.target = QtWidgets.QLineEdit()
         self.target.setPlaceholderText("客户:抖音主页链接 / sec_uid(数字 uid 不支持)")
         self.target.editingFinished.connect(self._render_history)
-        self.target.textEdited.connect(lambda _text: setattr(self, "_dm_account_id", ""))
+        self.target.textEdited.connect(self._on_dm_target_edited)
         self.product = QtWidgets.QLineEdit()
         self.product.setPlaceholderText("主推产品 / 场景(可选)")
         self.style = QtWidgets.QComboBox()
@@ -7547,14 +8847,65 @@ class DMPage(BasePage):
         return self._conv.setdefault(self.target.text().strip() or "_", [])
 
     def _log(self, who, text, tag=""):
-        self.conv.appendPlainText(("👤 客户:" if who == "customer" else "🤖 我:") + (("[%s] " % tag) if tag else "") + text)
+        prefix = "👤 客户:" if who == "customer" else ("⚠ 系统:" if who == "system" else "🤖 我:")
+        self.conv.appendPlainText(prefix + (("[%s] " % tag) if tag else "") + text)
 
     def _render_history(self):
         """切换客户(主页链接)时,把该客户的历史会话重放到会话视图。"""
         self.conv.clear()
         for m in self._hist():
             if isinstance(m, dict):
-                self._log("customer" if m.get("role") == "customer" else "me", m.get("text") or "")
+                role = m.get("role") or "me"
+                self._log(role if role in ("customer", "system") else "me", m.get("text") or "")
+
+    def _dm_session_snapshot(self):
+        return {
+            "sessionGeneration": int(self._dm_session_generation),
+            "target": self.target.text().strip(),
+            "accountId": str(self._dm_account_id or "").strip(),
+        }
+
+    def _dm_event_matches_session(self, event):
+        event = event if isinstance(event, dict) else {}
+        if "sessionGeneration" not in event:
+            return True
+        current = self._dm_session_snapshot()
+        return (
+            int(event.get("sessionGeneration") or 0) == current["sessionGeneration"]
+            and str(event.get("target") or "").strip() == current["target"]
+            and str(event.get("accountId") or "").strip() == current["accountId"]
+        )
+
+    def _reset_dm_session(self, account_id=""):
+        self._dm_session_generation += 1
+        self._auto_timer.stop()
+        self._auto_busy = False
+        self._auto_pending_texts = []
+        self._auto_flushing_texts = []
+        self._seen = set()
+        self._auto_seen_fingerprints = []
+        self._auto_last_fingerprint = ""
+        self._auto_last_reply_at = 0.0
+        self._auto_manual_required = False
+        self._auto_handoff_notified = False
+        self._auto_sending = False
+        self._auto_sending_text = ""
+        self._auto_sending_message_fingerprint = ""
+        self._auto_baseline_pending = False
+        self._dm_account_id = str(account_id or "").strip()
+        old_state = self.auto.blockSignals(True)
+        try:
+            self.auto.setChecked(False)
+        finally:
+            self.auto.blockSignals(old_state)
+        self.b_gen.setEnabled(True)
+        self.b_send.setEnabled(True)
+
+    def _on_dm_target_edited(self, _text):
+        self._reset_dm_session("")
+        self.incoming.clear()
+        self.draft.clear()
+        self.status.setText("客户已切换，旧客户的自动回复任务和待回复内容已清空。")
 
     def _auto_mark_seen(self, fingerprint):
         fp = str(fingerprint or "").strip()
@@ -7584,6 +8935,100 @@ class DMPage(BasePage):
             return ""
         return fingerprints[0] if len(fingerprints) == 1 else _safe_text_fingerprint("|".join(fingerprints))
 
+    def _auto_append_customer_message(self, text, fingerprint="", status=""):
+        row = {"role": "customer", "text": str(text or "")}
+        fp = str(fingerprint or "").strip()
+        if fp:
+            row["fingerprint"] = fp
+        if status:
+            row["status"] = status
+        self._hist().append(row)
+        self._log("customer", row["text"])
+
+    def _auto_append_system_notice(self, text, status="manual_required"):
+        row = {"role": "system", "text": str(text or ""), "status": status}
+        self._hist().append(row)
+        self._log("system", row["text"])
+
+    def _show_auto_handoff_notification(self, reason):
+        if self._auto_handoff_notified:
+            return
+        self._auto_handoff_notified = True
+        try:
+            QtWidgets.QApplication.alert(self, 0)
+            box = QtWidgets.QMessageBox(self)
+            box.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setWindowTitle("私信需要人工接管")
+            box.setText("当前客户会话需要人工接管")
+            box.setInformativeText(str(reason or "请查看当前私信会话。"))
+            box.open()
+        except Exception:
+            pass
+
+    def _auto_record_manual_customer_messages(self, messages, handoff_reason="manual_active"):
+        manual = 0
+        reason_code = "explicit_handoff" if handoff_reason == "客户明确要求转人工" else (
+            "non_text" if handoff_reason == "客户发送非文本私信" else "manual_active"
+        )
+        for m in list(messages or []):
+            if not isinstance(m, dict):
+                continue
+            fp = m.get("fingerprint") or m.get("id")
+            if not self._auto_mark_seen(fp):
+                continue
+            manual += 1
+            kind = m.get("kind") or "unknown"
+            text = str(m.get("text") or "").strip()
+            if not text or kind != "text":
+                text = "[非文本私信，请人工查看]"
+            json_log(
+                _CLIENT_JSON_LOGGER,
+                "douyin_dm_auto_reply_manual_required",
+                level="info",
+                targetFingerprint=self._auto_target_fingerprint(),
+                messageFingerprint=fp,
+                kind=kind,
+                handoffReason=reason_code,
+            )
+            self._auto_append_customer_message(text, fp, status="manual_required")
+        return manual
+
+    def _auto_stop_for_manual_handoff(self, reason):
+        self._auto_busy = False
+        self._auto_manual_required = True
+        self._auto_pending_texts = []
+        self._auto_flushing_texts = []
+        if self.auto.isChecked():
+            old_state = self.auto.blockSignals(True)
+            try:
+                self.auto.setChecked(False)
+            finally:
+                self.auto.blockSignals(old_state)
+        self._auto_append_system_notice("需人工接管：%s。全自动回复已关闭。" % str(reason or "请查看当前会话"))
+        self._show_auto_handoff_notification(reason)
+
+    def _auto_disable_for_batch_failure(self, stage, error_code, message_fingerprint=""):
+        self._auto_timer.stop()
+        if self.auto.isChecked():
+            old_state = self.auto.blockSignals(True)
+            try:
+                self.auto.setChecked(False)
+            finally:
+                self.auto.blockSignals(old_state)
+        self._auto_busy = False
+        self._auto_manual_required = True
+        self._auto_pending_texts = []
+        self._auto_flushing_texts = []
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "douyin_dm_auto_reply_failed",
+            stage=str(stage or "auto"),
+            targetFingerprint=self._auto_target_fingerprint(),
+            messageFingerprint=str(message_fingerprint or ""),
+            errorCode=_safe_error_code(error_code, "dm_auto_reply_failed"),
+        )
+
     def _auto_buffer_text(self, message):
         message = message if isinstance(message, dict) else {}
         fp = message.get("fingerprint") or message.get("id")
@@ -7592,6 +9037,7 @@ class DMPage(BasePage):
         text = str(message.get("text") or "").strip()
         if not text:
             return False
+        self._auto_append_customer_message(text, fp)
         self._auto_pending_texts.append({
             "text": text,
             "fingerprint": fp,
@@ -7611,29 +9057,24 @@ class DMPage(BasePage):
     def _auto_ready_to_reply(self, now=None):
         if not self._auto_pending_texts or self._auto_sending:
             return False
-        now = float(now if now is not None else time.time())
-        first_received = float(self._auto_pending_texts[0].get("receivedAt") or now)
-        if now - first_received < DM_AUTO_REPLY_MERGE_WINDOW_SEC:
-            return False
-        if self._auto_last_reply_at > 0 and now - float(self._auto_last_reply_at or 0) < DM_AUTO_REPLY_MERGE_WINDOW_SEC:
-            return False
         return True
 
     def _auto_flush_buffer(self):
         if not self._auto_pending_texts:
             return False
-        merged = "\n".join(x.get("text") or "" for x in self._auto_pending_texts if x.get("text")).strip()
-        if not merged:
-            self._auto_pending_texts = []
+        message = self._auto_pending_texts.pop(0)
+        text = str(message.get("text") or "").strip()
+        if not text:
             return False
-        self._auto_flushing_texts = list(self._auto_pending_texts)
-        self._auto_pending_texts = []
-        self.gen_reply(merged, auto=True)
+        self._auto_flushing_texts = [message]
+        self.gen_reply(text, auto=True, record_customer=False)
         return True
 
     def _auto_handle_inbox_messages(self, messages):
         buffered = 0
         manual = 0
+        unknown = 0
+        customer_batch = []
         for m in list(messages or []):
             if not isinstance(m, dict):
                 continue
@@ -7643,31 +9084,47 @@ class DMPage(BasePage):
                 self._auto_mark_seen(fp)
                 continue
             if direction != "customer":
-                self._auto_mark_seen(fp)
+                if str(fp or "").strip() not in self._seen:
+                    unknown += 1
                 continue
+            if str(fp or "").strip() in self._seen:
+                continue
+            customer_batch.append(m)
+        handoff_reason = ""
+        for m in customer_batch:
             if (m.get("kind") or "text") != "text":
-                if self._auto_mark_seen(fp):
-                    manual += 1
-                    self._auto_manual_required = True
-                    json_log(
-                        _CLIENT_JSON_LOGGER,
-                        "douyin_dm_auto_reply_manual_required",
-                        level="info",
-                        targetFingerprint=self._auto_target_fingerprint(),
-                        messageFingerprint=fp,
-                        kind=m.get("kind") or "unknown",
-                    )
-                    self._hist().append({
-                        "role": "customer",
-                        "text": "[非文本私信，请人工查看]",
-                        "status": "manual_required",
-                    })
-                continue
-            if self._auto_buffer_text(m):
-                buffered += 1
+                handoff_reason = "客户发送非文本私信"
+                break
+            if DM_AUTO_REPLY_HANDOFF_PATTERN.search(str(m.get("text") or "")):
+                handoff_reason = "客户明确要求转人工"
+                break
+        if self._auto_manual_required:
+            manual = self._auto_record_manual_customer_messages(customer_batch)
+            self._auto_pending_texts = []
+        elif handoff_reason:
+            manual = self._auto_record_manual_customer_messages(customer_batch, handoff_reason)
+            self._auto_pending_texts = []
+            if manual:
+                self._auto_stop_for_manual_handoff(handoff_reason)
+        else:
+            for m in customer_batch:
+                if self._auto_buffer_text(m):
+                    buffered += 1
+        if manual:
+            buffered = 0
         if manual or buffered:
             save_dm_conv(self._conv)
-        return {"buffered": buffered, "manual": manual, "pending": len(self._auto_pending_texts)}
+        return {"buffered": buffered, "manual": manual, "unknown": unknown, "pending": len(self._auto_pending_texts), "handoffReason": handoff_reason}
+
+    def _auto_trailing_unanswered_messages(self, messages):
+        rows = [m for m in list(messages or []) if isinstance(m, dict)]
+        latest_me = -1
+        for idx, m in enumerate(rows):
+            if (m.get("direction") or "") == "me":
+                latest_me = idx
+        for m in rows[: latest_me + 1]:
+            self._auto_mark_seen(m.get("fingerprint") or m.get("id"))
+        return rows[latest_me + 1:]
 
     def _stop_auto_reply_for_inbox_error(self, error_code):
         err = str(error_code or "").strip()
@@ -7755,15 +9212,16 @@ class DMPage(BasePage):
             return "已点开私信，但没有识别到底部“发送消息”输入框(dm_input_not_found，%s)。请确认私信面板已打开且底部输入框可点击。" % detail
         return err or "unknown"
 
-    def gen_reply(self, incoming_text=None, auto=False):
+    def gen_reply(self, incoming_text=None, auto=False, record_customer=True):
         msg = (incoming_text if isinstance(incoming_text, str) else self.incoming.text()).strip()
         if not msg:
             self.status.setText("请填客户消息")
             return
         h = self._hist()
-        h.append({"role": "customer", "text": msg})
-        self._log("customer", msg)
-        save_dm_conv(self._conv)
+        if record_customer:
+            h.append({"role": "customer", "text": msg})
+            self._log("customer", msg)
+            save_dm_conv(self._conv)
         if not auto:
             self.incoming.clear()
             self.b_gen.setEnabled(False)
@@ -7773,17 +9231,31 @@ class DMPage(BasePage):
         use_kb = self.use_kb.isChecked()
         hist = list(h)
         auto_send = bool(auto)
+        session = self._dm_session_snapshot()
 
         def work():
             try:
                 r = ai_sales_reply(msg, hist, product, persona, use_kb)
-                BRIDGE.payload.emit("sales_reply", {"ok": True, "intent": r["intent"], "reply": r["reply"], "auto": auto_send})
+                BRIDGE.payload.emit("sales_reply", {
+                    "ok": True,
+                    "intent": r["intent"],
+                    "reply": r["reply"],
+                    "auto": auto_send,
+                    **session,
+                })
             except Exception as e:
-                BRIDGE.payload.emit("sales_reply", {"ok": False, "error": str(e)[:140], "auto": auto_send})
+                BRIDGE.payload.emit("sales_reply", {
+                    "ok": False,
+                    "error": _safe_error_code(str(e), "dm_sales_reply_failed"),
+                    "auto": auto_send,
+                    **session,
+                })
         run_bg(work)
 
-    def send_reply(self, content=None):
-        t = self.target.text().strip()
+    def send_reply(self, content=None, session=None):
+        session = dict(session) if isinstance(session, dict) else self._dm_session_snapshot()
+        t = str(session.get("target") or "").strip()
+        account_id = str(session.get("accountId") or "").strip()
         c = (content if isinstance(content, str) else self.draft.text()).strip()
         if not t or not c:
             self.status.setText("请填客户主页链接和回复内容")
@@ -7795,11 +9267,22 @@ class DMPage(BasePage):
         save_dm_conv(self._conv)
         if not isinstance(content, str):
             self.draft.clear()
-        run_bg(lambda: BRIDGE.payload.emit("dm", submit_local_task(
-            "douyin.dm",
-            {"target": t, "content": c, "accountId": self._dm_account_id},
-            150,
-        )))
+        def work():
+            code, result = local_api(
+                "POST",
+                "/api/douyin/dm",
+                {"target": t, "content": c, "accountId": account_id},
+                150,
+            )
+            result = result if isinstance(result, dict) else {"ok": False, "error": "dm_invalid_result"}
+            succeeded = code == 200 and bool(result.get("ok"))
+            BRIDGE.payload.emit("dm", {
+                "status": "done" if succeeded else "failed",
+                "result": result,
+                "error": "" if succeeded else (result.get("error") or ("http_%s" % code)),
+                **session,
+            })
+        run_bg(work)
 
     def toggle_auto(self, on):
         if on:
@@ -7807,9 +9290,25 @@ class DMPage(BasePage):
                 self.status.setText("全自动前请先填客户主页链接")
                 self.auto.setChecked(False)
                 return
+            was_manual_required = bool(self._auto_manual_required)
+            if was_manual_required:
+                self._auto_manual_required = False
+                self._auto_handoff_notified = False
+                self._auto_pending_texts = []
+                self._auto_flushing_texts = []
+                json_log(
+                    _CLIENT_JSON_LOGGER,
+                    "douyin_dm_auto_reply_resumed_after_manual",
+                    level="info",
+                    targetFingerprint=self._auto_target_fingerprint(),
+                )
             self._auto_baseline_pending = not bool(self._auto_last_fingerprint)
             self._auto_timer.start(DM_AUTO_REPLY_POLL_MS)
-            self.status.setText("全自动已开启:每 20s 拉取新私信，纯文本 5 分钟合并回复一次。首次拉取中…")
+            self.status.setText(
+                "全自动已恢复:每 20s 拉取新私信；每条新文本按顺序立即生成并发送。首次拉取中…"
+                if was_manual_required
+                else "全自动已开启:每 20s 拉取新私信；每条新文本按顺序立即生成并发送。首次拉取中…"
+            )
             self._auto_poll()
         else:
             self._auto_timer.stop()
@@ -7819,38 +9318,62 @@ class DMPage(BasePage):
         if self._auto_busy:
             return
         self._auto_busy = True
-        t = self.target.text().strip()
+        session = self._dm_session_snapshot()
+        t = session["target"]
 
         def work():
             payload = {
                 "target": t,
                 "limit": 10,
                 "sinceFingerprint": self._auto_last_fingerprint,
-                "accountId": self._dm_account_id,
+                "accountId": session["accountId"],
             }
             code, res = local_api("POST", "/api/douyin/dm/inbox", payload, 120)
-            BRIDGE.payload.emit("dm_inbox", {"status": "done" if code == 200 and res.get("ok") else "failed", "result": res, "error": res.get("error") or ("http_%s" % code)})
+            res = res if isinstance(res, dict) else {"ok": False, "error": "dm_inbox_invalid_result"}
+            succeeded = code == 200 and bool(res.get("ok"))
+            BRIDGE.payload.emit("dm_inbox", {
+                "status": "done" if succeeded else "failed",
+                "result": res,
+                "error": "" if succeeded else (res.get("error") or ("http_%s" % code)),
+                **session,
+            })
         run_bg(work)
 
     def _on(self, tag, d):
         d = d or {}
         if tag == "dm_followup":
-            self._dm_account_id = str((d or {}).get("accountId") or "").strip()
             target = str((d or {}).get("target") or "").strip()
             if target:
+                account_id = str((d or {}).get("accountId") or "").strip()
+                if target != self.target.text().strip() or account_id != self._dm_account_id:
+                    self._reset_dm_session(account_id)
+                else:
+                    self._dm_account_id = account_id
                 self.target.setText(target)
                 self._render_history()
                 self.status.setText("已带入获客线索主页链接，可先生成回复或开启全自动跟进。")
+            return
+        if tag in ("sales_reply", "dm_inbox", "dm") and not self._dm_event_matches_session(d):
+            json_log(
+                _CLIENT_JSON_LOGGER,
+                "douyin_dm_stale_event_ignored",
+                level="warning",
+                stage=tag,
+                targetFingerprint=_safe_text_fingerprint(d.get("target") or ""),
+                errorCode="dm_stale_session",
+            )
             return
         if tag == "sales_reply":
             self.b_gen.setEnabled(True)
             if d.get("ok"):
                 reply = d.get("reply") or ""
                 if d.get("auto"):
+                    if not self.auto.isChecked():
+                        return
                     self._auto_sending = True
                     self._auto_sending_text = reply
                     self._auto_sending_message_fingerprint = self._auto_flushing_message_fingerprint()
-                    self.send_reply(reply)  # 全自动:直接发送
+                    self.send_reply(reply, session=d)  # 全自动:直接发送
                 else:
                     self._log("me", reply, tag=d.get("intent") or "")
                     self.draft.setText(reply)
@@ -7858,17 +9381,10 @@ class DMPage(BasePage):
             else:
                 if d.get("auto") and getattr(self, "_auto_flushing_texts", None):
                     failed_message_fp = self._auto_flushing_message_fingerprint()
-                    self._auto_pending_texts = list(self._auto_flushing_texts) + list(self._auto_pending_texts)
-                    self._auto_flushing_texts = []
-                    json_log(
-                        _CLIENT_JSON_LOGGER,
-                        "douyin_dm_auto_reply_failed",
-                        stage="ai",
-                        targetFingerprint=self._auto_target_fingerprint(),
-                        messageFingerprint=failed_message_fp,
-                        errorCode=_safe_error_code(d.get("error"), "dm_auto_reply_ai_failed"),
-                    )
-                self.status.setText("AI 生成失败:" + str(d.get("error") or ""))
+                    self._auto_disable_for_batch_failure("ai", d.get("error") or "dm_auto_reply_ai_failed", failed_message_fp)
+                    self.status.setText("全自动已关闭:AI 生成失败，本批消息已转人工处理。")
+                else:
+                    self.status.setText("AI 生成失败:" + str(d.get("error") or ""))
             return
         if tag == "dm_inbox":
             self._auto_busy = False
@@ -7878,21 +9394,34 @@ class DMPage(BasePage):
                 if self._stop_auto_reply_for_inbox_error(err):
                     return
                 return
+            resolved_account_id = str(res.get("accountId") or "").strip()
+            if resolved_account_id:
+                current_local_id = str(self._dm_account_id or "").rsplit(":", 1)[-1]
+                resolved_local_id = resolved_account_id.rsplit(":", 1)[-1]
+                if current_local_id and current_local_id != resolved_local_id:
+                    self._stop_auto_reply_for_inbox_error("dm_account_mismatch")
+                    return
+                self._dm_account_id = resolved_account_id
             msgs = res.get("messages") or res.get("unread") or []
             if self._auto_baseline_pending:
-                for m in list(msgs or []):
-                    if isinstance(m, dict):
-                        self._auto_mark_seen(m.get("fingerprint") or m.get("id"))
                 self._auto_baseline_pending = False
-                self.status.setText("全自动:已建立当前会话基线，后续新文本将按 5 分钟窗口合并回复。")
-                return
+                msgs = self._auto_trailing_unanswered_messages(msgs)
+                if not msgs:
+                    self.status.setText("全自动:已建立当前会话基线，后续新文本会按顺序立即回复。")
+                    return
             summary = self._auto_handle_inbox_messages(msgs)
             if summary.get("manual"):
-                self.status.setText("收到非文本私信，请人工查看该客户会话。")
+                if summary.get("handoffReason"):
+                    self.status.setText("需人工接管:%s。全自动回复已关闭。" % summary["handoffReason"])
+                else:
+                    self.status.setText("人工接管中:已记录 %d 条新消息，请人工处理。" % summary["manual"])
             if self._auto_ready_to_reply():
                 self._auto_flush_buffer()
             elif summary.get("buffered"):
-                self.status.setText("全自动:已缓存 %d 条新文本，5 分钟内合并回复一次。" % summary.get("pending"))
+                self.status.setText("全自动:已收到 %d 条新文本，正在按顺序逐条回复。" % summary.get("pending"))
+            elif summary.get("unknown") or (res.get("dmPanelDiagnostics") or {}).get("unknownDirectionCount"):
+                unknown_count = summary.get("unknown") or (res.get("dmPanelDiagnostics") or {}).get("unknownDirectionCount")
+                self.status.setText("全自动:检测到 %d 条文本，但无法确认客户方向，未自动回复，请人工查看。" % unknown_count)
             elif not summary.get("manual"):
                 self.status.setText("全自动:已检查，无新文本私信。")
             return
@@ -7900,6 +9429,8 @@ class DMPage(BasePage):
             self.b_send.setEnabled(True)
             rr = d.get("result") or {}
             ok = d.get("status") == "done" and rr.get("ok")
+            if ok and rr.get("accountId"):
+                self._dm_account_id = str(rr.get("accountId") or "").strip()
             if self._auto_sending:
                 if ok:
                     self._auto_last_reply_at = time.time()
@@ -7913,23 +9444,21 @@ class DMPage(BasePage):
                         messageFingerprint=self._auto_sending_message_fingerprint,
                     )
                 elif getattr(self, "_auto_flushing_texts", None):
-                    self._auto_pending_texts = list(self._auto_flushing_texts) + list(self._auto_pending_texts)
-                    self._auto_flushing_texts = []
                     hist = self._hist()
                     if hist and hist[-1].get("role") == "me" and hist[-1].get("text") == self._auto_sending_text:
                         hist.pop()
                         save_dm_conv(self._conv)
+                    failed_message_fp = self._auto_sending_message_fingerprint
                     self._auto_sending_text = ""
-                    json_log(
-                        _CLIENT_JSON_LOGGER,
-                        "douyin_dm_auto_reply_failed",
-                        stage="send",
-                        targetFingerprint=self._auto_target_fingerprint(),
-                        messageFingerprint=self._auto_sending_message_fingerprint,
-                        errorCode=_safe_error_code(d.get("error") or rr.get("error"), "dm_auto_reply_send_failed"),
+                    self._auto_disable_for_batch_failure(
+                        "send",
+                        d.get("error") or rr.get("error") or "dm_auto_reply_send_failed",
+                        failed_message_fp,
                     )
                 self._auto_sending = False
                 self._auto_sending_message_fingerprint = ""
+                if ok and self.auto.isChecked() and self._auto_ready_to_reply():
+                    self._auto_flush_buffer()
             self.status.setText(("已发送私信 ✓  「%s」" % (rr.get("sent") or "")) if ok
                                 else ("发送失败:" + self._dm_send_error_text(d, rr)))
 
@@ -8106,7 +9635,10 @@ class ViralImagePage(BasePage):
                 copy = obj.get("copy") or raw
                 imgp = obj.get("image_prompt") or (t + ", modern poster, high quality")
                 BRIDGE.payload.emit("viral", {"stage": "text", "title": title, "copy": copy})
-                img = lk888_image(imgp + ", cinematic, clean composition, trending cover, high-end", size="1024x1024")
+                img, _public_url = _lk888_image_result_download(
+                    imgp + ", cinematic, clean composition, trending cover, high-end",
+                    size="1024x1024",
+                )
                 BRIDGE.payload.emit("viral", {"stage": "done", "img": img})
             except Exception as e:
                 refund_cap("viral_image", ref)
@@ -8301,7 +9833,7 @@ def _compose_digital_human_scene_avatar_url(avatar_url, scene_url, scene_path=No
     prompt = _digital_human_scene_avatar_prompt(strict_scene=strict_scene)
     image_urls = [avatar_ref, scene_ref]
     try:
-        image_bytes, public_url = lk888_image_result(
+        image_bytes, public_url = _lk888_image_result_download(
             prompt, size="1024x1536", model="gpt-image-2", image_urls=image_urls)
     except Exception as exc:
         if _is_digital_human_scene_image_policy_error(exc):
@@ -8316,7 +9848,7 @@ def _compose_digital_human_scene_avatar_url(avatar_url, scene_url, scene_path=No
                 scene_url=scene_value[:160],
             )
             try:
-                image_bytes, public_url = lk888_image_result(
+                image_bytes, public_url = _lk888_image_result_download(
                     safe_prompt, size="1024x1024", model="gpt-image-2", image_urls=image_urls)
             except Exception as retry_exc:
                 if _is_digital_human_scene_image_policy_error(retry_exc):
@@ -8352,7 +9884,7 @@ def _compose_digital_human_scene_avatar_url(avatar_url, scene_url, scene_path=No
             scene_url=scene_value[:160],
         )
         try:
-            image_bytes, public_url = lk888_image_result(
+            image_bytes, public_url = _lk888_image_result_download(
                 prompt[:1200], size="1024x1024", model="gpt-image-2", image_urls=image_urls)
         except Exception as retry_exc:
             if _is_digital_human_scene_image_transient_error(retry_exc):
@@ -8582,16 +10114,19 @@ class DigitalHumanPage(BasePage):
         # —— 形象区:预览 + 描述 + AI 生成 + 预设 ——
         arow = QtWidgets.QHBoxLayout()
         arow.setSpacing(12)
-        self.avatar_lbl = QtWidgets.QLabel("形象\n预览")
-        self.avatar_lbl.setFixedSize(118, 158)
-        self.avatar_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self.avatar_lbl.setStyleSheet("background:#0c0f17;border:1px solid #262c3b;border-radius:10px;color:#6f7aa0;font-size:12px;")
-        arow.addWidget(self.avatar_lbl)
-        self.scene_lbl = QtWidgets.QLabel("场景\n可选")
-        self.scene_lbl.setFixedSize(118, 158)
-        self.scene_lbl.setAlignment(QtCore.Qt.AlignCenter)
-        self.scene_lbl.setStyleSheet("background:#0c0f17;border:1px solid #262c3b;border-radius:10px;color:#6f7aa0;font-size:12px;")
-        arow.addWidget(self.scene_lbl)
+        self.avatar_frame = HoverDeleteMediaFrame("avatar", "形象\n预览")
+        self.avatar_frame.deleteRequested.connect(self._clear_uploaded_asset)
+        self.avatar_lbl = self.avatar_frame.preview
+        arow.addWidget(self.avatar_frame)
+        self.scene_frame = HoverDeleteMediaFrame("scene", "场景\n可选")
+        self.scene_frame.deleteRequested.connect(self._clear_uploaded_asset)
+        self.scene_lbl = self.scene_frame.preview
+        arow.addWidget(self.scene_frame)
+        self.sound_frame = HoverDeleteMediaFrame("sound", "声音\n可选")
+        self.sound_frame.deleteRequested.connect(self._clear_uploaded_asset)
+        tts_upload_visible = digital_human_tts_upload_enabled()
+        self.sound_frame.setVisible(tts_upload_visible)
+        arow.addWidget(self.sound_frame)
         acol = QtWidgets.QVBoxLayout()
         acol.setSpacing(8)
         adrow = QtWidgets.QHBoxLayout()
@@ -8623,12 +10158,19 @@ class DigitalHumanPage(BasePage):
         self.b_upload_sound.setObjectName("ghost")
         self.b_upload_sound.setCursor(QtCore.Qt.PointingHandCursor)
         self.b_upload_sound.clicked.connect(self.upload_sound)
+        self.b_upload_sound.setVisible(tts_upload_visible)
         urow.addWidget(self.b_upload_avatar)
         urow.addWidget(self.b_upload_scene)
         urow.addWidget(self.b_upload_sound)
         urow.addStretch()
         acol.addLayout(urow)
-        self.asset_status = QtWidgets.QLabel("人物形象必填；场景图可选；上传后会先强制合成背景。TTS 声音可选，未上传时使用下方音色自动合成。")
+        asset_status_text = (
+            "人物形象必填；场景图可选；上传后会先强制合成背景。"
+            "TTS 声音可选，未上传时使用下方音色自动合成。"
+            if tts_upload_visible
+            else "人物形象必填；场景图可选；上传场景后会先强制合成背景。口播将使用下方音色自动合成。"
+        )
+        self.asset_status = QtWidgets.QLabel(asset_status_text)
         self.asset_status.setObjectName("sub")
         self.asset_status.setWordWrap(True)
         acol.addWidget(self.asset_status)
@@ -8643,7 +10185,12 @@ class DigitalHumanPage(BasePage):
             prow.addWidget(pb)
         prow.addStretch()
         acol.addLayout(prow)
-        acol.addWidget(QtWidgets.QLabel("① 生成/上传人物形象  ② 可选上传场景和声音  ③ 写口播稿并生成"))
+        asset_guide_text = (
+            "① 生成/上传人物形象  ② 可选上传场景和声音  ③ 写口播稿并生成"
+            if tts_upload_visible
+            else "① 生成/上传人物形象  ② 可选上传场景  ③ 选择音色、写口播稿并生成"
+        )
+        acol.addWidget(QtWidgets.QLabel(asset_guide_text))
         acol.addStretch()
         arow.addLayout(acol, 1)
         left.addLayout(arow)
@@ -8716,19 +10263,46 @@ class DigitalHumanPage(BasePage):
         self.gen_avatar()
 
     def _set_image_preview(self, label, path):
+        if hasattr(label, "set_image") and label.set_image(path):
+            return
         if path and os.path.isfile(path):
             pm = QtGui.QPixmap(path)
             if not pm.isNull():
                 label.setPixmap(pm.scaled(label.size(), QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.SmoothTransformation))
 
+    def _sync_asset_status(self):
+        flags = []
+        flags.append("人物:" + ("已选" if self._avatar_url else "未选"))
+        flags.append("场景:" + ("已选" if self._scene_url else "未选"))
+        flags.append("声音:" + ("已上传音频" if self._sound_url else "自动TTS"))
+        self.asset_status.setText(" · ".join(flags))
+
+    def _clear_uploaded_asset(self, kind):
+        kind = str(kind or "").strip()
+        if kind == "avatar":
+            self._avatar_url = None
+            self._avatar_path = ""
+            self._composed_avatar_url = ""
+            self.avatar_frame.set_preview_text("形象\n预览")
+            self.status.setText("人物形象已移除，请重新生成或上传人物形象。")
+        elif kind == "scene":
+            self._scene_url = None
+            self._scene_path = ""
+            self._composed_avatar_url = ""
+            self.scene_frame.set_preview_text("场景\n可选")
+            self.status.setText("场景图已移除，生成时将不再强制换背景。")
+        elif kind == "sound":
+            self._sound_url = None
+            self.sound_frame.set_preview_text("声音\n可选")
+            self.status.setText("TTS 声音已移除，生成时将使用下方音色自动合成。")
+        else:
+            return
+        self._sync_asset_status()
+
     def _upload_asset(self, kind, path, title, mtype):
         btn = {"avatar": self.b_upload_avatar, "scene": self.b_upload_scene, "sound": self.b_upload_sound}.get(kind)
         if btn:
             btn.setEnabled(False)
-        if kind == "avatar":
-            self._set_image_preview(self.avatar_lbl, path)
-        elif kind == "scene":
-            self._set_image_preview(self.scene_lbl, path)
         self.status.setText("上传%s到素材库…" % {"avatar": "人物形象", "scene": "场景图", "sound": "TTS声音"}.get(kind, "素材"))
 
         def work():
@@ -8834,21 +10408,18 @@ class DigitalHumanPage(BasePage):
             if kind == "avatar":
                 self._avatar_url = url
                 self._avatar_path = path if path and os.path.isfile(path) else ""
-                self._set_image_preview(self.avatar_lbl, path)
+                self._set_image_preview(self.avatar_frame, path)
                 self.status.setText("人物形象已上传 ✓")
             elif kind == "scene":
                 self._scene_url = url
                 self._scene_path = path if path and os.path.isfile(path) else ""
-                self._set_image_preview(self.scene_lbl, path)
+                self._set_image_preview(self.scene_frame, path)
                 self.status.setText("场景图已上传 ✓")
             elif kind == "sound":
                 self._sound_url = url
+                self.sound_frame.set_media_text("TTS声音\n已上传\n%s" % os.path.basename(path or ""))
                 self.status.setText("TTS 声音已上传 ✓ 生成时将直接使用该音频")
-            flags = []
-            flags.append("人物:" + ("已选" if self._avatar_url else "未选"))
-            flags.append("场景:" + ("已选" if self._scene_url else "未选"))
-            flags.append("声音:" + ("已上传音频" if self._sound_url else "自动TTS"))
-            self.asset_status.setText(" · ".join(flags))
+            self._sync_asset_status()
             return
         if tag == "dh_avatar":
             self.b_avatar.setEnabled(True)
@@ -8857,9 +10428,8 @@ class DigitalHumanPage(BasePage):
                 p = (d or {}).get("path")
                 self._avatar_path = p if p and os.path.isfile(p) else ""
                 if p and os.path.isfile(p):
-                    self._set_image_preview(self.avatar_lbl, p)
-                self.asset_status.setText("人物:已选 · 场景:%s · 声音:%s" % (
-                    "已选" if self._scene_url else "未选", "已上传音频" if self._sound_url else "自动TTS"))
+                    self._set_image_preview(self.avatar_frame, p)
+                self._sync_asset_status()
                 self.status.setText("形象已生成 ✓,写好口播稿后点『生成数字人』")
             else:
                 self.status.setText("形象生成失败:" + str((d or {}).get("error") or ""))
@@ -8951,6 +10521,9 @@ _REPLACEMENT_ERROR_DISPLAY = {
     "replacement_qc_failed:audio_silent": "质检失败：生成片段音频为空或音量过低，请单段重试。",
     "replacement_qc_failed:media_invalid": "质检失败：生成片段不是有效视频，请单段重试。",
     "replacement_qc_failed:qc_frames_incomplete": "质检失败：未能提取首、中、尾审核帧，请单段重试。",
+    "comic_segment_invalid:media_invalid_duration": "远程返回的生成片段不是有效视频，请单段重试。",
+    "comic_segment_invalid:media_invalid": "远程返回的生成片段不是有效视频，请单段重试。",
+    "comic_video_recovery_missing": "远程视频结果还未生成完成，请稍后单段重试。",
     "image_result_url_not_public": "图片生成结果无法被远程模型读取，请检查公网图片服务后重试。",
     "video_replace_source_segment_url_missing": "源片段缺少可用公网地址，请重新生成替换方案。",
     "video_replace_source_segment_url_not_public": "源片段地址不是公网可访问地址，请检查素材上传配置。",
@@ -8988,32 +10561,71 @@ def _replacement_error_id_from_text(text):
     return match.group(0) if match else ""
 
 
+def _replacement_display_text_without_error_id(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(
+        r"[（(]?\s*错误编号\s*[:：]?\s*err-[A-Za-z0-9_-]+\s*[)）]?",
+        "",
+        raw,
+    )
+    raw = re.sub(r"\berr-[A-Za-z0-9_-]+\b", "", raw)
+    raw = re.sub(r"[（(]\s*[)）]", "", raw)
+    raw = re.sub(r"\s*[；;]\s*", "；", raw)
+    raw = re.sub(r"\s+", " ", raw)
+    return raw.strip(" ；;:：,，.-")
+
+
 def _localize_replacement_display_text(text):
     raw = str(text or "").strip()
     if not raw:
         return ""
-    error_id = _replacement_error_id_from_text(raw)
-    prefix = ("错误编号 %s；" % error_id) if error_id else ""
     lower = raw.lower()
     for code, message in _REPLACEMENT_ERROR_DISPLAY.items():
         if code in raw:
-            return prefix + message
+            return message
     if "402" in raw and ("insufficient" in lower or "余额不足" in raw):
-        return prefix + _REPLACEMENT_ERROR_DISPLAY["insufficient_balance"]
+        return _REPLACEMENT_ERROR_DISPLAY["insufficient_balance"]
     if "replacement_qc_failed:" in raw:
-        return prefix + "质检失败：片段未通过自动质量检查，请查看审核帧后单段重试。"
+        return "质检失败：片段未通过自动质量检查，请查看审核帧后单段重试。"
     if "图片生成超时" in raw or ("图片生成" in raw and (
             " 502" in raw or " 504" in raw or "gateway" in lower
             or "time-out" in lower or "timeout" in lower or "lk888_proxy_error" in raw)):
-        return prefix + "图片生成服务暂时不可用或超时，请稍后单段重试。"
+        return "图片生成服务暂时不可用或超时，请稍后单段重试。"
     if "lk888_proxy_error" in raw:
-        return prefix + "上游生成服务暂时不可用，请稍后重试。"
+        return "上游生成服务暂时不可用，请稍后重试。"
     if "绿网检查失败" in raw or "输入数据可能包含不适当" in raw:
-        return prefix + "上游内容审核未通过：请更换参考视频片段或产品/人物/场景图后单段重试。"
+        return "上游内容审核未通过：请更换参考视频片段或产品/人物/场景图后单段重试。"
+    if _comic_seedance_safety_fallback_reason(raw):
+        return "上游模型拒绝了输入参考图，可能涉及真人、版权或品牌内容限制；系统会切换备用模型，仍失败时请更换人物/场景/道具图后重试。"
+    if (
+            "read timed out" in lower
+            or "readtimeout" in lower
+            or "read timeout=" in lower
+            or "timed out" in lower
+            or "operation timed out" in lower):
+        return "远程服务响应超时，本次生成没有在限定时间内返回。请稍后重试；如果连续出现，请重启本地客户端后再试。"
+    if (
+            "connectionerror" in lower
+            or "connection refused" in lower
+            or "failed to establish a new connection" in lower
+            or "max retries exceeded" in lower
+            or "newconnectionerror" in lower):
+        return "无法连接远程服务，请检查网络状态或本地客户端是否为最新版本。"
+    if (
+            "too many open files" in lower
+            or "oserror(24" in lower
+            or "errno 24" in lower
+            or "platform_fd_exhausted" in lower):
+        return "远程漫剧服务资源句柄耗尽，视频生成暂时不可用。请稍后重试；如果连续出现，需要重启远程漫剧服务并检查句柄泄漏。"
     if "task_timeout" in raw:
-        return prefix + "远程生成任务超时，请稍后重试。"
-    if error_id and re.search(r"[A-Za-z_]{4,}", raw):
-        return prefix + "生成失败，请根据错误编号查看日志。"
+        return "远程生成任务超时，请稍后重试。"
+    cleaned = _replacement_display_text_without_error_id(raw)
+    if cleaned:
+        return cleaned
+    if _replacement_error_id_from_text(raw):
+        return "生成失败，请重试或查看日志。"
     return raw
 
 
@@ -9021,12 +10633,6 @@ def _replacement_segment_display_error(segment):
     segment = segment or {}
     error = _localize_replacement_display_text(segment.get("error") or "")
     error_id = str(segment.get("errorId") or "").strip()
-    if error_id and error:
-        if error_id in error:
-            return error
-        return "错误编号 %s；%s" % (error_id, error)
-    if error_id:
-        return "错误编号 %s" % error_id
     if error:
         return error
     completed = (
@@ -9036,19 +10642,17 @@ def _replacement_segment_display_error(segment):
     if not completed:
         remote_error = _localize_replacement_display_text(segment.get("remoteError") or "")
         remote_error_id = str(segment.get("remoteErrorId") or "").strip()
-        if remote_error_id and remote_error:
-            return "错误编号 %s；%s" % (remote_error_id, remote_error)
-        if remote_error_id:
-            return "错误编号 %s" % remote_error_id
         if remote_error:
             return remote_error
+        if remote_error_id:
+            return "生成失败，请重试或查看日志。"
     facefusion_error = _localize_replacement_display_text(segment.get("facefusionError") or "")
     facefusion_error_id = str(segment.get("facefusionErrorId") or "").strip()
-    if facefusion_error_id and facefusion_error:
-        return "错误编号 %s；%s" % (facefusion_error_id, facefusion_error)
-    if facefusion_error_id:
-        return "错误编号 %s" % facefusion_error_id
-    return facefusion_error
+    if facefusion_error:
+        return facefusion_error
+    if error_id or facefusion_error_id:
+        return "生成失败，请重试或查看日志。"
+    return ""
 
 
 def _replacement_preflight_failure(code, summary="", retryable=True, next_action=""):
@@ -9152,7 +10756,7 @@ def _replacement_diagnostics_summary(job, preflight=None):
         elif failed_segments:
             next_action = "可点击『重试失败片段』重新生成失败片段"
         else:
-            next_action = "根据错误编号查看日志后重试"
+            next_action = "查看任务日志后重试"
     return {
         "summary": summary,
         "errorId": error_id,
@@ -9631,12 +11235,18 @@ def _comic_plan_script_segments(segments, max_speech_sec=15.0):
         for continuation_index, script_part in enumerate(script_parts, start=1):
             segment = dict(source_segment)
             speech_duration = _estimate_replacement_tts_duration_sec(script_part)
+            source_start = source_segment.get("sourceStart", source_segment.get("start"))
+            source_end = source_segment.get("sourceEnd", source_segment.get("end"))
+            source_duration = source_segment.get("sourceDuration", source_segment.get("duration"))
             segment.update({
                 "script": script_part,
                 "speechDurationSec": round(speech_duration, 2),
                 "videoDurationSec": _comic_video_duration_slot(speech_duration),
                 "continuationIndex": continuation_index,
                 "continuationCount": count,
+                "sourceStart": source_start,
+                "sourceEnd": source_end,
+                "sourceDuration": source_duration,
             })
             if count > 1:
                 segment["continuationPrompt"] = (
@@ -9956,13 +11566,10 @@ def _replacement_segment_status_text(job, segment):
     if not completed:
         remote_error_id = str(segment.get("remoteErrorId") or "").strip()
         remote_error = _localize_replacement_display_text(segment.get("remoteError") or "")
-        if remote_error_id:
-            if remote_error:
-                parts.append("错误编号 %s；%s" % (remote_error_id, remote_error))
-            else:
-                parts.append("错误编号 " + remote_error_id)
-        elif remote_error:
+        if remote_error:
             parts.append(remote_error)
+        elif remote_error_id:
+            parts.append("生成失败，请重试或查看日志。")
     try:
         retry_count = int(segment.get("driftRetryCount") or 0)
     except (TypeError, ValueError):
@@ -10943,7 +12550,7 @@ def _comic_job_has_person_reference(job):
 
 def _comic_person_reference_priority_rule():
     return (
-        "人物完整外观以上传角色参考图为准；只沿用原片人物的动作、站位、镜头关系和汽车销售职业语境；"
+        "人物完整外观以上传角色参考图为准；参考分镜拆解文本和关键帧中的动作、站位、镜头关系和节奏近似生成；"
         "禁止继承原片人物的性别、发型、脸、服装、体型和配饰；当文字描述与角色参考图冲突时，以角色参考图为准。"
     )
 
@@ -11001,12 +12608,79 @@ def _comic_asset_binding_prompt(job):
     if typed["characters"]:
         lines.append("人物必须使用项目库角色“主角”的上传参考图，完整外观以该图为准。")
     if typed["scenes"]:
-        lines.append("场景必须使用项目库场景“场景1”的上传参考图，不得沿用原片场景。")
+        lines.append("场景必须使用项目库场景“场景1”的上传参考图，不得使用原视频场景。")
     if typed["props"]:
         lines.append("画面道具必须使用项目库道具“道具1”的上传参考图，不得出现原片产品。")
     if lines:
         lines.append("文字描述与上传参考图冲突时，人物、场景和道具均以上传参考图为最高优先级。")
+        lines.append("参考分镜拆解文本和关键帧中的动作、站位、镜头节奏和运镜方式近似生成；不得复刻原视频中的人物、产品、道具、场景、字幕或台词。")
+        lines.append("视频画面不要生成字幕、对白文字、台词文字或促销文字。")
     return "\n".join(lines)
+
+
+def _comic_motion_entity_terms(fields):
+    terms = []
+    for key in ("人物", "产品", "道具", "场景", "画面"):
+        value = str((fields or {}).get(key) or "").strip()
+        if not value:
+            continue
+        terms.append(value)
+        terms.extend(
+            part.strip()
+            for part in re.split(r"[、，,；;和及与/\\\s]+", value)
+            if len(part.strip()) >= 2
+        )
+    return sorted(set(terms), key=len, reverse=True)
+
+
+def _comic_clean_motion_action(action, fields, typed):
+    value = _replacement_strip_source_subtitle_dialogue(action)
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"“[^”]*”|\"[^\"]*\"|'[^']*'", "", value)
+    if typed.get("props"):
+        for term in _comic_motion_entity_terms(fields):
+            if term and term in value:
+                value = value.replace(term, "上传道具")
+        for term in (
+                "产品包装", "商品包装", "产品", "商品", "包装", "道具", "主体",
+                "瓶身", "瓶盖", "瓶子", "瓶",
+                "车头", "车门", "车身", "车盖", "引擎盖", "展车", "宣传牌", "海报", "立牌"):
+            value = value.replace(term, "上传道具")
+        value = re.sub(r"(?:上传)+道具", "上传道具", value)
+        if "上传道具" not in value and any(marker in value for marker in ("指向", "展示", "拿起", "手扶", "触摸", "摆放", "靠近")):
+            value = value.rstrip("。") + "，围绕上传道具完成相同展示动作"
+    value = value.replace("口播", "面向镜头展示")
+    value = value.replace("讲解", "展示")
+    value = value.replace("讲", "展示")
+    value = value.replace("说明", "展示")
+    value = value.replace("说话", "自然展示")
+    value = re.sub(
+        r"(?:活动价格|价格|赠品|运费险|优惠|厂补|补贴|促销信息|活动信息|信息卡|信息点)",
+        "卖点",
+        value,
+    )
+    value = re.sub(r"(?:先试用|不好用可退|可以退|可退|退回|试用装)", "使用流程", value)
+    value = re.sub(r"(?:[、，,]\s*卖点)+", "卖点", value)
+    value = re.sub(r"(?:卖点)+", "卖点", value)
+    value = re.sub(r"(?:使用流程[、，,]*)+", "使用流程", value)
+    value = re.sub(r"(?:上传)+道具", "上传道具", value)
+    value = re.sub(r"(?:男|女|男性|女性)?(?:销售人员|销售员|销售顾问|销售|主播|门店主播)", "主角", value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[、，,；;]\s*[、，,；;]+", "，", value)
+    return value.strip(" ，,、；;。")
+
+
+def _comic_clean_visual_continuation_prompt(text):
+    value = _replacement_strip_source_subtitle_dialogue(text)
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"“[^”]*”|\"[^\"]*\"|'[^']*'", "", value)
+    value = value.replace("口播", "展示").replace("讲解", "展示").replace("说话", "自然展示")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" ，,、；;。")
 
 
 def _comic_uploaded_asset_motion_prompt(text, job):
@@ -11018,26 +12692,22 @@ def _comic_uploaded_asset_motion_prompt(text, job):
     stop_markers = (
         "字幕和人物说话台词", "源视频锁定", "源视频实体替换", "上传产品必须",
         "人物身份", "产品参考", "原片拆解证据", "字幕安全",
+        "以下是按要求", "全局统一属性", "| 帧数 |",
     )
     stop_positions = [section.find(item) for item in stop_markers if section.find(item) >= 0]
     if stop_positions:
         section = section[:min(stop_positions)]
     typed = _comic_typed_reference_urls(job)
     shot_lines = []
-    product_terms = (
-        "白色丰田凯美瑞", "丰田凯美瑞", "凯美瑞", "汽车宣传牌", "宣传立牌",
-        "汽车", "展车", "车头", "车门", "车身", "引擎盖",
-    )
-    for line in section.splitlines():
-        stripped = line.strip().lstrip("-*• ")
-        if not stripped or "=" not in stripped:
-            continue
-        fields = {}
-        for item in re.split(r"[；;]", stripped):
-            if "=" not in item:
-                continue
-            key, field_value = item.split("=", 1)
-            fields[key.strip()] = field_value.strip()
+
+    def clean_value(item):
+        item = str(item or "")
+        item = item.replace("**", "").replace("###", "")
+        item = re.sub(r"\s+", " ", item)
+        return item.strip(" -*•\t\r\n，,。；;：:")
+
+    def append_shot(fields):
+        fields = fields if isinstance(fields, dict) else {}
         parts = []
         if fields.get("时间"):
             parts.append("时间=%s" % fields["时间"])
@@ -11048,27 +12718,67 @@ def _comic_uploaded_asset_motion_prompt(text, job):
         if typed["characters"]:
             parts.append("人物=项目库角色“主角”")
         elif fields.get("人物"):
-            parts.append("人物=%s" % fields["人物"])
-        action = fields.get("动作") or ""
-        if action and typed["props"]:
-            for term in product_terms:
-                action = action.replace(term, "上传道具")
-            if "上传道具" not in action:
-                action = action.rstrip("。") + "，围绕上传道具完成相同展示动作"
+            parts.append("人物=%s" % _comic_reference_safe_visual_text(fields["人物"], bool(typed["characters"])))
+        action = _comic_clean_motion_action(fields.get("动作") or "", fields, typed)
         if action:
             parts.append("动作=%s" % action)
         if typed["props"]:
             parts.append("道具=项目库道具“道具1”")
-        elif fields.get("道具"):
-            parts.append("道具=%s" % fields["道具"])
         if typed["scenes"]:
             parts.append("场景=项目库场景“场景1”")
-        elif fields.get("场景"):
-            parts.append("场景=%s" % fields["场景"])
         if fields.get("节奏"):
-            parts.append("节奏=%s" % fields["节奏"])
+            rhythm = _replacement_strip_source_subtitle_dialogue(fields["节奏"])
+            rhythm = re.sub(r"“[^”]*”|\"[^\"]*\"|'[^']*'", "", str(rhythm or ""))
+            rhythm = rhythm.replace("口播", "展示节奏").replace("讲解", "展示").replace("说话", "自然展示")
+            rhythm = re.sub(r"强?信息点输出[，,、]?\s*形成价格锚定", "重点节奏明确", rhythm)
+            rhythm = rhythm.replace("信息点", "重点").replace("价格锚定", "节奏强调")
+            rhythm = re.sub(r"\s+", " ", rhythm).strip(" ，,、；;。")
+            if rhythm:
+                parts.append("节奏=%s" % rhythm)
         if parts:
             shot_lines.append("镜头%d：%s。" % (len(shot_lines) + 1, "；".join(parts)))
+
+    label_re = re.compile(
+        r"(?:^|\s+-\s*|\n\s*[-*•]?\s*)(?:\*\*)?"
+        r"(画面|人物|产品|动作|字幕|道具|场景|节奏)"
+        r"(?:\*\*)?\s*[:：]\s*"
+    )
+    markdown_blocks = [
+        block.strip()
+        for block in re.split(r"\s*[-*•]?\s*###\s*", section)
+        if block.strip()
+    ]
+    for block in markdown_blocks:
+        matches = list(label_re.finditer(block))
+        if not matches:
+            continue
+        fields = {}
+        header = clean_value(block[:matches[0].start()])
+        if header:
+            fields["时间"] = header
+        for pos, match in enumerate(matches):
+            label = match.group(1)
+            if label == "字幕":
+                continue
+            end = matches[pos + 1].start() if pos + 1 < len(matches) else len(block)
+            field_value = clean_value(block[match.end():end])
+            if field_value:
+                fields[label] = field_value
+        append_shot(fields)
+    if shot_lines:
+        return "\n".join(shot_lines)
+
+    for line in section.splitlines():
+        stripped = line.strip().lstrip("-*• ")
+        if not stripped or "=" not in stripped:
+            continue
+        fields = {}
+        for item in re.split(r"[；;]", stripped):
+            if "=" not in item:
+                continue
+            key, field_value = item.split("=", 1)
+            fields[key.strip()] = clean_value(field_value)
+        append_shot(fields)
     return "\n".join(shot_lines)
 
 
@@ -11081,6 +12791,9 @@ def _comic_reference_safe_visual_text(text, has_person_reference=False):
         return ""
     source_value = value
     value = value.replace("...(truncated)", "").replace("(truncated)", "").replace("**", "").strip()
+    value = _re.sub(r"(?:只)?(?:沿用|保留)原片(?:人物)?的?", "参考分镜拆解文本中的", value)
+    value = value.replace("原片站位", "分镜站位")
+    value = value.replace("原片动作", "分镜动作")
     value = _re.sub(r"(?:男|女|男性|女性)?(?:销售人员|销售员|销售顾问|销售|主播|门店主播|汽车销售)", "销售顾问", value)
     for term in (
             "男生", "女生", "男人", "女人", "男性", "女性", "男士", "女士",
@@ -11095,11 +12808,11 @@ def _comic_reference_safe_visual_text(text, has_person_reference=False):
             "销售顾问" in value
             and any(marker in source_value for marker in ("身穿", "穿着", "戴", "佩戴", "领带", "衬衫", "发"))
     ):
-        return "销售顾问动作和站位沿用原片，人物完整外观以上传角色参考图为准"
+        return "销售顾问参考分镜拆解文本中的动作和站位，人物完整外观以上传角色参考图为准"
     if value in ("带有", "身穿", "穿着", "打", "戴"):
         return ""
     if value in ("人物", "销售顾问"):
-        return "销售顾问动作和站位沿用原片，人物完整外观以上传角色参考图为准"
+        return "销售顾问参考分镜拆解文本中的动作和站位，人物完整外观以上传角色参考图为准"
     return value
 
 
@@ -11124,7 +12837,7 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
     binding_prompt = _comic_asset_binding_prompt(job)
     uploaded_motion_prompt = _comic_uploaded_asset_motion_prompt(text, job)
     if binding_prompt and uploaded_motion_prompt:
-        continuation = str(segment.get("continuationPrompt") or "").strip()
+        continuation = _comic_clean_visual_continuation_prompt(segment.get("continuationPrompt"))
         return _comic_clip_visual_prompt_text(
             "\n".join(
                 part for part in (binding_prompt, uploaded_motion_prompt, continuation) if part
@@ -11218,12 +12931,9 @@ def _comic_segment_script_line(segment, job=None):
     segment = segment if isinstance(segment, dict) else {}
     index = segment.get("index") or 1
     prompt = _comic_visual_prompt_text(segment, fallback="", job=job)
-    script = str(segment.get("script") or "").strip()
     parts = ["分镜 %s" % index]
     if prompt:
         parts.append("画面：%s" % prompt)
-    if script:
-        parts.append("对白：%s" % script)
     parts.extend([
         "景别：中景镜头",
         "角度：平视",
@@ -11356,12 +13066,63 @@ def _comic_project_manual_assets(job):
     }
 
 
+_COMIC_SEEDANCE_FRAME_IMAGE_MODEL = "gpt-image-2"
+_COMIC_SEEDANCE_COLORED_PENCIL_IMAGE_STYLE = (
+    "首尾帧图片风格要求：使用 gpt-image-2 将上传人物、产品、场景参考图和当前首尾帧统一处理为彩铅手绘风格；"
+    "保留人物身份、五官、发型、服装、体型、产品外形、颜色、包装文字和 Logo，画面只改变绘制质感。"
+)
+_COMIC_SEEDANCE_REALISTIC_VIDEO_STYLE = (
+    "最终视频风格要求：需要真人写实风格，人物、皮肤、服装、产品和场景保持真实拍摄质感，不要生成插画或手绘质感。"
+)
+
+
+def _comic_video_model(job):
+    job = job if isinstance(job, dict) else {}
+    return str(job.get("comicVideoModel") or job.get("model") or _COMIC_PROJECT_VIDEO_DEFAULT).strip()
+
+
+def _comic_model_is_seedance(model):
+    value = str(model or "").strip()
+    lower = value.lower()
+    compact = "".join(ch for ch in lower if ch.isalnum())
+    return bool(
+        "seedance" in lower
+        or value == "kwvideo-v2-quannengcankao"
+        or (
+            ("sd20" in compact or "seedance20" in compact)
+            and ("reference" in lower or "ref" in lower or "all" in lower or "quannengcankao" in lower)
+        )
+    )
+
+
+def _append_prompt_rule(prompt, rule):
+    prompt = str(prompt or "").strip()
+    rule = str(rule or "").strip()
+    if not rule or rule in prompt:
+        return prompt
+    return "\n".join(part for part in (prompt, rule) if part)
+
+
 def _comic_storyboard_video_payload(job, segment, force_regenerate=True):
     job = job if isinstance(job, dict) else {}
     segment = segment if isinstance(segment, dict) else {}
     audio_mode = "tts" if _replacement_audio_mode(job) == "tts" else "auto"
     prompt = _comic_visual_prompt_text(segment, job=job)
+    video_model = _comic_video_model(job)
+    if _comic_model_is_seedance(video_model):
+        prompt = _append_prompt_rule(prompt, _COMIC_SEEDANCE_REALISTIC_VIDEO_STYLE)
     script = str(segment.get("script") or "").strip()
+    hidden_colored_refs = []
+    for key in ("coloredPencilStartFrameUrl", "coloredPencilEndFrameUrl"):
+        value = str(segment.get(key) or "").strip()
+        if value:
+            hidden_colored_refs.append(value)
+    hidden_colored_refs.extend(
+        str(url or "").strip()
+        for url in (segment.get("coloredPencilReferenceImageUrls") or [])
+        if str(url or "").strip()
+    )
+    hidden_colored_refs = list(dict.fromkeys(hidden_colored_refs))
     refs = []
     for key in ("startFrameUrl", "endFrameUrl"):
         value = str(segment.get(key) or "").strip()
@@ -11372,13 +13133,13 @@ def _comic_storyboard_video_payload(job, segment, force_regenerate=True):
             value = str(segment.get(key) or "").strip()
             if value:
                 refs.append(value)
-    refs = list(dict.fromkeys(refs))
+    refs = hidden_colored_refs or list(dict.fromkeys(refs))
     target_duration = _comic_video_duration_slot(
         segment.get("videoDurationSec") or segment.get("speechDurationSec") or segment.get("duration")
     )
     payload = {
         "workflow_mode": "keyframes",
-        "video_model": str(job.get("comicVideoModel") or job.get("model") or "doubao-seedance-2-0-260128").strip(),
+        "video_model": video_model,
         "aspect_ratio": str(job.get("aspectRatio") or job.get("aspect_ratio") or "9:16").strip(),
         "force_regenerate": bool(force_regenerate),
         "auto_match_audio_duration": True,
@@ -11391,10 +13152,11 @@ def _comic_storyboard_video_payload(job, segment, force_regenerate=True):
         "prompt": prompt,
         "reference_image_urls": refs,
         "image_urls": refs,
-        "character_reference_images": [],
-        "scene_reference_images": [],
-        "prop_reference_images": [],
-        "subject_reference_images": [],
+        "character_reference_images": [] if hidden_colored_refs else _comic_typed_reference_urls(job)["characters"],
+        "scene_reference_images": [] if hidden_colored_refs else _comic_typed_reference_urls(job)["scenes"],
+        "prop_reference_images": [] if hidden_colored_refs else _comic_typed_reference_urls(job)["props"],
+        "subject_reference_images": hidden_colored_refs or _comic_typed_reference_urls(job)["all"],
+        "negative_prompt": "不要生成字幕、对白文字、台词文字、促销文字；不要复刻原视频人物外观、原视频产品、原视频道具或原视频场景。",
     }
     if audio_mode == "tts":
         payload["audio_prompt"] = {
@@ -11431,6 +13193,21 @@ def _comic_storyboard_image_payload(job, segment, force_regenerate=True):
     payload = _comic_storyboard_update_payload(
         job, segment, job.get("comicAssets"), include_audio=False
     )
+    if _comic_model_is_seedance(_comic_video_model(job)):
+        image_prompt = _append_prompt_rule(
+            _comic_visual_prompt_text(segment, job=job),
+            _COMIC_SEEDANCE_COLORED_PENCIL_IMAGE_STYLE,
+        )
+        payload.update({
+            "image_model": _COMIC_SEEDANCE_FRAME_IMAGE_MODEL,
+            "imageModel": _COMIC_SEEDANCE_FRAME_IMAGE_MODEL,
+            "frame_style_mode": "colored_pencil",
+            "frameStyleMode": "colored_pencil",
+            "prompt": image_prompt,
+            "description": image_prompt,
+            "video_prompt": image_prompt,
+            "keyframes_video_prompt": image_prompt,
+        })
     refs = []
     for key in ("flowchartUrl", "startFrameUrl", "endFrameUrl", "keyframeUrl"):
         value = str(segment.get(key) or "").strip()
@@ -11452,6 +13229,114 @@ def _comic_storyboard_image_payload(job, segment, force_regenerate=True):
     payload["subject_reference_images"] = typed_refs["all"]
     payload["force_regenerate"] = bool(force_regenerate)
     return strip_audio_fields(payload)
+
+
+def _prepare_comic_colored_pencil_references(job, segment):
+    job = job if isinstance(job, dict) else {}
+    segment = segment if isinstance(segment, dict) else {}
+    if not _comic_model_is_seedance(_comic_video_model(job)):
+        return segment
+    if segment.get("coloredPencilStartFrameUrl") and segment.get("coloredPencilEndFrameUrl"):
+        return segment
+
+    def source_items():
+        items = [
+            ("start", "coloredPencilStartFrameUrl", segment.get("startFrameUrl")),
+            ("end", "coloredPencilEndFrameUrl", segment.get("endFrameUrl")),
+        ]
+        refs = []
+        if job.get("modelFaceUrl"):
+            refs.append(("person", job.get("modelFaceUrl")))
+        refs.extend(("person", url) for url in (job.get("personReferenceUrls") or []))
+        if job.get("sceneImageUrl"):
+            refs.append(("scene", job.get("sceneImageUrl")))
+        refs.extend(("product", url) for url in (job.get("productImageUrls") or []))
+        seen = set()
+        for key, target_key, url in items:
+            url = str(url or "").strip()
+            if url:
+                yield key, target_key, url
+        for key, url in refs:
+            url = str(url or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            yield key, "", url
+
+    reference_urls = []
+    failures = []
+    prompt_base = _append_prompt_rule(
+        _comic_visual_prompt_text(segment, job=job),
+        _COMIC_SEEDANCE_COLORED_PENCIL_IMAGE_STYLE,
+    )
+    for kind, target_key, source_url in source_items():
+        try:
+            prompt = (
+                "%s\n将这张%s参考图转换为统一的彩铅手绘风格，只改变绘制质感；"
+                "严格保留主体身份、轮廓、颜色、文字、Logo、产品包装和构图，不添加字幕、水印或新物体。"
+                % (prompt_base, kind)
+            )
+            _image_bytes, public_url = _lk888_image_result_download(
+                prompt,
+                size=job.get("keyframeSize") or "1024x1792",
+                model=_COMIC_SEEDANCE_FRAME_IMAGE_MODEL,
+                image_urls=[source_url],
+            )
+            public_url = str(public_url or "").strip()
+            if not _is_remote_fetchable_media_url(public_url):
+                raise RuntimeError("colored pencil image url is not remote fetchable")
+            if target_key:
+                segment[target_key] = public_url
+            else:
+                reference_urls.append(public_url)
+        except Exception as exc:
+            failures.append({"kind": kind, "source": _comic_media_url_summary(source_url), "error": str(exc)[:180]})
+            json_log(
+                _CLIENT_JSON_LOGGER,
+                "video_replace_colored_pencil_reference_failed",
+                exc=exc,
+                code="video_replace_colored_pencil_reference_failed",
+                kind=kind,
+                source=_comic_media_url_summary(source_url),
+                segment_index=segment.get("index") or "",
+                model=_comic_video_model(job),
+            )
+    if reference_urls:
+        segment["coloredPencilReferenceImageUrls"] = list(dict.fromkeys(reference_urls))
+    if failures:
+        segment["coloredPencilWarnings"] = failures
+    if segment.get("coloredPencilStartFrameUrl") or segment.get("coloredPencilEndFrameUrl") or reference_urls:
+        segment["coloredPencilStatus"] = "partial" if failures else "ok"
+    else:
+        segment["coloredPencilStatus"] = "failed" if failures else "skipped"
+    missing_keyframes = [
+        name for name, key in (
+            ("首帧", "coloredPencilStartFrameUrl"),
+            ("尾帧", "coloredPencilEndFrameUrl"),
+        )
+        if not segment.get(key)
+    ]
+    if missing_keyframes:
+        segment["coloredPencilStatus"] = "failed"
+        message = (
+            "隐藏彩铅首尾帧生成失败：片段%s缺少%s彩铅图，已停止提交视频。"
+            "请重试该片段，或检查 LK888 的 gpt-image-2 图片生成是否成功。"
+            % (
+                (" %s " % segment.get("index")) if segment.get("index") else "",
+                "、".join(missing_keyframes),
+            )
+        )
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "video_replace_colored_pencil_keyframes_missing",
+            code="video_replace_colored_pencil_keyframes_missing",
+            segment_index=segment.get("index") or "",
+            model=_comic_video_model(job),
+            missing_keyframes=missing_keyframes,
+            warning_count=len(failures),
+        )
+        raise RuntimeError(message)
+    return segment
 
 
 def _comic_response_data(payload):
@@ -11520,6 +13405,16 @@ def _comic_seedance_safety_fallback_reason(error):
     return ""
 
 
+def _comic_project_video_model_candidates(job):
+    job = job if isinstance(job, dict) else {}
+    current = str(
+        job.get("comicVideoModel")
+        or job.get("model")
+        or _COMIC_PROJECT_VIDEO_DEFAULT
+    ).strip() or _COMIC_PROJECT_VIDEO_DEFAULT
+    return [current] if current else []
+
+
 def _comic_seedance_fallback_reason_label(reason):
     reason = str(reason or "").strip()
     if reason == "InputImageSensitiveContentDetected.PolicyViolation":
@@ -11532,19 +13427,6 @@ def _comic_seedance_fallback_reason_label(reason):
 
 
 def _comic_task_progress_message(payload, default_message):
-    metadata = _comic_task_fallback_metadata(payload)
-    fallback_reason = metadata.get("modelFallbackReason") or ""
-    if (
-        metadata.get("modelFallbackApplied")
-        and fallback_reason == "InputImageSensitiveContentDetected.PrivacyInformation"
-        and metadata.get("actualModel") == "kling-avatar-image2video"
-    ):
-        return "Seedance 拒绝真人参考图，已切换 Kling Avatar，正在生成视频"
-    if (
-        metadata.get("modelFallbackApplied")
-        and fallback_reason == "InputImageSensitiveContentDetected.PolicyViolation"
-    ):
-        return "Seedance 拒绝素材版权/品牌风险，已切换备用模型，正在生成视频"
     return str(default_message or "").strip()
 
 
@@ -11575,6 +13457,13 @@ def _comic_task_failure_message(payload):
             label,
             fallback_reason,
             fallback_error,
+        )
+    seedance_reason = _comic_seedance_safety_fallback_reason(error_message)
+    if seedance_reason:
+        label = _comic_seedance_fallback_reason_label(seedance_reason)
+        return "Seedance 生成失败：%s（%s）。请更换参考图、改选其他模型，或删除容易触发审核的真人/品牌/版权素材。" % (
+            label,
+            seedance_reason,
         )
     return error_message or "漫剧任务生成失败"
 
@@ -11716,7 +13605,7 @@ def _comic_storyboard_update_payload(job, segment, assets=None, include_audio=Tr
     payload.update({
         "title": "片段%s" % ((segment or {}).get("index") or 1),
         "description": prompt,
-        "camera_movement": prompt,
+        "camera_movement": "静态镜头",
         "dialogue": script,
         "characters": [item.get("id") for item in (assets.get("characters") or []) if item.get("id")],
         "character_ids": [item.get("id") for item in (assets.get("characters") or []) if item.get("id")],
@@ -11839,10 +13728,32 @@ def _comic_storyboard_frame_urls(storyboard):
     return tuple((normalized + ["", ""])[:2])
 
 
+def _comic_url_path_suffix(value):
+    path = urlparse(str(value or "")).path.lower()
+    return os.path.splitext(path)[1]
+
+
+def _comic_url_looks_like_image(value):
+    return _comic_url_path_suffix(value) in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+
+def _comic_url_looks_like_video(value):
+    return _comic_url_path_suffix(value) in {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
+
+
 def _comic_storyboard_media_url(storyboard, media_kind):
     storyboard = storyboard if isinstance(storyboard, dict) else {}
     if media_kind == "video":
-        keys = ("videoUrl", "video_url", "comicVideoUrl", "resultUrl", "result_url", "url")
+        strong_keys = ("videoUrl", "video_url", "comicVideoUrl", "resultVideoUrl", "result_video_url")
+        for key in strong_keys:
+            value = str(storyboard.get(key) or "").strip()
+            if value and not _comic_url_looks_like_image(value):
+                return value
+        for key in ("resultUrl", "result_url", "url"):
+            value = str(storyboard.get(key) or "").strip()
+            if value and _comic_url_looks_like_video(value):
+                return value
+        return ""
     else:
         keys = (
             "flowchartUrl", "flowchart_url", "imageUrl", "image_url",
@@ -12472,7 +14383,12 @@ class VideoReplacementPage(BasePage):
         self.b_open_output.setObjectName("ghost")
         self.b_open_output.clicked.connect(self.open_output)
         self.b_open_output.setEnabled(False)
+        self.b_retry_transcript = QtWidgets.QPushButton("重试口播")
+        self.b_retry_transcript.setObjectName("ghost")
+        self.b_retry_transcript.clicked.connect(self.retry_source_transcription)
+        self.b_retry_transcript.setEnabled(False)
         src_row.addWidget(self.b_open_output)
+        src_row.addWidget(self.b_retry_transcript)
         self.v.addLayout(src_row)
 
         refs = QtWidgets.QFrame()
@@ -12786,6 +14702,38 @@ class VideoReplacementPage(BasePage):
 
     def _on(self, tag, d):
         d = d or {}
+        if tag == "video_replace_transcription_retry_progress" and d.get("jobId") == getattr(self, "_transcript_retry_job", ""):
+            msg = str(d.get("message") or "正在重试口播识别…")
+            self.status.setText(msg)
+            self._set_generation_feedback(True, msg)
+            return
+        if tag == "video_replace_transcription_retry_done" and d.get("jobId") == getattr(self, "_transcript_retry_job", ""):
+            self._busy = False
+            analysis = d.get("analysis") or {}
+            self._source["breakdownAnalysis"] = analysis
+            if isinstance(getattr(self, "_job", None), dict) and self._job.get("id"):
+                self._job["breakdownAnalysis"] = analysis
+                try:
+                    _save_replacement_job(self._job)
+                except Exception as exc:
+                    json_log(
+                        _CLIENT_JSON_LOGGER,
+                        "video_replace_transcription_retry_save_failed",
+                        exc=exc,
+                        code="video_replace_transcription_retry_save_failed",
+                        job_id=self._job.get("id"),
+                    )
+            issue = _replacement_transcription_issue_text(analysis)
+            if issue:
+                self.status.setText(issue)
+            else:
+                self.status.setText("口播识别重试完成，可以重新生成替换方案。")
+            failed_ranges = _replacement_transcription_retry_ranges(analysis)
+            self.b_retry_transcript.setEnabled(bool(failed_ranges))
+            self.b_plan.setEnabled(True)
+            self._set_generation_feedback(False)
+            self.refresh_segments()
+            return
         if tag == "video_replace_comic_frame_download":
             key = str(d.get("key") or "")
             if key:
@@ -12910,7 +14858,10 @@ class VideoReplacementPage(BasePage):
             self._source.get("sourceVideoPath") or "",
             meta.get("duration") or "-",
         ))
-        self.status.setText("已载入分解结果，请上传主角人物图；产品图/场景图可选，上传后会强制替换对应槽位。")
+        issue = _replacement_transcription_issue_text(analysis)
+        self.status.setText(
+            issue or "已载入分解结果，请上传主角人物图；产品图/场景图可选，上传后会强制替换对应槽位。"
+        )
         self.prompt_view.setPlainText("")
         self._job = {}
         self._target_candidates = []
@@ -12924,10 +14875,86 @@ class VideoReplacementPage(BasePage):
         self.b_open_output.setEnabled(False)
         self.b_pending.setEnabled(False)
         self.b_retry_failed.setEnabled(False)
+        self.b_retry_transcript.setEnabled(bool(_replacement_transcription_retry_ranges(analysis)))
         self.b_start.setEnabled(False)
         self.b_review.setEnabled(False)
         self._set_generation_feedback(False)
         self._sync_audio_controls()
+
+    def retry_source_transcription(self):
+        if self._busy:
+            self.status.setText("当前任务尚未完成，请稍后再重试口播识别。")
+            return
+        analysis = dict((self._source or {}).get("breakdownAnalysis") or {})
+        previous = dict(analysis.get("transcript") or {})
+        failed_ranges = _replacement_transcription_retry_ranges(analysis)
+        source_path = str((self._source or {}).get("sourceVideoPath") or analysis.get("videoPath") or "").strip()
+        if not failed_ranges:
+            self.status.setText("没有可重试的口播识别失败时间段。")
+            self.b_retry_transcript.setEnabled(False)
+            return
+        if not (source_path and os.path.isfile(source_path)):
+            self.status.setText("重试口播失败：源视频文件不存在。")
+            return
+        job_id = uuid.uuid4().hex
+        self._transcript_retry_job = job_id
+        self._busy = True
+        self.b_retry_transcript.setEnabled(False)
+        self.b_plan.setEnabled(False)
+        self._set_generation_feedback(True, "正在重试口播识别…")
+
+        def progress(msg, job=job_id):
+            BRIDGE.payload.emit("video_replace_transcription_retry_progress", {
+                "jobId": job,
+                "message": msg,
+            })
+
+        def work(job=job_id, source=source_path, prior=previous, out=analysis):
+            tmp = os.path.join(data_dir(), "video_replacements", "transcript-retry-" + job)
+            try:
+                os.makedirs(tmp, exist_ok=True)
+                write_video_breakdown_job_owner(tmp)
+
+                def transcription_progress(index, total, start, end, state):
+                    progress("重试口播 %d/%d（%.0f-%.0fs，%s）" % (
+                        index + 1, total, start, end, state
+                    ))
+
+                retried = _transcribe_breakdown_audio(
+                    source,
+                    out_dir=os.path.join(tmp, "audio"),
+                    only_ranges=failed_ranges,
+                    progress=transcription_progress,
+                )
+                out["transcript"] = _merge_transcription_retry(prior, retried)
+                report, message = _generate_video_breakdown_report(out)
+                out["report"] = report
+                BRIDGE.payload.emit("video_replace_transcription_retry_done", {
+                    "jobId": job,
+                    "analysis": out,
+                    "message": message,
+                })
+            except Exception as exc:
+                raw = json_log(
+                    _CLIENT_JSON_LOGGER,
+                    "video_replace_transcription_retry_failed",
+                    exc=exc,
+                    code="video_replace_transcription_retry_failed",
+                    source_video=source,
+                    failed_ranges=failed_ranges,
+                )
+                import json as _json
+                error_id = (_json.loads(raw) or {}).get("errorId")
+                out["transcript"] = prior
+                BRIDGE.payload.emit("video_replace_transcription_retry_done", {
+                    "jobId": job,
+                    "analysis": out,
+                    "message": "重试口播失败（错误编号 %s）" % (error_id or "-"),
+                })
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        run_bg(work)
 
     def pick_products(self):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -13104,7 +15131,8 @@ class VideoReplacementPage(BasePage):
         def work():
             try:
                 prompt = "original virtual e-commerce presenter, friendly young adult, clean studio portrait, no real person likeness"
-                url = lk888_image_url(prompt, size="1024x1024")
+                _image_bytes, url = _lk888_image_result_download(
+                    prompt, size="1024x1024")
                 BRIDGE.payload.emit("video_replace_virtual", {"ok": True, "url": url})
             except Exception as exc:
                 BRIDGE.payload.emit("video_replace_virtual", {"ok": False, "error": str(exc)[:160]})
@@ -13585,9 +15613,8 @@ class VideoReplacementPage(BasePage):
                 _mark_replacement_job_canceled(job)
                 return
             storyboard_id = seg.get("comicStoryboardId")
-            frame_charge_refs = []
+            frame_billings = []
             video_billing = {}
-            video_generation_completed = False
             try:
                 if not storyboard_id:
                     raise RuntimeError("comic_storyboard_id_missing:segment_%s" % (seg.get("index") or "?"))
@@ -13626,13 +15653,10 @@ class VideoReplacementPage(BasePage):
                 recovered_frame_urls = []
                 recovered_image_payload = {}
                 try:
-                    frame_charge_refs = _comic_keyframe_charge_refs(job, seg, 2)
                     image_task = adapter.submit_storyboard_image(int(storyboard_id), job, seg)
                     image_task_ids = _comic_extract_task_ids(image_task)
                 except Exception as submit_exc:
                     if not _comic_generation_submit_can_recover(submit_exc):
-                        _refund_comic_keyframe_charges(frame_charge_refs)
-                        frame_charge_refs = []
                         raise
                     recovered = _comic_recover_storyboard_media(
                         adapter, project_id, storyboard_id, "image", submit_exc
@@ -13656,14 +15680,21 @@ class VideoReplacementPage(BasePage):
                         "片段 %s/%s：远程已接收，正在回查首尾帧任务…" % (seg.get("index"), total),
                     )
                 if not image_task_ids and not recovered_frame_urls:
-                    _refund_comic_keyframe_charges(frame_charge_refs)
-                    frame_charge_refs = []
                     raise RuntimeError("comic_image_task_id_missing:storyboard_%s" % storyboard_id)
                 seg["startFrameTaskId"] = image_task_ids[0] if image_task_ids else ""
                 seg["endFrameTaskId"] = image_task_ids[1] if len(image_task_ids) > 1 else ""
                 seg["flowchartTaskId"] = seg["startFrameTaskId"]
                 frame_urls = list(recovered_frame_urls[:2])
                 frame_payloads = [recovered_image_payload] if recovered_image_payload else []
+                if recovered_image_payload:
+                    recovered_task_id = (
+                        (image_task_ids or [""])[0]
+                        or _comic_extract_task_id(recovered_image_payload)
+                    )
+                    frame_billings.append(_settle_comic_keyframe_actual_billing(
+                        job, seg, recovered_image_payload, frame_index=1,
+                        task_id=recovered_task_id,
+                    ))
                 for frame_index, image_task_id in enumerate(image_task_ids[:2]):
                     if frame_index < len(frame_urls) and frame_urls[frame_index]:
                         continue
@@ -13678,6 +15709,10 @@ class VideoReplacementPage(BasePage):
                         frame_urls.append("")
                     frame_urls[frame_index] = _comic_absolute_media_url(frame_url)
                     frame_payloads.append(frame_payload)
+                    frame_billings.append(_settle_comic_keyframe_actual_billing(
+                        job, seg, frame_payload, frame_index=frame_index + 1,
+                        task_id=image_task_id,
+                    ))
                 if len(frame_urls) < 2 or not frame_urls[1]:
                     remote_storyboard = _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
                     remote_frame_urls = _comic_storyboard_frame_urls(remote_storyboard)
@@ -13687,12 +15722,6 @@ class VideoReplacementPage(BasePage):
                                 frame_urls.append("")
                             frame_urls[frame_index] = frame_url
                 frame_urls = (frame_urls + ["", ""])[:2]
-                if frame_charge_refs:
-                    missing_frame_refs = [
-                        ref for frame_url, ref in zip(frame_urls, frame_charge_refs)
-                        if not frame_url
-                    ]
-                    _refund_comic_keyframe_charges(missing_frame_refs)
                 seg["startFrameUrl"] = frame_urls[0]
                 seg["endFrameUrl"] = frame_urls[1]
                 seg["flowchartUrl"] = frame_urls[0]
@@ -13700,54 +15729,87 @@ class VideoReplacementPage(BasePage):
                 seg["comicFrameResults"] = [
                     _comic_response_data(payload) for payload in frame_payloads
                 ]
+                seg["comicFrameBillings"] = list(frame_billings)
                 _comic_download_frame_image(job, seg, "start", seg.get("startFrameUrl"), adapter)
                 _comic_download_frame_image(job, seg, "end", seg.get("endFrameUrl"), adapter)
+                if _comic_model_is_seedance(_comic_video_model(job)):
+                    emit_progress(
+                        seg,
+                        "comic_colored_pencil_refs",
+                        "片段 %s/%s：生成隐藏彩铅参考图…" % (seg.get("index"), total),
+                    )
+                    _prepare_comic_colored_pencil_references(job, seg)
                 _save_replacement_job(job)
-                frame_charge_refs = []
                 seg["stage"] = "comic_generate_video"
                 emit_progress(seg, "comic_generate_video", "片段 %s/%s：生成视频…" % (seg.get("index"), total))
                 recovered_video_url = ""
                 recovered_video_payload = {}
-                try:
-                    video_billing = _charge_comic_video_attempt(adapter, job, seg)
-                    seg["comicVideoBilling"] = dict(video_billing)
-                    _save_replacement_job(job)
-                    video_task = adapter.submit_storyboard_video(int(storyboard_id), job, seg)
-                    video_task_id = _comic_extract_task_id(video_task)
-                except Exception as submit_exc:
-                    if not _comic_generation_submit_can_recover(submit_exc):
-                        raise
-                    recovered = _comic_recover_storyboard_media(
-                        adapter, project_id, storyboard_id, "video", submit_exc
-                    )
-                    video_task_id = recovered.get("task_id") or ""
-                    recovered_video_url = recovered.get("url") or ""
-                    recovered_video_payload = recovered.get("payload") or {}
-                    seg["comicRecoveryStatus"] = "recovered"
-                    seg["comicRecoveryReason"] = str(submit_exc)[:180]
-                    emit_progress(
-                        seg,
-                        "comic_generate_video",
-                        "片段 %s/%s：远程已接收，正在回查视频任务…" % (seg.get("index"), total),
-                    )
-                seg["comicVideoTaskId"] = video_task_id
-                if recovered_video_url:
-                    video_url, video_payload = recovered_video_url, recovered_video_payload
-                else:
-                    video_url, video_payload = adapter.wait_task_result(
-                        video_task_id,
-                        cancel_check=_replacement_cancel_check(job),
-                        progress=lambda _attempt, _payload, s=seg: emit_progress(
-                            s,
+                video_url = ""
+                video_payload = {}
+                video_models = _comic_project_video_model_candidates(job)
+                safety_fallback_active = False
+                last_video_exc = None
+                for video_model_index, video_model in enumerate(video_models):
+                    job["comicVideoModel"] = video_model
+                    job["model"] = video_model
+                    seg["model"] = video_model
+                    recovered_video_url = ""
+                    recovered_video_payload = {}
+                    video_billing = {}
+                    try:
+                        video_task = adapter.submit_storyboard_video(int(storyboard_id), job, seg)
+                        video_task_id = _comic_extract_task_id(video_task)
+                    except Exception as submit_exc:
+                        if not _comic_generation_submit_can_recover(submit_exc):
+                            raise
+                        recovered = _comic_recover_storyboard_media(
+                            adapter, project_id, storyboard_id, "video", submit_exc
+                        )
+                        video_task_id = recovered.get("task_id") or ""
+                        recovered_video_url = recovered.get("url") or ""
+                        recovered_video_payload = recovered.get("payload") or {}
+                        seg["comicRecoveryStatus"] = "recovered"
+                        seg["comicRecoveryReason"] = str(submit_exc)[:180]
+                        emit_progress(
+                            seg,
                             "comic_generate_video",
-                            _comic_task_progress_message(
-                                _payload,
-                                "片段 %s/%s：视频生成中…" % (s.get("index"), total),
-                            ),
-                        ),
-                        tries=int(job.get("tries") or 240),
-                        sleep_sec=5,
-                    )
+                            "片段 %s/%s：远程已接收，正在回查视频任务…" % (seg.get("index"), total),
+                        )
+                    seg["comicVideoTaskId"] = video_task_id
+                    try:
+                        if recovered_video_url:
+                            video_url, video_payload = recovered_video_url, recovered_video_payload
+                        else:
+                            video_url, video_payload = adapter.wait_task_result(
+                                video_task_id,
+                                cancel_check=_replacement_cancel_check(job),
+                                progress=lambda _attempt, _payload, s=seg: emit_progress(
+                                    s,
+                                    "comic_generate_video",
+                                    _comic_task_progress_message(
+                                        _payload,
+                                        "片段 %s/%s：视频生成中…" % (s.get("index"), total),
+                                    ),
+                                ),
+                                tries=int(job.get("tries") or 240),
+                                sleep_sec=5,
+                            )
+                        break
+                    except Exception as video_exc:
+                        last_video_exc = video_exc
+                        fallback_reason = _comic_seedance_safety_fallback_reason(video_exc)
+                        fallback_item = {
+                            "model": video_model,
+                            "taskId": video_task_id,
+                            "fallbackReason": fallback_reason,
+                            "error": str(video_exc)[:240],
+                        }
+                        seg.setdefault("comicVideoFallbacks", []).append(fallback_item)
+                        raise
+                else:
+                    if last_video_exc:
+                        raise last_video_exc
+                    raise RuntimeError("comic_video_task_id_missing:storyboard_%s" % storyboard_id)
                 fallback_metadata = _comic_task_fallback_metadata(video_payload)
                 requested_model = fallback_metadata.get("requestedModel") or str(job.get("model") or "").strip()
                 actual_model = fallback_metadata.get("actualModel") or requested_model
@@ -13758,7 +15820,8 @@ class VideoReplacementPage(BasePage):
                 video_url = _comic_absolute_media_url(video_url)
                 if not video_url:
                     raise RuntimeError("comic_video_url_missing")
-                video_generation_completed = True
+                video_billing = _settle_comic_video_actual_billing({}, job, seg, video_payload)
+                seg["comicVideoBilling"] = dict(video_billing)
                 seg["videoUrl"] = video_url
                 seg["comicVideoResult"] = _comic_response_data(video_payload)
                 seg["stage"] = "comic_download_video"
@@ -13767,12 +15830,6 @@ class VideoReplacementPage(BasePage):
                 _save_replacement_job(job)
                 emit_progress(seg, "done", "片段 %s/%s：视频完成" % (seg.get("index"), total))
             except Exception as exc:
-                if frame_charge_refs:
-                    _refund_comic_keyframe_charges(frame_charge_refs)
-                    frame_charge_refs = []
-                if video_billing and not video_generation_completed:
-                    _refund_comic_video_attempt(video_billing)
-                    video_billing = {}
                 if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
                     seg.update({"status": "cancel_requested", "stage": "cancel_requested",
                                 "stageLabel": "取消中", "etaSec": 0})
@@ -13789,7 +15846,7 @@ class VideoReplacementPage(BasePage):
                     "status": "failed",
                     "stage": "failed",
                     "stageLabel": _replacement_stage_label("failed"),
-                    "error": str(exc)[:240],
+                    "error": _comic_task_failure_message({"data": {"errorMessage": str(exc)}})[:240],
                     "errorId": error_id,
                     "qcStatus": "failed",
                 }
@@ -13861,7 +15918,7 @@ class VideoReplacementPage(BasePage):
             )
             return
         self._busy = True
-        self._set_generation_feedback(True, "正在合成并执行最终音频检查…")
+        self._set_generation_feedback(True, "正在合成视频…")
 
         def work():
             job = self._job
@@ -13872,11 +15929,12 @@ class VideoReplacementPage(BasePage):
                 asset = _save_replacement_to_assets(final_out, job)
                 if not asset:
                     raise RuntimeError("replacement_asset_save_failed")
+                job.pop("audioCheck", None)
                 job.update({
                     "status": "done",
                     "outputPath": asset.get("path") or final_out,
                     "assetId": asset.get("id") or "",
-                    "audioCheck": _replacement_audio_qc(asset.get("path") or final_out),
+                    "audioValidation": "disabled",
                     "reviewStatus": "approved",
                 })
                 cleanup = _cleanup_replacement_sensitive_materials(job)
@@ -13886,7 +15944,7 @@ class VideoReplacementPage(BasePage):
                 _save_replacement_job(job)
                 BRIDGE.payload.emit("video_replace_done", {
                     "jobId": job["id"], "message": "替换生成完成，已存入资产库", "job": job,
-                    "audioCheck": job["audioCheck"], "reviewStatus": "approved",
+                    "audioValidation": "disabled", "reviewStatus": "approved",
                     "sensitiveCleanup": cleanup, "temporaryCleanup": temporary_cleanup,
                 })
             except Exception as exc:
@@ -14109,10 +16167,14 @@ class VideoReplacementPage(BasePage):
         task_id = _comic_extract_task_id(submitted)
         if not task_id:
             raise RuntimeError("comic_frame_task_id_missing")
-        image_url, _payload = adapter.wait_task_result(
+        image_url, payload = adapter.wait_task_result(
             task_id,
             cancel_check=_replacement_cancel_check(job),
         )
+        frame_billing = _settle_comic_keyframe_actual_billing(
+            job, segment, payload, frame_index=frame_index, task_id=task_id
+        )
+        segment["%sFrameBilling" % kind] = dict(frame_billing)
         image_url = _comic_absolute_media_url(image_url)
         if not image_url:
             raise RuntimeError("comic_frame_url_missing")
@@ -14154,7 +16216,6 @@ class VideoReplacementPage(BasePage):
             new_video_url = ""
             download_started = False
             video_billing = {}
-            video_generation_completed = False
             pending_recovery = (
                 _comic_pending_video_recovery(segment)
                 if allow_pending_recovery and segment.get("status") == "download_failed"
@@ -14248,9 +16309,6 @@ class VideoReplacementPage(BasePage):
                     "comic_generate_video",
                     "片段 %s/%s：重新生成视频…" % (segment.get("index"), total),
                 )
-                video_billing = _charge_comic_video_attempt(adapter, job, segment)
-                segment["comicVideoBilling"] = dict(video_billing)
-                _save_replacement_job(job)
                 submitted = adapter.submit_storyboard_video(int(storyboard_id), job, segment)
                 new_task_id = _comic_extract_task_id(submitted)
                 if not new_task_id:
@@ -14272,7 +16330,10 @@ class VideoReplacementPage(BasePage):
                 new_video_url = _comic_absolute_media_url(new_video_url)
                 if not new_video_url:
                     raise RuntimeError("comic_video_url_missing")
-                video_generation_completed = True
+                video_billing = _settle_comic_video_actual_billing(
+                    {}, job, segment, video_payload
+                )
+                segment["comicVideoBilling"] = dict(video_billing)
                 pending_recovery = _comic_pending_video_recovery_metadata(
                     job, new_task_id, new_video_url, video_payload
                 )
@@ -14306,9 +16367,6 @@ class VideoReplacementPage(BasePage):
                     media_kind="video",
                 )
             except Exception as exc:
-                if video_billing and not video_generation_completed:
-                    _refund_comic_video_attempt(video_billing)
-                    video_billing = {}
                 if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
                     segment.update({
                         "status": "cancel_requested",
@@ -14605,7 +16663,7 @@ class VideoReplacementPage(BasePage):
         elif status == "partial":
             QtWidgets.QMessageBox.warning(self, "替换生成", message or "部分片段生成失败，可重试失败片段。")
         else:
-            QtWidgets.QMessageBox.warning(self, "替换生成", message or "替换生成失败，请查看错误编号。")
+            QtWidgets.QMessageBox.warning(self, "替换生成", message or "替换生成失败，请查看任务日志后重试。")
 
     @staticmethod
     def _set_comic_frame_pixmap(button, pixmap):
@@ -14704,7 +16762,7 @@ class VideoReplacementPage(BasePage):
                     segment_index=(segment or {}).get("index") or "",
                     frame_kind=kind,
                 )
-                self.status.setText("图片预览失败（错误编号 %s）" % (error_id or "-"))
+                self.status.setText("图片预览失败，请重试或查看日志。")
             return
         key = self._comic_frame_download_key(segment, kind)
         if (self._comic_frame_downloads.get(key) or {}).get("status") == "failed":
@@ -14743,7 +16801,7 @@ class VideoReplacementPage(BasePage):
         elif state.get("status") == "downloading":
             button.setText("正在获取图片")
         elif state.get("status") == "failed":
-            button.setText("获取失败\n错误编号 %s" % (state.get("errorId") or "-"))
+            button.setText("获取失败\n请重试")
         else:
             button.setText("未生成")
         button.setToolTip("")
@@ -15026,7 +17084,6 @@ def save_workflows():
 
 
 def reload_account_scoped_state():
-    load_workflows()
     load_pending()
     load_assets()
     load_brand()
@@ -15108,39 +17165,529 @@ def _should_fire(wf, now_hm, today, window_min=120):
     return 0 <= delta < window_min
 
 
-WF_ORCH_SYSTEM = """你是「云灵星图」的 AI 工作流编排助手。用户用自然语言描述一个短视频自动化需求,你要:
-1. 用简洁友好的中文回应(1-3句);关键参数(账号/频率/数量/关键词/平台)缺失时先追问,不要臆造账号名。
-2. 当需求足够清晰、能形成一条自动化流水线时,在回复最后附一个工作流 JSON,用 ```json 代码块包裹(整段只出现一次)。
-
-工作流 JSON 结构:
-{"name":"工作流名","desc":"一句话说明","steps":[{"cap":"能力","title":"步骤名","desc":"这一步在做什么","params":{"键":"值"}}],"schedule":{"enabled":true,"text":"每天10:00","perRun":1,"autoPublish":false,"publishAccountId":"","publishPlatform":"douyin"}}
-
-可用能力 cap 及其模型:
-- collect  平台采集:从抖音/小红书按关键词搜索并下载最热门视频(params: platform, keyword, topN, sort=hot);采集视频只能作为“采集参考视频”入资产库,不得直接发布
-- vision   视频理解:多模态模型把视频拆成详细分镜脚本(模型 gemini-3.1-pro-preview;注:用户要的千问3.7Max当前网关未提供,已用它替代)
-- text     文本生成:gpt-5.4-xhigh 写脚本/文案/标题
-- library  入资产库:把 vision/text 生成的 .txt 文本产物存进资产库“文本”分类;采集下载素材单独归入“采集参考视频”
-
-强制文本型工作流:禁止编排 image/video/tts/publish,禁止生成图片、视频、语音,禁止入发布队列或自动发布。凡需求包含“发布/发送/自动发布/入发布队列”,也只生成可阅读文本脚本/分镜并入资产库“文本”。信息不足只追问、不给 JSON。"""
+WF_ASSISTANT_SYSTEM = """你是「云灵星图」热点视频拆解助手。
+用户会用自然语言要求采集抖音/小红书热门视频、拆解拍摄方式、并生成可原创复刻的拍摄建议。
+你只做对话式回答或追问,不得输出工作流 JSON,不得引导用户进入自动化工作流页面,不得把采集到的原视频当成可发布素材。
+如果关键词、平台或数量不清楚,用一句话追问。"""
 
 
-def extract_workflow(reply):
-    """从 LLM 回复里抽出工作流 JSON。返回 (wf_dict 或 None, 用于展示的纯文本)。"""
-    import json as _json
+def _assistant_chinese_count(text):
     import re as _re
-    m = _re.search(r"```json\s*(\{[\s\S]*?\})\s*```", reply)
-    if not m:
-        m = _re.search(r"(\{[\s\S]*?\"steps\"[\s\S]*\})\s*$", reply)
-    if not m:
-        return None, reply
+    raw = str(text or "")
+    m = _re.search(r"(?:top|TOP|Top|前)\s*(\d{1,2})", raw)
+    if m:
+        return int(m.group(1))
+    m = _re.search(r"(\d{1,2})\s*[条个部]", raw)
+    if m:
+        return int(m.group(1))
+    zh = {
+        "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    }
+    m = _re.search(r"前\s*([一二两三四五六七八九十])", raw)
+    if m:
+        return zh.get(m.group(1), 3)
+    m = _re.search(r"([一二两三四五六七八九十])\s*[条个部]", raw)
+    if m:
+        return zh.get(m.group(1), 3)
+    return 3
+
+
+def _assistant_guess_collect_request(text):
+    import re as _re
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    markers = ("采集", "搜索", "找", "获取", "下载", "热门", "热点", "爆款", "拆解", "怎么拍", "如何拍")
+    if not any(x in raw for x in markers):
+        return None
+    platform = "xhs" if any(x in raw.lower() for x in ("小红书", "xhs", "xiaohongshu")) else "douyin"
+    topn = max(1, min(_assistant_chinese_count(raw), 10))
+    first_clause = _re.split(r"[，。,.!?！？；;]", raw, maxsplit=1)[0]
+    keyword = first_clause
+    keyword = _re.sub(r"^(请|帮我|麻烦你|我要|我想要|给我)", "", keyword)
+    keyword = _re.sub(r"(从)?(抖音|小红书|XHS|xhs|xiaohongshu)(上|里|平台)?", "", keyword)
+    keyword = _re.sub(r"(采集|搜索|找|获取|下载|抓取|分析|拆解)", "", keyword)
+    keyword = _re.sub(r"(最)?(热门|热点|热榜|爆款)", "", keyword)
+    keyword = _re.sub(r"(?:top|TOP|Top|前)\s*[\d一二两三四五六七八九十]+\s*[条个部名]?", "", keyword)
+    keyword = _re.sub(r"\d{1,2}\s*[条个部名]", "", keyword)
+    keyword = _re.sub(r"(短视频|视频素材|视频|素材|内容)", "", keyword)
+    keyword = _re.sub(r"^(关于|有关|的)+", "", keyword).strip(" 的　")
+    keyword = _re.sub(r"\s+", "", keyword)
+    if not keyword:
+        keyword = "热门视频"
+    return {"platform": platform, "keyword": keyword, "topN": topn, "sort": "hot"}
+
+
+def _assistant_read_text_file(path):
     try:
-        wf = _json.loads(m.group(1))
+        path = str(path or "")
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip()
     except Exception:
-        return None, reply
-    if not isinstance(wf, dict) or not wf.get("steps"):
-        return None, reply
-    display = reply[:m.start()].strip()
-    return wf, (display or "已按你的需求生成工作流 ✅")
+        return ""
+    return ""
+
+
+def _reference_breakdown_text_to_transcript_segments(text):
+    import re
+
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+
+    def clean_cell(value):
+        value = str(value or "")
+        value = re.sub(r"<[^>]+>", "", value)
+        value = re.sub(r"\*\*|__|`", "", value)
+        return value.strip()
+
+    def clean_script(value):
+        value = clean_cell(value)
+        value = re.sub(r"^\s*(?:台词/字幕|台词|字幕|口播稿?|旁白)\s*[:：]\s*", "", value)
+        value = value.strip(" \t\r\n\"'“”‘’")
+        value = re.sub(r"\s+", " ", value)
+        return value.strip()
+
+    def parse_duration(value, default=8.0):
+        value = clean_cell(value)
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|s|S)", value)
+        if match:
+            try:
+                return max(1.0, float(match.group(1)))
+            except (TypeError, ValueError):
+                return default
+        match = re.search(r"(\d+(?:\.\d+)?)\s*[-~至到]\s*(\d+(?:\.\d+)?)\s*(?:秒|s|S)?", value)
+        if match:
+            try:
+                start = float(match.group(1))
+                end = float(match.group(2))
+                return max(1.0, end - start)
+            except (TypeError, ValueError):
+                return default
+        return default
+
+    def parse_timestamp(value):
+        value = clean_cell(value)
+        if ":" not in value:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        try:
+            parts = [float(part) for part in value.split(":")]
+        except (TypeError, ValueError):
+            return None
+        if len(parts) == 2:
+            return parts[0] * 60.0 + parts[1]
+        if len(parts) == 3:
+            return parts[0] * 3600.0 + parts[1] * 60.0 + parts[2]
+        return None
+
+    timestamp_re = re.compile(
+        r"^\s*\[?\s*(?P<start>\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*"
+        r"(?:-|–|—|~|至|到)\s*"
+        r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*\]?\s*"
+        r"(?P<body>.+?)\s*$"
+    )
+    timestamp_segments = []
+    for line in raw.splitlines():
+        match = timestamp_re.match(line.strip())
+        if not match:
+            continue
+        start = parse_timestamp(match.group("start"))
+        end = parse_timestamp(match.group("end"))
+        script = clean_script(match.group("body"))
+        if start is None or end is None or end <= start or not script:
+            continue
+        timestamp_segments.append({
+            "startSec": round(max(0.0, start), 3),
+            "endSec": round(max(0.0, end), 3),
+            "text": script,
+        })
+    if timestamp_segments:
+        return timestamp_segments
+
+    def append_segment(items, cursor, duration, script):
+        script = clean_script(script)
+        if not script:
+            return cursor
+        duration = max(1.0, float(duration or 8.0))
+        end = round(cursor + duration, 3)
+        items.append({"start": round(cursor, 3), "end": end, "text": script})
+        return end
+
+    segments = []
+    cursor = 0.0
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", stripped):
+            continue
+        cells = [clean_cell(cell) for cell in stripped.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        first = clean_cell(cells[0])
+        if not re.search(r"(?:镜头|分镜)?\s*\d+", first):
+            continue
+        script = cells[2]
+        duration = parse_duration(" ".join(cells[3:]), 8.0)
+        cursor = append_segment(segments, cursor, duration, script)
+
+    if segments:
+        return segments
+
+    header_re = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?(?:镜头|分镜)\s*[\d一二三四五六七八九十]+[^\n]*")
+    matches = list(header_re.finditer(raw))
+    for index, match in enumerate(matches):
+        block_start = match.start()
+        block_end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        block = raw[block_start:block_end].strip()
+        header = match.group(0)
+        duration = parse_duration(header + "\n" + block, 8.0)
+        script_lines = []
+        for line in block.splitlines():
+            line = clean_cell(line)
+            m = re.match(r"^\s*(?:[-*]\s*)?(?:台词/字幕|台词|字幕|口播稿?|旁白)\s*[:：]\s*(.+)$", line)
+            if m:
+                script_lines.append(m.group(1))
+        cursor = append_segment(segments, cursor, duration, " ".join(script_lines))
+
+    if segments:
+        return segments
+
+    fallback = clean_script(raw)
+    if len(fallback) > 300:
+        fallback = fallback[:300].rstrip() + "..."
+    return [{"start": 0.0, "end": 8.0, "text": fallback}] if fallback else []
+
+
+def _reference_breakdown_to_replacement_payload(data):
+    data = data if isinstance(data, dict) else {}
+    path = str(data.get("path") or data.get("sourceVideoPath") or "").strip()
+    text = str(data.get("text") or data.get("markdown") or "").strip()
+    title = str(data.get("title") or data.get("name") or os.path.basename(path) or "采集参考视频").strip()
+    platform = str(data.get("platform") or "").strip()
+    source_url = str(data.get("sourceUrl") or data.get("source_url") or data.get("url") or "").strip()
+    analysis = data.get("breakdownAnalysis") if isinstance(data.get("breakdownAnalysis"), dict) else {}
+    analysis = dict(analysis)
+    meta = dict(analysis.get("meta") or {})
+    if path:
+        meta["path"] = path
+    if title:
+        meta["title"] = title
+    analysis["meta"] = meta
+    visual_parts = [str(analysis.get("visual") or "").strip()]
+    if title:
+        visual_parts.append("原视频标题:" + title)
+    if text:
+        visual_parts.append("拆解文本:\n" + text)
+    analysis["visual"] = "\n\n".join([x for x in visual_parts if x]).strip()
+    transcript = dict(analysis.get("transcript") or {})
+    if text:
+        if not transcript.get("text"):
+            transcript["status"] = transcript.get("status") or "from_breakdown_text"
+            transcript["text"] = text
+        if not transcript.get("segments"):
+            transcript["segments"] = _reference_breakdown_text_to_transcript_segments(text)
+        transcript.setdefault("failedRanges", [])
+    analysis["transcript"] = transcript
+    return {
+        "sourceVideoPath": path,
+        "sourceUrl": source_url,
+        "platform": platform,
+        "breakdownAnalysis": analysis,
+        "markdown": text,
+        "title": title,
+        "assetId": str(data.get("assetId") or ""),
+    }
+
+
+def _assistant_reference_replacement_payloads(ctx):
+    refs = ctx.get("referenceArtifacts") or []
+    texts = ctx.get("referenceTextArtifacts") or {}
+    analyses = ctx.get("referenceAnalyses") or {}
+    collected = ctx.get("collected") or []
+    platform = str(ctx.get("platform") or "").strip()
+    out = []
+    for idx, path in enumerate(refs):
+        item = collected[idx] if idx < len(collected) and isinstance(collected[idx], dict) else {}
+        title = (item.get("title") or item.get("desc") or os.path.basename(str(path or ""))).strip()
+        source_url = item.get("note_url") or item.get("work_url") or item.get("url") or ""
+        text = _assistant_read_text_file(texts.get(path))
+        structured = analyses.get(path) or analyses.get(str(path)) or {}
+        payload = _reference_breakdown_to_replacement_payload({
+            "path": path,
+            "text": text,
+            "title": title,
+            "platform": platform,
+            "sourceUrl": source_url,
+            "breakdownAnalysis": structured,
+        })
+        if payload.get("sourceVideoPath"):
+            out.append(payload)
+    return out
+
+
+def _assistant_reference_info_lines(item, platform="", path=""):
+    item = item if isinstance(item, dict) else {}
+
+    def first(keys):
+        for key in keys:
+            value = item.get(key)
+            if value is not None and str(value).strip():
+                return value
+        return ""
+
+    def platform_label(value):
+        value = str(value or "").strip().lower()
+        if value in ("xhs", "xiaohongshu", "小红书"):
+            return "小红书"
+        if value in ("douyin", "抖音"):
+            return "抖音"
+        return str(platform or item.get("platform") or "-").strip() or "-"
+
+    def author_text():
+        value = first(("author", "nickname", "nickName", "userName", "user_name", "user", "name"))
+        if isinstance(value, dict):
+            for key in ("nickname", "nickName", "name", "userName", "user_name", "author"):
+                nested = value.get(key)
+                if nested is not None and str(nested).strip():
+                    return str(nested).strip()
+            return "-"
+        return str(value).strip() if value is not None and str(value).strip() else "-"
+
+    def count_text(keys):
+        value = first(keys)
+        if value == "":
+            return "-"
+        try:
+            number = float(str(value).replace(",", "").strip())
+            if number.is_integer():
+                return str(int(number))
+            return ("%.1f" % number).rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(value).strip() or "-"
+
+    def duration_text():
+        value = first(("duration", "durationSec", "duration_sec", "videoDuration", "video_duration", "video_duration_sec"))
+        if value == "":
+            return "-"
+        try:
+            seconds = float(str(value).replace(",", "").strip())
+            if seconds > 10000:
+                seconds = seconds / 1000.0
+            if seconds <= 0:
+                return "-"
+            return (("%d" % seconds) if seconds.is_integer() else ("%.1f" % seconds).rstrip("0").rstrip(".")) + " 秒"
+        except (TypeError, ValueError):
+            return str(value).strip() or "-"
+
+    source_url = first(("note_url", "noteUrl", "work_url", "url", "link", "sourceUrl", "source_url"))
+    local_name = os.path.basename(str(path or "")).strip()
+    return [
+        "基础信息",
+        "平台：%s" % platform_label(platform or item.get("platform")),
+        "作者：%s" % author_text(),
+        "点赞：%s｜评论：%s｜收藏：%s｜分享：%s" % (
+            count_text(("digg_count", "diggCount", "like_count", "likeCount", "liked_count", "likedCount", "likes", "admire_count")),
+            count_text(("comment_count", "commentCount", "comments")),
+            count_text(("collect_count", "collectCount", "favorite_count", "favoriteCount", "fav_count", "favCount", "bookmark_count", "bookmarkCount", "saved_count", "savedCount", "collects", "favorites")),
+            count_text(("share_count", "shareCount", "shares")),
+        ),
+        "时长：%s" % duration_text(),
+        "链接：%s" % (str(source_url).strip() or "-"),
+        "本地参考视频：%s" % (local_name or "-"),
+    ]
+
+
+def _assistant_build_direct_breakdown_reply(ctx, collect_summary, library_summary):
+    refs = ctx.get("referenceArtifacts") or []
+    texts = ctx.get("referenceTextArtifacts") or {}
+    collected = ctx.get("collected") or []
+    topic = ctx.get("topic") or "热门视频"
+    platform = ctx.get("platform") or ""
+    lines = [
+        "采集结果",
+        str(collect_summary or "已完成采集").strip(),
+    ]
+    if library_summary:
+        lines.append(str(library_summary).strip())
+    if not refs:
+        lines.extend([
+            "",
+            "本次没有拿到可拆解的本地视频文件。",
+            "通常原因是本地执行器未启动、平台账号未登录、平台下载接口未返回 mp4,或该条内容受权限/风控限制。采集到的视频只有下载成文件后才能进入拆解模型。",
+        ])
+        return "\n".join(lines).strip()
+    for idx, path in enumerate(refs, 1):
+        item = collected[idx - 1] if idx - 1 < len(collected) and isinstance(collected[idx - 1], dict) else {}
+        title = (item.get("title") or item.get("desc") or os.path.basename(str(path or ""))).strip()
+        body = _assistant_read_text_file(texts.get(path))
+        lines.extend([
+            "",
+            "视频 %d：%s" % (idx, title or "未命名参考视频"),
+            *_assistant_reference_info_lines(item, platform=platform, path=path),
+            "拆解文本",
+            body or "这条视频暂未生成拆解文本。请确认视频理解模型可用,或稍后重试。",
+            "",
+            "如何拍出同等价值的视频",
+            "1. 保留它的内容结构:开场钩子、核心证据、场景演示、结尾行动引导。",
+            "2. 更换为你的原创素材:不要搬运原视频画面、台词和封面,用自己的车、人、门店、价格信息或产品证据重拍。",
+            "3. 复用它的节奏逻辑:前 3 秒给明确利益点,中段用 2-4 个镜头证明卖点,结尾给评论/私信/到店咨询动作。",
+            "下一步:点击“按这条改造生成”,进入同款替换上传你的产品/人物/场景素材,按这条参考视频的结构生成自己的视频。",
+        ])
+    return "\n".join(lines).strip()
+
+
+def _workflow_assistant_log(event, **kwargs):
+    try:
+        import json as _json
+        safe = {"surface": "workflow_assistant", "event": str(event or "")}
+        for k, v in kwargs.items():
+            if k.lower() in ("token", "cookie", "authorization", "apikey", "api_key"):
+                safe[k] = "[redacted]"
+            else:
+                safe[k] = str(v)[:240]
+        log(_json.dumps(safe, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _workflow_assistant_history_path():
+    return os.path.join(data_dir(), "workflow_assistant_history.json")
+
+
+def _workflow_assistant_history_trim(messages, max_rounds=100):
+    valid = []
+    for row in messages or []:
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role") or "").strip()
+        content = row.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        item = {"role": role, "content": content}
+        created_at = row.get("createdAt")
+        if isinstance(created_at, str) and created_at.strip():
+            item["createdAt"] = created_at.strip()
+        payloads = row.get("replacementPayloads")
+        if role == "assistant" and isinstance(payloads, list):
+            item["replacementPayloads"] = payloads
+        valid.append(item)
+    try:
+        rounds = max(1, int(max_rounds or 100))
+    except (TypeError, ValueError):
+        rounds = 100
+    return valid[-rounds * 2:]
+
+
+def _load_workflow_assistant_history(path=None):
+    import json as _json
+
+    path = str(path or _workflow_assistant_history_path())
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = _json.load(fh)
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError("unsupported_history_version")
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("history_messages_not_list")
+        return _workflow_assistant_history_trim(messages)
+    except Exception as exc:
+        _workflow_assistant_log(
+            "history_load_failed",
+            path=os.path.basename(path),
+            errorId="wf-history-" + uuid.uuid4().hex[:10],
+            error=str(exc),
+        )
+        return []
+
+
+def _save_workflow_assistant_history(messages, path=None):
+    import json as _json
+    import tempfile
+
+    path = str(path or _workflow_assistant_history_path())
+    directory = os.path.dirname(path) or "."
+    temp_path = ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        payload = {
+            "version": 1,
+            "messages": _workflow_assistant_history_trim(messages),
+        }
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory,
+            prefix=".workflow_assistant_history-",
+            suffix=".tmp",
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            _json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+        return True
+    except Exception as exc:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        _workflow_assistant_log(
+            "history_save_failed",
+            path=os.path.basename(path),
+            errorId="wf-history-" + uuid.uuid4().hex[:10],
+            messageCount=len(messages or []) if isinstance(messages, list) else 0,
+            error=str(exc),
+        )
+        return False
+
+
+def run_workflow_assistant_request(text, emit=None, include_payloads=False):
+    params = _assistant_guess_collect_request(text)
+    if not params:
+        try:
+            reply = lk888_chat(
+                str(text or ""),
+                system=WF_ASSISTANT_SYSTEM,
+                model="gpt-5.4",
+                max_tokens=900,
+                temperature=0.5,
+            ).strip()
+            return {"reply": reply, "replacementPayloads": []} if include_payloads else reply
+        except Exception as e:
+            _workflow_assistant_log("chat_failed", error=str(e))
+            reply = "我现在没能完成理解。你可以直接说:从抖音采集热门前三的丰田汽车宣传视频,并拆解怎么拍。"
+            return {"reply": reply, "replacementPayloads": []} if include_payloads else reply
+    ctx = {"wfname": "热点视频拆解助手", "topic": params.get("keyword") or "", "platform": params.get("platform") or "",
+           "script": "", "media": [], "artifacts": []}
+    try:
+        if emit:
+            emit("正在搜索%s热门视频…" % ("小红书" if params.get("platform") == "xhs" else "抖音"))
+        collect_summary = _exec_collect({"cap": "collect", "params": params}, ctx)
+        refs = ctx.get("referenceArtifacts") or []
+        if refs and emit:
+            emit("已下载 %d 条参考视频,正在调用视频理解模型拆解…" % len(refs))
+        if refs:
+            _workflow_ensure_reference_text_artifacts(ctx, progress=emit)
+            if emit:
+                emit("正在把参考视频写入资产库“采集参考视频”…")
+            library_summary = _exec_library({"cap": "library", "params": {}}, ctx)
+        else:
+            library_summary = ""
+        reply = _assistant_build_direct_breakdown_reply(ctx, collect_summary, library_summary)
+        if include_payloads:
+            return {"reply": reply, "replacementPayloads": _assistant_reference_replacement_payloads(ctx)}
+        return reply
+    except Exception as e:
+        _workflow_assistant_log("direct_breakdown_failed", error=str(e), keyword=params.get("keyword", ""))
+        reply = "执行失败:%s\n已停止本次采集拆解。请确认本地客户端在线、对应平台账号已登录,然后重试。" % str(e)[:160]
+        return {"reply": reply, "replacementPayloads": []} if include_payloads else reply
 
 
 # ---------- 工作流真实执行引擎(每步真调对应模型/能力) ----------
@@ -15323,45 +17870,244 @@ def _workflow_normalize_reference_breakdown_text(text):
     return "\n\n".join(blocks)
 
 
-def _workflow_ensure_reference_text_artifacts(ctx):
+def _workflow_analyze_reference_video(video_path, item=None, topic="", out_dir=None, progress=None):
+    """Run the same evidence-backed analysis used by the video breakdown page."""
+    item = item if isinstance(item, dict) else {}
+    video_path = str(video_path or "").strip()
+    source_url = str(
+        item.get("note_url") or item.get("work_url") or item.get("url") or ""
+    ).strip()
+    platform = str(item.get("platform") or "").strip()
+    tmp_root = out_dir or os.path.join(data_dir(), "video_breakdowns", "workflow-" + uuid.uuid4().hex)
+    os.makedirs(tmp_root, exist_ok=True)
+    out = {
+        "platform": platform,
+        "sourceUrl": source_url,
+        "videoPath": video_path,
+    }
+
+    def notify(message):
+        if callable(progress):
+            progress(str(message or ""))
+
+    def diagnostic(message):
+        return {
+            "status": "failed",
+            "code": "workflow_reference_analysis_failed",
+            "text": "",
+            "segments": [],
+            "failedRanges": [],
+            "errors": [],
+            "message": str(message or "")[:240],
+        }
+
+    _workflow_assistant_log(
+        "reference_analysis_started",
+        video=os.path.basename(video_path),
+        topic=topic,
+    )
+    try:
+        notify("校验参考视频…")
+        validation = _breakdown_source_validation(video_path)
+        out["validation"] = validation
+        if not validation.get("ok"):
+            out["meta"] = validation
+            out["ocr"] = {
+                "status": "skipped",
+                "engine": "none",
+                "text": "",
+                "errors": [],
+                "message": "视频真实性校验未通过。",
+            }
+            out["transcript"] = diagnostic("视频真实性校验未通过。")
+            out["report"] = (
+                "## 分解失败\n"
+                "源视频未通过真实性校验，未把不可验证内容交给同款替换。\n\n"
+                "- code: %s" % (validation.get("code") or "media_invalid")
+            )
+            return {
+                "analysis": out,
+                "markdown": _video_breakdown_markdown(out),
+                "message": "参考视频分析失败（视频文件无效）",
+            }
+
+        meta = {
+            "duration": validation.get("duration") or 0,
+            "width": validation.get("width") or 0,
+            "height": validation.get("height") or 0,
+            "path": video_path,
+        }
+        out["meta"] = meta
+        notify("抽取整条视频关键帧…")
+        frames = _extract_breakdown_frames(video_path, os.path.join(tmp_root, "frames"), 16)
+        frame_notes = "\n".join(
+            "[%.2fs] %s" % (f.get("time") or 0, os.path.basename(f.get("path") or ""))
+            for f in frames
+        ) or "未抽取到关键帧"
+        out["frameNotes"] = frame_notes
+
+        notify("识别画面字幕…")
+        out["ocr"] = _ocr_breakdown_frames(frames)
+
+        notify("分片转写整条视频口播…")
+        out["transcript"] = _transcribe_breakdown_audio(
+            video_path,
+            out_dir=os.path.join(tmp_root, "audio"),
+            progress=lambda index, total, start, end, state: notify(
+                "音频转写 %d/%d（%.0f-%.0fs，%s）" % (
+                    index + 1, total, start, end, state
+                )
+            ),
+        )
+        out["transcript"].setdefault("retryCount", 0)
+
+        notify("调用视觉模型分析关键帧…")
+        frame_urls = [_image_data_url(f.get("path")) for f in frames[:16]]
+        frame_urls = [url for url in frame_urls if url]
+        if frame_urls:
+            try:
+                out["visual"] = lk888_vision(
+                    "请逐帧深度描述这些短视频关键帧，严格按时间顺序提取人物外观、构图、景别、"
+                    "动作、产品/道具、场景、字幕和镜头节奏；不要臆造关键帧中看不到的内容。",
+                    frame_urls,
+                    max_tokens=2200,
+                    billing_scenario="video_breakdown",
+                    billing_stage="visual_analysis",
+                    billing_detail="workflow assistant key frame visual analysis",
+                )
+            except Exception as exc:
+                raw = json_log(
+                    _CLIENT_JSON_LOGGER,
+                    "workflow_reference_vision_failed",
+                    exc=exc,
+                    code="workflow_reference_vision_failed",
+                    video_path=video_path,
+                )
+                import json as _json
+                error_id = (_json.loads(raw) or {}).get("errorId")
+                out["visual"] = (
+                    "视觉模型分析失败（errorId: %s）: %s\n%s"
+                    % (error_id or "-", str(exc)[:160], frame_notes)
+                )
+        else:
+            out["visual"] = "未抽取到可供视觉模型分析的关键帧。"
+
+        notify("生成完整拆解报告…")
+        report, message = _generate_video_breakdown_report(out)
+        out["report"] = report
+        markdown = _video_breakdown_markdown(out)
+        _workflow_assistant_log(
+            "reference_analysis_completed",
+            video=os.path.basename(video_path),
+            duration=meta.get("duration") or 0,
+            transcript_status=(out.get("transcript") or {}).get("status") or "",
+            transcript_segments=len((out.get("transcript") or {}).get("segments") or []),
+            transcript_failed_ranges=len((out.get("transcript") or {}).get("failedRanges") or []),
+            report_chars=len(report or ""),
+        )
+        return {"analysis": out, "markdown": markdown, "message": message or "分析完成"}
+    except Exception as exc:
+        raw = json_log(
+            _CLIENT_JSON_LOGGER,
+            "workflow_reference_analysis_failed",
+            exc=exc,
+            code="workflow_reference_analysis_failed",
+            video_path=video_path,
+        )
+        import json as _json
+        error_id = (_json.loads(raw) or {}).get("errorId")
+        out["meta"] = out.get("meta") or {}
+        out["ocr"] = out.get("ocr") or {
+            "status": "failed",
+            "engine": "none",
+            "text": "",
+            "errors": [],
+            "message": str(exc)[:160],
+        }
+        out["transcript"] = out.get("transcript") or diagnostic(str(exc))
+        out["report"] = "## 分解失败\nerrorId: %s\n\n%s" % (
+            error_id or "-", str(exc)[:500]
+        )
+        return {
+            "analysis": out,
+            "markdown": _video_breakdown_markdown(out),
+            "message": "参考视频分析失败（错误编号 %s）" % (error_id or "-"),
+        }
+    finally:
+        if out_dir is None:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def _workflow_save_reference_analysis_artifact(ctx, video_path, analysis):
+    if not isinstance(analysis, dict):
+        return ""
+    import json as _json
+    topic = ctx.get("topic") or ctx.get("wfname") or "采集参考视频"
+    base = "%s_%s_%s" % (
+        time.strftime("%Y%m%d_%H%M%S"),
+        _workflow_filename_part(topic),
+        _workflow_filename_part("采集参考拆解分析", "reference_analysis"),
+    )
+    path = os.path.join(_wf_out_dir(), base + ".json")
+    idx = 2
+    while os.path.exists(path):
+        path = os.path.join(_wf_out_dir(), "%s_%d.json" % (base, idx))
+        idx += 1
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            _json.dump(analysis, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+    except Exception as exc:
+        _workflow_assistant_log(
+            "reference_analysis_artifact_save_failed",
+            error=str(exc),
+            video=os.path.basename(str(video_path or "")),
+        )
+        return ""
+    ctx.setdefault("referenceAnalyses", {})[video_path] = analysis
+    ctx.setdefault("referenceAnalysisArtifacts", {})[video_path] = path
+    return path
+
+
+def _workflow_ensure_reference_text_artifacts(ctx, progress=None):
     refs = ctx.get("referenceArtifacts") or []
     if not refs:
         return {}
     out = ctx.setdefault("referenceTextArtifacts", {})
+    analyses = ctx.setdefault("referenceAnalyses", {})
+    analysis_paths = ctx.setdefault("referenceAnalysisArtifacts", {})
     collected = ctx.get("collected") or []
     topic = ctx.get("topic") or ctx.get("wfname") or "采集参考视频"
     for idx, path in enumerate(refs):
-        if out.get(path) and os.path.isfile(out.get(path)):
-            continue
         item = collected[idx] if idx < len(collected) and isinstance(collected[idx], dict) else {}
         title = (item.get("title") or item.get("desc") or os.path.basename(str(path or ""))).strip()
-        prompt = (
-            "把这个采集参考视频拆解成用户容易阅读和复用的中文分镜卡片。"
-            "禁止输出 Markdown 表格,禁止使用竖线表格。"
-            "每个镜头固定使用以下格式:\n"
-            "镜头 1｜镜头主题｜4秒\n"
-            "画面：一句话写清构图、动作和主体。\n"
-            "台词：只保留可直接复用的台词或字幕。\n"
-            "节奏：一句话描述节奏。\n"
-            "可借鉴点：一句话说明这个镜头为什么值得借鉴。\n\n"
-            "只输出拆解内容,不要解释。主题:%s。原视频标题:%s" % (topic, title[:120])
-        )
-        try:
-            text = lk888_vision(prompt, [path])
-            if _workflow_script_too_short(text):
-                raise RuntimeError("视频理解结果过短")
-        except Exception as e:
+        if (
+                out.get(path) and os.path.isfile(out.get(path))
+                and analysis_paths.get(path) and os.path.isfile(analysis_paths.get(path))
+        ):
             try:
-                tmp_ctx = dict(ctx)
-                tmp_ctx["collected"] = [item] if item else []
-                text = _workflow_generate_script(tmp_ctx, reason=str(e)[:120])
-            except Exception as inner:
-                try:
-                    log("workflow reference breakdown: %s" % inner)
-                except Exception:
-                    pass
-                continue
-        body = _workflow_normalize_reference_breakdown_text(text)
+                import json as _json
+                with open(analysis_paths[path], encoding="utf-8") as handle:
+                    analyses[path] = _json.load(handle)
+            except Exception:
+                pass
+            continue
+        if callable(progress):
+            progress("正在深度分析第 %d/%d 条参考视频：%s" % (
+                idx + 1, len(refs), title[:36]
+            ))
+        result = _workflow_analyze_reference_video(
+            path,
+            item=item,
+            topic=topic,
+            progress=progress,
+        )
+        analysis = result.get("analysis") if isinstance(result, dict) else {}
+        analyses[path] = analysis if isinstance(analysis, dict) else {}
+        _workflow_save_reference_analysis_artifact(ctx, path, analyses[path])
+        body = _workflow_normalize_reference_breakdown_text(
+            (result or {}).get("markdown") or (analyses[path] or {}).get("report") or ""
+        )
         if not body:
             continue
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -15586,11 +18332,37 @@ def _exec_tts(st, ctx):
     return _workflow_skip_media_summary("语音合成")
 
 
+def _workflow_add_reference_asset(path, *, prompt, source, category, thumbnail,
+                                  breakdown_path, analysis_path):
+    kwargs = {
+        "kind": _workflow_artifact_kind(path),
+        "prompt": prompt,
+        "source": source,
+        "category": category,
+        "thumbnail": thumbnail,
+        "preview": thumbnail,
+        "text_path": breakdown_path,
+        "breakdown_path": breakdown_path,
+    }
+    if analysis_path:
+        kwargs["analysis_path"] = analysis_path
+    try:
+        return add_asset(path, **kwargs)
+    except TypeError as exc:
+        # Keep older test doubles and packaged clients compatible while the
+        # structured sidecar field rolls out.
+        if "analysis_path" not in str(exc):
+            raise
+        kwargs.pop("analysis_path", None)
+        return add_asset(path, **kwargs)
+
+
 def _exec_library(st, ctx):
     """把本次工作流产出登记进资产库；采集下载素材单独归为参考素材，不作为可发布产物。"""
     arts = ctx.get("artifacts") or []
     refs = ctx.get("referenceArtifacts") or []
     reference_texts = _workflow_ensure_reference_text_artifacts(ctx) if refs else {}
+    reference_analysis_paths = ctx.get("referenceAnalysisArtifacts") or {}
     texts = ctx.get("textArtifacts") or ctx.get("scriptArtifacts") or []
     thumbs = ctx.get("referenceThumbnails") or {}
     label = ctx.get("topic") or ctx.get("wfname") or "工作流产物"
@@ -15617,10 +18389,16 @@ def _exec_library(st, ctx):
             continue
         try:
             breakdown = reference_texts.get(p) or ""
-            if add_asset(p, kind=_workflow_artifact_kind(p), prompt="采集参考视频 · " + label,
-                         source="采集参考视频", category="采集参考视频",
-                         thumbnail=thumbs.get(p) or "", preview=thumbs.get(p) or "",
-                         text_path=breakdown, breakdown_path=breakdown):
+            analysis_path = reference_analysis_paths.get(p) or ""
+            if _workflow_add_reference_asset(
+                    p,
+                    prompt="采集参考视频 · " + label,
+                    source="采集参考视频",
+                    category="采集参考视频",
+                    thumbnail=thumbs.get(p) or "",
+                    breakdown_path=breakdown,
+                    analysis_path=analysis_path,
+            ):
                 rn += 1
         except Exception:
             pass
@@ -15662,6 +18440,14 @@ def _publish_result_ok(res, dry=False):
     return bool(rr.get("published"))
 
 
+def _publish_error_text(err):
+    raw = str(err or "")
+    compact = raw.replace("_", "").replace(".", "").replace(" ", "").lower()
+    if "setinputfiles" in compact and "targetpage,contextorbrowserhasbeenclosed" in compact:
+        return "发布页面或浏览器已关闭，请重新点击发布，并在上传完成前不要关闭抖音发布窗口。"
+    return raw
+
+
 def _publish_result_message(res):
     rr = (res or {}).get("result") or {}
     rr_err = rr.get("error") if isinstance(rr, dict) else rr
@@ -15676,11 +18462,16 @@ def _publish_result_message(res):
         return "抖音要求安全验证，请在打开的浏览器中完成验证后重试。"
     if isinstance(rr, dict) and rr_err == "security_appeal_required":
         return "抖音要求账号安全处理，请在打开的浏览器中处理后重试。"
+    if isinstance(rr, dict) and rr_err == "douyin_single_video_required":
+        file_count = rr.get("fileCount")
+        suffix = "当前选中%s个文件。" % file_count if file_count else ""
+        return "抖音视频发布只支持单个视频文件，%s请选择一个单独的 .mp4/.mov 视频素材后再发布。" % suffix
     if isinstance(rr, dict) and rr_err == "xhs_creator_login_required":
         return "小红书创作者中心未登录，请在打开的浏览器中登录后重试。"
+    display_err = _publish_error_text(outer_err or rr_err or "(检查账号是否已登录/就绪)")
     if isinstance(rr, dict) and rr.get("filled") and not rr.get("published"):
-        return "真实发布未完成:" + str(outer_err or rr_err or "publish_unconfirmed")
-    return "发布失败:" + str(outer_err or rr_err or "(检查账号是否已登录/就绪)")
+        return "真实发布未完成:" + str(display_err or "publish_unconfirmed")
+    return "发布失败:" + str(display_err)
 
 
 def _exec_publish(st, ctx):
@@ -15804,14 +18595,15 @@ class ChatBubble(QtWidgets.QFrame):
 
 
 class AgentChatPage(BasePage):
-    """对话式工作流助手:跟总控 LLM(gpt-5.4)对话,自然语言描述需求即可生成自动化工作流。"""
+    """对话式热点视频拆解助手:用户提要求后直接采集并拆解参考视频。"""
 
     def __init__(self):
         super().__init__()
         acts = QtWidgets.QLabel("总控:gpt-5.4")
         acts.setObjectName("sub")
-        self.v.addWidget(make_header("工作流助手", "跟 AI 对话,描述需求即可自动编排一条视频生产 + 定时发布流水线", [acts]))
+        self.v.addWidget(make_header("工作流助手", "对话式热点视频拆解助手:直接采集并拆解参考视频,结果在当前页面显示", [acts]))
         self.history = []  # [{role, content}]
+        self._history_account_key_value = ""
         self.scroll = QtWidgets.QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -15824,10 +18616,9 @@ class AgentChatPage(BasePage):
         self.msgs.addStretch()
         self.scroll.setWidget(host)
         self.v.addWidget(self.scroll, 1)
-        self._bubble("你好!我是工作流助手\n\n把你想要的自动化告诉我,比如:\n「从抖音下载最热门的化妆品宣传视频,拆成详细脚本,裂变成多条视频素材存进素材库,每天定时发到我的抖音账号」\n\n我会自动帮你编排成一条可视化流水线。", "ai")
         row = QtWidgets.QHBoxLayout()
         self.inp = QtWidgets.QLineEdit()
-        self.inp.setPlaceholderText("描述你想要的自动化工作流…")
+        self.inp.setPlaceholderText("说出你要采集和拆解的热门视频…")
         self.inp.returnPressed.connect(self.send)
         self.btn = QtWidgets.QPushButton("发送")
         self.btn.setObjectName("primary")
@@ -15837,6 +18628,56 @@ class AgentChatPage(BasePage):
         row.addWidget(self.btn)
         self.v.addLayout(row)
         BRIDGE.payload.connect(self._on)
+        self._bubble(
+            "你好!我是热点视频拆解助手\n\n你可以直接说:\n"
+            "「从抖音上采集热门前三的丰田汽车宣传视频,告诉我这条视频是怎么拍摄的,"
+            "我该如何拍出同等价值的视频。」\n\n"
+            "我会在当前页面直接展示采集状态、视频拆解文本和原创拍摄建议。",
+            "ai",
+        )
+        self._restore_history()
+
+    def _history_account_key(self):
+        return os.path.abspath(_workflow_assistant_history_path())
+
+    def _persist_history(self):
+        _save_workflow_assistant_history(
+            self.history,
+            path=self._history_account_key(),
+        )
+
+    def _clear_message_widgets(self):
+        while self.msgs.count() > 1:
+            item = self.msgs.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _restore_history(self):
+        self._history_account_key_value = self._history_account_key()
+        self.history = _load_workflow_assistant_history(
+            path=self._history_account_key_value,
+        )
+        for row in self.history:
+            role = "user" if row.get("role") == "user" else "ai"
+            self._bubble(row.get("content") or "", role)
+            if role == "ai":
+                for payload in row.get("replacementPayloads") or []:
+                    self._replacement_card(payload)
+
+    def on_show(self):
+        account_key = self._history_account_key()
+        if account_key == getattr(self, "_history_account_key_value", ""):
+            return
+        self._clear_message_widgets()
+        self._bubble(
+            "你好!我是热点视频拆解助手\n\n你可以直接说:\n"
+            "「从抖音上采集热门前三的丰田汽车宣传视频,告诉我这条视频是怎么拍摄的,"
+            "我该如何拍出同等价值的视频。」\n\n"
+            "我会在当前页面直接展示采集状态、视频拆解文本和原创拍摄建议。",
+            "ai",
+        )
+        self._restore_history()
 
     def _bubble(self, text, role):
         b = ChatBubble(text, role)
@@ -15857,37 +18698,32 @@ class AgentChatPage(BasePage):
             self.scroll.verticalScrollBar().maximum()))
         return b
 
-    def _wf_card(self, wf):
+    def _replacement_card(self, payload):
+        payload = dict(payload or {})
+        if not payload.get("sourceVideoPath"):
+            return
         card = HoverCard("card", rest_blur=16, hover_blur=30, rest_dy=7, hover_dy=14, alpha=80)
         inner = QtWidgets.QVBoxLayout(card)
         inner.setContentsMargins(16, 13, 16, 14)
         inner.setSpacing(8)
-        top = QtWidgets.QHBoxLayout()
-        ic = QtWidgets.QLabel()
-        ic.setFixedSize(30, 30)
-        ic.setAlignment(QtCore.Qt.AlignCenter)
-        ic.setStyleSheet("background:%s;border-radius:8px;" % _rgba("#7c6dff", 0.18))
-        ic.setPixmap(_draw_icon("chart", 17, "#7c6dff"))
-        t = QtWidgets.QLabel("已生成工作流 · %s" % (wf.get("name") or "未命名"))
-        t.setStyleSheet("font-size:14px;font-weight:800;color:#ffffff;background:transparent;")
-        top.addWidget(ic)
-        top.addWidget(t, 1)
-        inner.addLayout(top)
-        d = QtWidgets.QLabel("%s  ·  共 %d 个环节" % (wf.get("desc") or "", len(wf.get("steps") or [])))
-        d.setStyleSheet("color:#8b93a3;font-size:12px;background:transparent;")
-        d.setWordWrap(True)
-        inner.addWidget(d)
-        chips = QtWidgets.QHBoxLayout()
-        chips.setSpacing(6)
-        for st in (wf.get("steps") or [])[:6]:
-            nm = WF_CAPS.get(st.get("cap"), (st.get("cap") or "步骤",))[0]
-            chips.addWidget(pill(nm))
-        chips.addStretch()
-        inner.addLayout(chips)
-        go = QtWidgets.QPushButton("在『自动化工作流』中查看整套流程  →")
+        title = QtWidgets.QLabel("参考视频 · " + (payload.get("title") or os.path.basename(payload.get("sourceVideoPath") or "")))
+        title.setStyleSheet("font-size:14px;font-weight:800;color:#ffffff;background:transparent;")
+        title.setWordWrap(True)
+        inner.addWidget(title)
+        desc = QtWidgets.QLabel("用这条热视频的镜头结构进入同款替换,上传你的产品/人物/场景后生成原创视频。")
+        desc.setStyleSheet("color:#8b93a3;font-size:12px;background:transparent;")
+        desc.setWordWrap(True)
+        inner.addWidget(desc)
+        go = QtWidgets.QPushButton("按这条改造生成")
         go.setObjectName("primary")
         go.setCursor(QtCore.Qt.PointingHandCursor)
-        go.clicked.connect(lambda: BRIDGE.payload.emit("goto_nav", "🔀 自动化工作流"))
+        go.setVisible(video_replacement_enabled())
+
+        def open_replacement():
+            BRIDGE.payload.emit("goto_nav", "🧬 同款替换")
+            BRIDGE.payload.emit("video_replace_start", dict(payload))
+
+        go.clicked.connect(open_replacement)
         inner.addWidget(go)
         holder = QtWidgets.QWidget()
         holder.setStyleSheet("background:transparent;")
@@ -15906,24 +18742,40 @@ class AgentChatPage(BasePage):
             return
         self.inp.clear()
         self._bubble(text, "user")
-        self.history.append({"role": "user", "content": text})
+        self.history.append({
+            "role": "user",
+            "content": text,
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+        self._persist_history()
         self.btn.setEnabled(False)
-        thinking = self._bubble("正在思考并编排…", "ai")
-        convo = self.history[-8:]
+        thinking = self._bubble("正在理解需求…", "ai")
 
         def work():
-            prompt = "\n".join(("用户:" if m["role"] == "user" else "助手:") + m["content"] for m in convo)
-            prompt += "\n\n请按系统指示回应;若可成流水线则在末尾附工作流 JSON。"
+            def emit_status(msg):
+                BRIDGE.payload.emit("workflow_assistant_status", {"text": msg})
             try:
-                reply = lk888_chat(prompt, system=WF_ORCH_SYSTEM, model="gpt-5.4", max_tokens=1500, temperature=0.6)
-                BRIDGE.payload.emit("wf_reply", {"ok": True, "reply": reply})
+                result = run_workflow_assistant_request(text, emit=emit_status, include_payloads=True)
+                if isinstance(result, dict):
+                    BRIDGE.payload.emit("workflow_assistant_reply", {
+                        "ok": True,
+                        "reply": result.get("reply") or "",
+                        "replacementPayloads": result.get("replacementPayloads") or [],
+                    })
+                else:
+                    BRIDGE.payload.emit("workflow_assistant_reply", {"ok": True, "reply": result})
             except Exception as e:
-                BRIDGE.payload.emit("wf_reply", {"ok": False, "error": str(e)[:160]})
+                BRIDGE.payload.emit("workflow_assistant_reply", {"ok": False, "error": str(e)[:160]})
         run_bg(work)
         self._thinking = thinking
 
     def _on(self, tag, d):
-        if tag != "wf_reply":
+        if tag == "workflow_assistant_status":
+            msg = str((d or {}).get("text") or "").strip()
+            if msg:
+                self._bubble(msg, "ai")
+            return
+        if tag != "workflow_assistant_reply":
             return
         self.btn.setEnabled(True)
         try:
@@ -15933,20 +18785,27 @@ class AgentChatPage(BasePage):
         except Exception:
             pass
         if not (d or {}).get("ok"):
-            self._bubble("出错了:" + str((d or {}).get("error") or ""), "ai")
+            error_text = "出错了:" + str((d or {}).get("error") or "")
+            self.history.append({
+                "role": "assistant",
+                "content": error_text,
+                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+            self._persist_history()
+            self._bubble(error_text, "ai")
             return
         reply = (d or {}).get("reply") or ""
-        wf, display = extract_workflow(reply)
-        self.history.append({"role": "assistant", "content": reply})
-        self._bubble(display, "ai")
-        if wf:
-            import time as _t
-            wf.setdefault("id", "wf-" + str(int(_t.time())))
-            wf.setdefault("enabled", False)
-            WORKFLOWS.insert(0, wf)
-            save_workflows()
-            self._wf_card(wf)
-            BRIDGE.payload.emit("wf_created", wf)
+        replacement_payloads = (d or {}).get("replacementPayloads") or []
+        self.history.append({
+            "role": "assistant",
+            "content": reply,
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "replacementPayloads": replacement_payloads,
+        })
+        self._persist_history()
+        self._bubble(reply, "ai")
+        for payload in replacement_payloads:
+            self._replacement_card(payload)
 
 
 class WorkflowPage(BasePage):
@@ -16185,13 +19044,15 @@ class WorkflowPage(BasePage):
         ap.setChecked(False)
         ap.setEnabled(False)
         applat = QtWidgets.QComboBox()
-        applat.addItems(["抖音", "小红书"])
-        applat.setCurrentIndex(1 if sched.get("publishPlatform") in ("xhs", "小红书", "xiaohongshu") else 0)
+        applat.addItem("抖音", "douyin")
+        if xhs_enabled():
+            applat.addItem(XHS_PLATFORM_LABEL, XHS_PLATFORM_CODE)
+        applat.setCurrentIndex(1 if xhs_enabled() and sched.get("publishPlatform") in ("xhs", "小红书", "xiaohongshu") else 0)
         apacc = QtWidgets.QComboBox()
         apacc.setMinimumWidth(240)
 
         def _fill_accounts():
-            platform = "xhs" if applat.currentIndex() == 1 else "douyin"
+            platform = applat.currentData() or "douyin"
             label = _publish_platform_label(platform)
             selected = str(sched.get("publishAccountId") or "")
             accounts = clean_accounts(getattr(self, "_all_accounts", []), platform=platform, ready_only=True)
@@ -16211,7 +19072,7 @@ class WorkflowPage(BasePage):
             sc2 = wf.setdefault("schedule", {})
             sc2["autoPublish"] = False
             sc2["publishAccountId"] = apacc.currentData() or ""
-            sc2["publishPlatform"] = "xhs" if applat.currentIndex() == 1 else "douyin"
+            sc2["publishPlatform"] = applat.currentData() or "douyin"
             for st in wf.get("steps") or []:
                 if (st.get("cap") or "") == "collect":
                     params = st.setdefault("params", {})
@@ -16704,7 +19565,7 @@ class PendingPublishPage(BasePage):
             hl.addWidget(b_del)
             self.table.setCellWidget(r, 5, cell)
         if not PENDING:
-            self.status.setText("队列为空。到『自动化工作流』运行一条流程,或等定时到点,产物会自动入队。")
+            self.status.setText("队列为空。到『工作流助手』拆解参考视频,再到『Agent.模式』生成可发布视频。")
 
     def confirm(self, entry):
         """人工确认发布:选账号 + 默认试发布(dry-run);正式发布需二次确认。Claude 从不代点。"""
@@ -16841,6 +19702,173 @@ def update_prodgen(pid, **kw):
     save_prodgen()
 
 
+def prodgen_video_pending_entry(entry):
+    source_id = str((entry or {}).get("id") or "").strip()
+    pending_id = str((entry or {}).get("pendingPublishId") or "").strip()
+    for item in PENDING:
+        if not isinstance(item, dict):
+            continue
+        if pending_id and item.get("id") == pending_id:
+            return item
+        if source_id and item.get("sourceProdgenId") == source_id:
+            return item
+    return None
+
+
+def prodgen_video_publish_material_id(entry):
+    entry = entry if isinstance(entry, dict) else {}
+    material_id = str(entry.get("publishMaterialId") or entry.get("materialId") or "").strip()
+    if material_id:
+        return material_id
+    pending = prodgen_video_pending_entry(entry)
+    if isinstance(pending, dict):
+        return str(pending.get("materialId") or pending.get("centralMaterialId") or "").strip()
+    return ""
+
+
+def add_prodgen_video_to_publish_library(entry):
+    entry = entry if isinstance(entry, dict) else {}
+    if entry.get("mode") != "video" or entry.get("status") != "完成":
+        return ""
+    files = [str(f or "") for f in (entry.get("files") or []) if os.path.isfile(str(f or ""))]
+    if not files:
+        return ""
+    existing = str(entry.get("publishMaterialId") or "").strip()
+    if existing:
+        return existing
+    caption = str(entry.get("visiblePrompt") or entry.get("prompt") or "Agent.模式生成视频").strip()
+    metadata = {
+        "source": "agent_mode",
+        "sourceProdgenId": str(entry.get("id") or ""),
+    }
+    code, result = upload_materials([files[0]], caption[:140] or "Agent.模式生成视频",
+                                    mtype="video", metadata=metadata)
+    result = result if isinstance(result, dict) else {}
+    ok = 200 <= int(code or 0) < 300 and bool(result.get("ok"))
+    material_id = str(
+        result.get("id")
+        or (result.get("material") or {}).get("id")
+        or result.get("materialId")
+        or ""
+    ).strip()
+    if not ok or not material_id:
+        raise RuntimeError("上传素材到素材发布失败:%s" % str(result.get("error") or code)[:120])
+    entry["publishMaterialId"] = material_id
+    save_prodgen()
+    return material_id
+
+
+def add_prodgen_video_to_pending(entry, material_id=""):
+    entry = entry if isinstance(entry, dict) else {}
+    if entry.get("mode") != "video" or entry.get("status") != "完成":
+        return None
+    files = [str(f or "") for f in (entry.get("files") or []) if os.path.isfile(str(f or ""))]
+    if not files:
+        return None
+    existing = prodgen_video_pending_entry(entry)
+    if existing:
+        if material_id:
+            existing["materialId"] = str(material_id)
+            existing["centralMaterialId"] = str(material_id)
+            save_pending()
+        entry["pendingPublishId"] = existing.get("id") or entry.get("pendingPublishId") or ""
+        save_prodgen()
+        return existing
+    caption = str(entry.get("visiblePrompt") or entry.get("prompt") or "Agent.模式生成视频").strip()
+    item = {
+        "id": "pp_%s" % uuid.uuid4().hex,
+        "wfName": "Agent.模式",
+        "video": files[0],
+        "audio": "",
+        "caption": caption[:140],
+        "account": "",
+        "platform": "douyin",
+        "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "待确认",
+        "source": "agent_mode",
+        "sourceProdgenId": str(entry.get("id") or ""),
+    }
+    if material_id:
+        item["materialId"] = str(material_id)
+        item["centralMaterialId"] = str(material_id)
+    add_pending(item)
+    entry["pendingPublishId"] = item["id"]
+    save_prodgen()
+    return item
+
+
+def _prodgen_user_error_text(error):
+    text = str(error or "").strip()
+    if not text:
+        return "生成失败，请稍后重试。"
+    parse_text = (
+        text.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
+    msg = ""
+    for key in ("详情", "detail", "message", "msg", "error", "reason"):
+        m = re.search(r"(?:^|[;；\s])%s\s*=\s*([^;；\r\n]+)" % key, parse_text, flags=re.I)
+        if m:
+            msg = m.group(1).strip()
+            break
+        m = re.search(
+            r'["“”]?\s*%s\s*["“”]?\s*[:：]\s*["“”]?([^,"“”}\r\n]+)' % key,
+            parse_text,
+            flags=re.I,
+        )
+        if m:
+            msg = m.group(1).strip()
+            break
+    if not msg:
+        m = re.search(r"未拿到任务ID\s*[:：]\s*(.+)$", parse_text, flags=re.I)
+        if m:
+            msg = m.group(1).strip()
+    if not msg and "生成失败:" in parse_text:
+        msg = parse_text.split("生成失败:", 1)[1].strip()
+    if not msg and "生成失败：" in parse_text:
+        msg = parse_text.split("生成失败：", 1)[1].strip()
+    if not msg:
+        msg = text
+    msg = (
+        str(msg or "")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .strip()
+    )
+    msg = re.sub(r"^.*?未拿到任务ID[：:]\s*", "", msg).strip()
+    msg = re.sub(r"(?:^|[;；\s])status\s*=\s*[^;；\r\n]+[;；]?\s*", "", msg, flags=re.I).strip()
+    msg = re.sub(r"(?:^|[;；\s])(?:message|msg|error|detail|reason)\s*=\s*", "", msg, flags=re.I).strip()
+    msg = re.sub(r"^.*?生成失败[：:]\s*", "", msg).strip()
+    msg = re.sub(r"^.*?生成超时(?:\([^)]*\))?[：:]\s*", "", msg).strip()
+    while True:
+        cleaned = re.sub(r"^(?:HTTP请求失败|请求失败)[：:]\s*", "", msg).strip()
+        if cleaned == msg:
+            break
+        msg = cleaned
+    msg = re.sub(r"错误编号\s*[-\w]+[：:;；]?\s*", "", msg).strip()
+    msg = re.sub(r"^[{（(]\s*", "", msg).strip()
+    msg = re.sub(r"\s*[}）)]\s*$", "", msg).strip()
+    msg = msg.strip(' \t\r\n"\'{},，;；')
+    msg = re.sub(r"（([^（）()]*)\)", r"（\1）", msg)
+    msg = re.sub(r"\(([^（）()]*)）", r"（\1）", msg)
+    msg = re.sub(r"参数\s*([A-Za-z_][\w.-]*)", r"参数 \1", msg).strip()
+    msg = re.sub(r"值\s*(false|true|null|-?\d+(?:\.\d+)?)\b", r"值 \1", msg, flags=re.I).strip()
+    lower = msg.lower()
+    if any(token in lower for token in ("timeout", "timed out", "read timed out", "connect timeout")):
+        return "网络连接超时，请稍后重试"
+    if any(token in lower for token in ("connection refused", "connection reset", "connection aborted", "connectionerror", "failed to establish")):
+        return "无法连接上游服务，请稍后重试"
+    if re.search(r"\bhttp\s*(5\d\d)\b", lower) or "internal server error" in lower or "bad gateway" in lower or "gateway time" in lower:
+        return "上游服务暂时异常，请稍后重试"
+    if not msg or msg.lower() in ("error", "failed", "fail", "status_unknown", "empty_status"):
+        return "生成失败，请稍后重试。"
+    return msg[:160]
+
+
 def remove_prodgen(pid):
     global PRODGEN
     PRODGEN = [x for x in PRODGEN if (x or {}).get("id") != pid]
@@ -16966,6 +19994,18 @@ def _central_library_image_to_data_url(value):
     return "data:%s;base64,%s" % (content_type, _b64.b64encode(content).decode("ascii"))
 
 
+def _prodgen_entry_ref_limit(entry):
+    entry = entry or {}
+    default_limit = ProductGenPage.MAX_REFS if "ProductGenPage" in globals() else 4
+    mode = str(entry.get("mode") or "").strip()
+    model = str(entry.get("model") or "").strip()
+    if mode == "video":
+        return max(0, min(default_limit, _agent_video_reference_limit(model)))
+    if mode == "image":
+        return max(0, min(default_limit, _agent_image_reference_limit(model)))
+    return default_limit
+
+
 def _prodgen_entry_refs(entry):
     """Return ordered Agent.模式 images."""
     entry = entry or {}
@@ -16973,13 +20013,78 @@ def _prodgen_entry_refs(entry):
     if not isinstance(refs, list):
         refs = []
     out = []
+    limit = _prodgen_entry_ref_limit(entry)
     for ref in refs + ([entry.get("ref")] if entry.get("ref") else []):
         ref = str(ref or "").strip()
         if ref and ref not in out and os.path.isfile(ref):
             out.append(ref)
-        if len(out) >= ProductGenPage.MAX_REFS:
+        if len(out) >= limit:
             break
     return out
+
+
+def _prodgen_upload_reference_urls(refs, title="", source="agent_reference", label="Agent参考图"):
+    """Upload Agent.模式 reference images so LK888 full-pipeline models can fetch them."""
+    urls = []
+    for idx, ref in enumerate(refs or [], 1):
+        ref = str(ref or "").strip()
+        if not ref:
+            continue
+        try:
+            url, _meta = upload_asset_url(
+                ref,
+                "%s%d-%s" % (label, idx, os.path.basename(ref)),
+                "image",
+                metadata={"source": source, "title": str(title or "")[:80]},
+            )
+        except Exception as exc:
+            raise RuntimeError("参考图上传失败:%s" % str(exc)[:140]) from exc
+        url = str(url or "").strip()
+        if not _is_remote_fetchable_media_url(url):
+            raise RuntimeError("参考图上传失败:未拿到远程模型可读取的图片URL")
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _prodgen_image_reference_urls(refs, title=""):
+    """Upload Agent.模式 image reference images so LK888 image models can fetch them."""
+    return _prodgen_upload_reference_urls(
+        refs,
+        title=title,
+        source="agent_image_reference",
+        label="Agent图片参考图",
+    )
+
+
+def _prodgen_video_reference_urls(refs, title=""):
+    """Upload Agent.模式 video reference images so LK888 video models can fetch them."""
+    return _prodgen_upload_reference_urls(
+        refs,
+        title=title,
+        source="agent_video_reference",
+        label="Agent视频参考图",
+    )
+
+
+def _prodgen_video_reference_url(path, title=""):
+    """Upload one Agent video reference as a public URL."""
+    path = str(path or "").strip()
+    if not path or not os.path.isfile(path):
+        raise RuntimeError("参考视频上传失败:文件不存在")
+    try:
+        url, _meta = upload_asset_url(
+            path,
+            "Agent视频参考-%s" % os.path.basename(path),
+            "video",
+            metadata={"source": "agent_video_reference", "title": str(title or "")[:80]},
+        )
+    except Exception as exc:
+        raise RuntimeError("参考视频上传失败:%s" % str(exc)[:140]) from exc
+    url = str(url or "").strip()
+    if not _is_remote_fetchable_media_url(url):
+        raise RuntimeError("参考视频上传失败:未拿到远程模型可读取的视频URL")
+    return url
 
 
 def _prodgen_refs_desc(refs, is_video=False):
@@ -17004,7 +20109,10 @@ def _prodgen_refs_desc(refs, is_video=False):
             )
         return lk888_vision(
             prompt,
-            [_file_to_data_url(ref) for ref in refs], max_tokens=420).strip()
+            [_file_to_data_url(ref) for ref in refs], max_tokens=420,
+            billing_scenario="agent_mode",
+            billing_stage="reference_analysis",
+            billing_detail="agent reference image understanding").strip()
     except Exception as e:
         log("prodgen vision: %s" % e)
         return ""
@@ -17016,9 +20124,7 @@ def _prodgen_ref_desc(ref):
 
 
 def _prodgen_expand_prompt(user_desc, style_hint="", ref_desc="", is_video=False, edit=False):
-    """① 让 LLM(gpt-5.4-xhigh)把用户中文描述扩写成专业英文出图/出片提示词(提示词工程)。
-    edit=True(有参考图·图生图):提示词强调保留原商品主体、只重构场景。
-    失败(余额/网络)时返回 "",上层回退到原描述+质量后缀,保证仍能出图。"""
+    """为已验证需要英文提示词的模型提供显式兼容转换；默认生成链路不调用。"""
     role = "商品短视频分镜" if is_video else "电商商品图"
     if edit and not is_video:
         sysmsg = ("你是顶尖电商图片编辑提示词工程师。用户提供了一张商品参考图,要在**保留该商品本体不变**"
@@ -17039,7 +20145,10 @@ def _prodgen_expand_prompt(user_desc, style_hint="", ref_desc="", is_video=False
         parts.append(bc.strip())
     try:
         out = lk888_chat("\n".join(parts) + "\n\n输出英文提示词:", system=sysmsg,
-                         model="gpt-5.4-xhigh", max_tokens=400, temperature=0.85)
+                         model="gpt-5.4-xhigh", max_tokens=400, temperature=0.85,
+                         billing_scenario="agent_mode",
+                         billing_stage="prompt_translation",
+                         billing_detail="model compatibility prompt translation")
         out = (out or "").strip().strip('"').strip()
         if out and len(out) >= 12:
             return out
@@ -17080,7 +20189,10 @@ def _prodgen_optimize_prompt(user_desc, style_hint="", ref_desc="", is_video=Fal
         parts.append("品牌资料：" + bc.strip())
     try:
         out = lk888_chat("\n".join(parts) + "\n\n输出中文优化提示词：", system=sysmsg,
-                         model="gpt-5.4-xhigh", max_tokens=520, temperature=0.72)
+                         model="gpt-5.4-xhigh", max_tokens=520, temperature=0.72,
+                         billing_scenario="agent_mode",
+                         billing_stage="prompt_optimization",
+                         billing_detail="agent prompt optimization")
         out = (out or "").strip().strip('"').strip()
         out = re.sub(r"^\s*(优化后提示词|提示词|中文提示词)\s*[:：]\s*", "", out).strip()
         if out and len(out) >= 12:
@@ -17094,31 +20206,36 @@ def _prodgen_visible_prompt(entry):
     return (entry.get("visiblePrompt") or entry.get("prompt") or "").strip()
 
 
+def _prodgen_direct_model_prompt(user_desc, style_hint="", ref_desc="", reference_mode=""):
+    parts = [str(user_desc or "").strip()]
+    if reference_mode == "image":
+        parts.append(
+            "参考图使用规则：第1张为待修改图，保持其商品主体、Logo、文字、颜色、材质和外形不变；"
+            "第2张起仅作为风格、人物、场景、材质或构图参考。")
+    elif reference_mode == "video":
+        parts.append("参考图使用规则：所有图片均为视频视觉参考，保持主体和场景特征一致。")
+    if ref_desc:
+        parts.append("参考图内容：" + str(ref_desc).strip())
+    if style_hint:
+        parts.append("风格方向：" + str(style_hint).strip())
+    return "\n".join(part for part in parts if part)
+
+
 def _prodgen_run_image(entry, emit=None):
     display_prompt = _prodgen_visible_prompt(entry) or "商品"
     prompt = display_prompt
     style_hint = (entry.get("style") or "").strip()
     refs = _prodgen_entry_refs(entry)
-    model = str(entry.get("model") or _LK888_IMAGE_DEFAULT).strip() or _LK888_IMAGE_DEFAULT
+    model = _agent_model_for_type(entry.get("model") or _LK888_IMAGE_DEFAULT, "image")
     model_label = _lk888_model_label(model)
     has_ref = bool(refs)
     if emit:
-        emit("phase", {"phaseText": ("gpt-5.4 正在思考(图生图·保留参考主体)…" if has_ref
-                                      else "gpt-5.4 正在思考、提炼英文提示词…")})
-    # ① LLM 扩写英文提示词;有参考图 → 走"保留主体、重构场景"口吻(图生图)
-    model_prompt = (entry.get("modelPrompt") or "").strip()
-    if not model_prompt:
-        model_prompt = _prodgen_expand_prompt(prompt, style_hint, "", is_video=False, edit=has_ref)
-    if not model_prompt:  # 回退
-        base = prompt + ((", " + style_hint) if style_hint else "")
-        if has_ref:
-            model_prompt = ("Use image 1 as the edit target and keep its editable subject structure coherent. "
-                            "Use images 2 and later only as references for requested style, character, scene, "
-                            "material, or composition. " + base + ". Professional e-commerce product photography, "
-                            "studio lighting, crisp focus, high detail, 8k.")
-        else:
-            model_prompt = base + (". Professional e-commerce product photography, studio lighting, clean seamless "
-                                   "background, crisp focus, high detail, commercial quality, 8k.")
+        emit("phase", {"phaseText": "正在准备图像生成参数…"})
+    model_prompt = _prodgen_direct_model_prompt(
+        prompt,
+        style_hint=style_hint,
+        reference_mode="image" if has_ref else "",
+    )
     try:
         update_prodgen(entry.get("id"), expandedPrompt=display_prompt[:700],
                        visiblePrompt=display_prompt, modelPrompt=model_prompt[:700],
@@ -17130,7 +20247,7 @@ def _prodgen_run_image(entry, emit=None):
         emit("phase", {"phaseText": ("%s 多图参考出图中(第1张为待修改图)…" % model_label if has_ref
                                      else "%s 正在出图…" % model_label)})
     # ② 图片模型出图:第1张为待修改图，第2张起为参考图；否则文生图。
-    image_urls = [_file_to_data_url(p) for p in refs] if has_ref else None
+    image_urls = _prodgen_image_reference_urls(refs, display_prompt) if has_ref else None
     size = entry.get("size") or "1024x1024"
     try:
         cnt = max(1, min(int(entry.get("count") or 1), 2))
@@ -17138,34 +20255,34 @@ def _prodgen_run_image(entry, emit=None):
         cnt = 1
     files = []
     for k in range(cnt):
-        b = lk888_image(model_prompt, size=size, model=model, image_urls=image_urls)
         p = os.path.join(data_dir(), "prodimg_%d_%d_%s.png" % (int(time.time()), k + 1, os.urandom(3).hex()))
-        with open(p, "wb") as f:
-            f.write(b)
+        payload = _agent_image_payload(model, model_prompt, size=size, image_urls=image_urls)
+        url = lk888_media_task(model, payload, ["png", "jpg", "jpeg", "webp"], tries=150)
+        _wf_download(url, p)
         files.append(p)
     return files
 
 
 def _prodgen_run_video(entry, emit=None):
     """商品视频:doubao-seedance 文生视频(产品运镜/场景,非数字人主播;约 1 分钟出片)。
-    有参考图时把它经 gemini 描述后并入提示词(视频端点不收 data-url,只能靠文字带参考)。"""
+    有参考图时保留视觉描述作为 prompt 辅助,并上传公网 URL 传给 LK888 视频模型。"""
     display_prompt = _prodgen_visible_prompt(entry) or "商品展示"
     prompt = display_prompt
     style_hint = (entry.get("style") or "").strip()
     refs = _prodgen_entry_refs(entry)
     has_ref = bool(refs)
     if emit:
-        emit("phase", {"phaseText": "gpt-5.4 正在编排商品视频画面…"})
+        emit("phase", {"phaseText": "正在准备视频生成参数…"})
     ref_desc = _prodgen_refs_desc(refs, is_video=True) if has_ref else ""
-    model_prompt = (entry.get("modelPrompt") or "").strip()
-    if not model_prompt:
-        model_prompt = _prodgen_expand_prompt(prompt, style_hint, ref_desc, is_video=True)
-    if not model_prompt:
-        model_prompt = (("参考商品:%s。" % ref_desc[:160]) if ref_desc else "") + prompt + \
-                       ((", " + style_hint) if style_hint else "") + \
-                       ", cinematic product video, slow camera motion, studio lighting, 4k"
-    dur = _agent_video_duration(entry.get("duration"))
-    model = str(entry.get("model") or _LK888_VIDEO_DEFAULT).strip() or _LK888_VIDEO_DEFAULT
+    model_prompt = _prodgen_direct_model_prompt(
+        prompt,
+        style_hint=style_hint,
+        ref_desc=ref_desc,
+        reference_mode="video" if has_ref else "",
+    )
+    model = _agent_model_for_type(entry.get("model") or _LK888_VIDEO_DEFAULT, "video")
+    media = _agent_video_media_requirements(model)
+    dur = _agent_video_request_duration(model, entry.get("duration"))
     model_label = _lk888_model_label(model)
     try:
         update_prodgen(entry.get("id"), expandedPrompt=display_prompt[:700],
@@ -17177,9 +20294,27 @@ def _prodgen_run_video(entry, emit=None):
         emit("thinking", {"expandedPrompt": display_prompt})
         emit("phase", {"phaseText": "%s 正在出片(约 1 分钟)…" % model_label})
     ar = entry.get("aspect_ratio") or "16:9"
+    reference_urls = []
+    if has_ref and media["image_limit"] > 0:
+        if emit:
+            emit("phase", {"phaseText": "正在上传参考图给视频模型…"})
+        reference_urls = _prodgen_video_reference_urls(
+            refs[:media["image_limit"]],
+            display_prompt,
+        )
+    reference_video_url = ""
+    if media["video_required"] and not str(entry.get("referenceVideo") or "").strip():
+        raise RuntimeError("需要上传参考视频")
+    if media["video_limit"] > 0 and str(entry.get("referenceVideo") or "").strip():
+        if emit:
+            emit("phase", {"phaseText": "正在上传参考视频给视频模型…"})
+        reference_video_url = _prodgen_video_reference_url(
+            entry.get("referenceVideo"), display_prompt)
+    payload = _agent_video_payload(
+        model, model_prompt, dur, ar, reference_urls, reference_video_url)
     url = lk888_media_task(
         model,
-        {"prompt": model_prompt[:600], "params": {"duration": dur, "resolution": "720p", "aspect_ratio": ar}},
+        payload,
         ["mp4", "mov"], tries=150)
     p = os.path.join(data_dir(), "prodvid_%d_%s.mp4" % (int(time.time()), os.urandom(3).hex()))
     _wf_download(url, p)
@@ -17230,7 +20365,7 @@ def save_assets():
 
 
 def add_asset(path, kind=None, prompt="", source="", category="", thumbnail="", preview="",
-              text_path="", breakdown_path=""):
+              text_path="", breakdown_path="", analysis_path=""):
     """把文件拷进资产库目录(稳定不被清理)并登记。返回 asset dict 或 None。"""
     if not (path and os.path.isfile(path)):
         return None
@@ -17277,6 +20412,17 @@ def add_asset(path, kind=None, prompt="", source="", category="", thumbnail="", 
             a["breakdownPath"] = text_dst
         except Exception as e:
             log("add asset text copy: %s" % e)
+    analysis_src = str(analysis_path or "").strip()
+    if analysis_src and os.path.isfile(analysis_src):
+        try:
+            analysis_name = "as_%d_analysis_%s" % (
+                int(time.time() * 1000), os.path.basename(analysis_src)
+            )
+            analysis_dst = os.path.join(_assets_dir(), analysis_name)
+            shutil.copyfile(analysis_src, analysis_dst)
+            a["breakdownAnalysisPath"] = analysis_dst
+        except Exception as e:
+            log("add asset analysis copy: %s" % e)
     ASSETS.insert(0, a)
     save_assets()
     return a
@@ -17292,6 +20438,14 @@ def remove_asset(aid, delete_file=True):
             os.remove(a["path"])
         except Exception:
             pass
+    if a and delete_file:
+        for key in ("thumbnail", "preview", "textPath", "breakdownPath", "breakdownAnalysisPath"):
+            sidecar = a.get(key)
+            if sidecar and os.path.isfile(sidecar):
+                try:
+                    os.remove(sidecar)
+                except Exception:
+                    pass
 
 
 # ---------- 企业资料(品牌定位),生成时统一注入 ----------
@@ -17348,6 +20502,10 @@ def _xhs_safety_state_path():
     return os.path.join(data_dir(), "xhs_safety_state.json")
 
 
+def _comment_risk_state_path():
+    return os.path.join(data_dir(), "comment_risk_state.json")
+
+
 def load_xhs_safety_state():
     import json as _json
     try:
@@ -17362,6 +20520,16 @@ def load_xhs_safety_state():
         accounts = {}
     state["accounts"] = accounts
     return state
+
+
+def load_comment_risk_state():
+    import json as _json
+    try:
+        with open(_comment_risk_state_path(), "r", encoding="utf-8") as f:
+            state = _json.load(f)
+    except Exception:
+        state = {}
+    return state if isinstance(state, dict) else {}
 
 
 def _xhs_safety_account_key(account):
@@ -17393,6 +20561,61 @@ def _xhs_safety_cooldown_text(account, state=None):
     if not last or not interval:
         return "-"
     left = max(0, int(interval - (time.time() - last)))
+    return ("%ds" % left) if left > 0 else "-"
+
+
+def _douyin_comment_account_key(account):
+    refs = _account_risk_refs(account if isinstance(account, dict) else {})
+    for ref in refs:
+        text = str(ref or "").strip()
+        if text and text.lower() != "xhs-self":
+            return text
+    return "douyin-self"
+
+
+def _douyin_comment_account_usage(account, state=None):
+    state = state or load_comment_risk_state()
+    account_key = _douyin_comment_account_key(account)
+    accounts = state.get("accounts") if isinstance(state.get("accounts"), dict) else {}
+    return accounts.get(account_key) if isinstance(accounts.get(account_key), dict) else {}
+
+
+def _douyin_comment_usage_text(account, state=None):
+    usage = _douyin_comment_account_usage(account, state)
+    today = time.strftime("%Y-%m-%d")
+    count = int(usage.get("commentCount") or 0) if usage.get("day") == today else 0
+    limit = int(RISK.get("dailyComment") or 0)
+    return "%d/%d" % (count, limit)
+
+
+def _douyin_comment_global_risk_applies(state, account_key):
+    state = state if isinstance(state, dict) else {}
+    account_key = str(account_key or "douyin-self").strip() or "douyin-self"
+    risk_account = str(state.get("lastRiskAccountId") or "").strip()
+    if risk_account:
+        return _douyin_comment_account_key({"id": risk_account, "accountId": risk_account}) == account_key
+    return account_key == "douyin-self"
+
+
+def _douyin_comment_cooldown_text(account, state=None):
+    state = state or load_comment_risk_state()
+    account_key = _douyin_comment_account_key(account)
+    usage = _douyin_comment_account_usage(account, state)
+    last = usage.get("lastCommentAt")
+    if not last and str(state.get("lastCommentAccountId") or "douyin-self").strip() == account_key:
+        last = state.get("lastCommentAt")
+    try:
+        last = float(last or 0)
+    except Exception:
+        last = 0
+    interval = int(RISK.get("minInterval") or 0)
+    action_left = max(0, int(interval - (time.time() - last))) if last and interval else 0
+    try:
+        global_until = float(state.get("cooldownUntil") or 0) if _douyin_comment_global_risk_applies(state, account_key) else 0
+        risk_left = max(0, int(max(global_until, float(usage.get("cooldownUntil") or 0), float(usage.get("pausedUntil") or 0)) - time.time()))
+    except Exception:
+        risk_left = 0
+    left = max(action_left, risk_left)
     return ("%ds" % left) if left > 0 else "-"
 
 
@@ -17439,11 +20662,28 @@ def _localize_download_task_error(error):
         return ""
     if text in ("douyin_auth_incomplete", "no_auth") or "s_v_web_id" in text:
         return "抖音登录态不完整或已过期，请在账号矩阵重新登录抖音后再分解。"
+    if text == "douyin_detail_network_failed":
+        return "抖音连接暂时失败，请重试"
     if text == "xhs_login_required":
         return XHS_LOGIN_EXPIRED_HINT
     if text == "local_browser_offline":
         return "本地客户端未在线，请先启动并登录本地客户端。"
     return text
+
+
+def _video_breakdown_download_failure_text(error):
+    text = str(error or "").strip()
+    localized = _localize_download_task_error(text)
+    if text == "douyin_detail_network_failed":
+        return localized
+    return "分解失败:下载未完成 " + localized
+
+
+def _video_breakdown_platform_from_url(url):
+    host = (urlparse(str(url or "")).hostname or "").lower()
+    if xhs_enabled() and (host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")):
+        return "xhs"
+    return "douyin"
 
 
 def _find_video_file_from_download(result):
@@ -17750,7 +20990,20 @@ def _video_breakdown_markdown(data):
         "",
     ]
     if transcript.get("truncated"):
-        lines.extend(["- 转写范围: 仅分析前 10 分钟（原视频超过上限）", ""])
+        total_duration = float(meta.get("duration") or transcript.get("duration") or 0)
+        analyzed_through = float(
+            transcript.get("transcribedThroughSec")
+            or transcript.get("limit")
+            or 0
+        )
+        if analyzed_through > 0:
+            lines.append(
+                "- 转写范围: 0 至 %.1f 秒（原视频 %.1f 秒，已达到显式 VIDEO_TRANSCRIBE_MAX_SEC 上限）"
+                % (analyzed_through, total_duration)
+            )
+        else:
+            lines.append("- 转写范围: 已按显式 VIDEO_TRANSCRIBE_MAX_SEC 上限截断")
+        lines.append("")
     failed_ranges = transcript.get("failedRanges") or []
     if failed_ranges:
         lines.extend(["## 转写失败区间", ""])
@@ -17765,6 +21018,14 @@ def _video_breakdown_markdown(data):
             lines.append(line)
         lines.append("")
     lines.extend([data.get("report") or "暂无报告。", ""])
+    transcript_text = str(transcript.get("text") or "").strip()
+    if transcript_text:
+        lines.extend([
+            "## 完整口播时间轴",
+            "",
+            transcript_text,
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -17838,9 +21099,66 @@ def _merge_transcription_retry(previous, retried):
                 failedRanges=failed_ranges,
                 errors=errors,
                 duration=retried.get("duration") or previous.get("duration"),
+                transcribedThroughSec=(
+                    retried.get("transcribedThroughSec")
+                    or previous.get("transcribedThroughSec")
+                ),
                 truncated=bool(retried.get("truncated") or previous.get("truncated")),
                 retryCount=int(previous.get("retryCount") or 0) + 1,
                 message=message)
+
+
+def _video_breakdown_retry_ranges(analysis):
+    analysis = analysis or {}
+    transcript = analysis.get("transcript") or {}
+    failed_ranges = transcript.get("failedRanges") or []
+    if isinstance(failed_ranges, list):
+        ranges = [dict(item) for item in failed_ranges if isinstance(item, dict)]
+    else:
+        ranges = []
+    if ranges:
+        return ranges
+    status = str(transcript.get("status") or "").strip().lower()
+    if status not in {"failed", "partial", "skipped"}:
+        return []
+    try:
+        duration = float((analysis.get("meta") or {}).get("duration") or transcript.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        return []
+    return [{
+        "start": 0.0,
+        "end": round(duration, 3),
+        "code": str(transcript.get("code") or "transcription_retry_full"),
+        "errorId": "",
+    }]
+
+
+def _replacement_transcription_retry_ranges(analysis):
+    transcript = (analysis or {}).get("transcript") or {}
+    failed_ranges = transcript.get("failedRanges") or []
+    if not isinstance(failed_ranges, list):
+        return []
+    return [dict(item) for item in failed_ranges if isinstance(item, dict)]
+
+
+def _replacement_transcription_issue_text(analysis):
+    transcript = (analysis or {}).get("transcript") or {}
+    failed_ranges = _replacement_transcription_retry_ranges(analysis)
+    if not failed_ranges:
+        return ""
+    codes = {str(item.get("code") or "").strip() for item in failed_ranges}
+    if "remote_timeout" in codes:
+        reason = "远程音频转写超时"
+    elif "media_missing_audio_stream" in codes:
+        reason = "视频没有可识别音轨"
+    else:
+        reason = transcript.get("message") or "音频转写失败"
+    return (
+        "口播识别失败：%s，系统没有识别出口播稿。"
+        "可点击『重试口播』重新识别，或在片段表中手动填写口播稿。"
+    ) % str(reason or "音频转写失败")
 
 
 def _generate_video_breakdown_report(data):
@@ -17863,6 +21181,9 @@ def _generate_video_breakdown_report(data):
             model="gpt-5.4-xhigh",
             max_tokens=4800,
             temperature=0.35,
+            billing_scenario="video_breakdown",
+            billing_stage="report_generation",
+            billing_detail="breakdown report from ocr transcript and visual analysis",
         )
         report, repaired = _ensure_video_breakdown_report_sections(report, data)
         if repaired:
@@ -17946,6 +21267,7 @@ def _build_hybrid_replacement_plan(analysis, duration=None, segment_seconds=8, s
     segments = _build_replacement_segments(analysis, total, segment_seconds=segment_seconds)
     transcript = analysis.get("transcript") or {}
     spoken = transcript.get("segments") or []
+    previous_script = ""
     for segment in segments:
         start = float(segment.get("start") or 0)
         end = float(segment.get("end") or 0)
@@ -17958,11 +21280,18 @@ def _build_hybrid_replacement_plan(analysis, duration=None, segment_seconds=8, s
                 item_end = float(item.get("endSec") if item.get("endSec") is not None else item.get("end") or item_start)
             except (TypeError, ValueError):
                 continue
-            if item_end > start and item_start < end:
+            midpoint = (item_start + item_end) / 2.0
+            in_segment = start <= midpoint < end
+            if segment is segments[-1]:
+                in_segment = start <= midpoint <= end
+            if in_segment:
                 text = str(item.get("text") or "").strip()
                 if text:
                     lines.append(text)
         script = " ".join(lines).strip()
+        script = remove_adjacent_text_overlap(previous_script, script)
+        if script:
+            previous_script = script
         segment.update({
             "segmentType": "non_talking",
             "script": script,
@@ -18282,7 +21611,7 @@ def _replacement_source_entities_from_analysis(analysis=None):
         "scenes": scenes,
         "replacementRules": (
             "原片人物槽位替换为上传授权人物或虚拟模特的完整外观，包括脸、发型、服装、体型和配饰；动作、职业语境、"
-            "站位和镜头关系沿用源视频；人物台词按当前声音来源规则处理；未上传产品图时保留原片产品，上传产品图时强制替换为上传产品；"
+            "站位和镜头关系参考源视频拆解文本与抽帧结果近似生成；人物台词按当前声音来源规则处理；未上传产品图时保留原片产品，上传产品图时强制替换为上传产品；"
             "未上传场景图时保留原片场景，上传场景图时强制替换为上传场景。"
         ),
     }
@@ -18312,7 +21641,7 @@ def _replacement_source_entity_lock_text(job_or_analysis=None):
 
     return (
         "源视频实体替换：\n"
-        "- 原片人物槽位：%s。替换为上传授权人物或虚拟模特的完整外观，包括脸、发型、服装、体型和配饰；只保留原片动作、职业语境、站位和镜头关系；人物台词按当前声音来源规则处理。\n"
+        "- 原片人物槽位：%s。替换为上传授权人物或虚拟模特的完整外观，包括脸、发型、服装、体型和配饰；动作、职业语境、站位和镜头关系参考源视频拆解文本与抽帧结果近似生成；人物台词按当前声音来源规则处理。\n"
         "- 原片产品槽位：%s。未上传产品图时保留原片产品；上传产品图时必须强制替换为上传产品，产品出现时间、摆放/持握方式、展示节奏和镜头角度按源视频。\n"
         "- 原片场景槽位：%s。未上传场景图时保留原片场景；上传场景图时必须强制替换为上传场景，并尽量沿用源视频镜头节奏和主体关系。\n"
         "- %s"
@@ -18388,7 +21717,7 @@ def _replacement_manual_defect_retry_note(segment=None):
     note = _replacement_excerpt(note, 260)
     return (
         "手动瑕疵重生：上一版该片段存在瑕疵：%s。"
-        "本次必须针对该问题修正，不能再次出现；同时保留原片动作、镜头节奏、当前声音来源规则和已上传人物/产品/场景替换规则。"
+        "本次必须针对该问题修正，不能再次出现；同时参考源视频拆解文本与抽帧结果中的动作、镜头节奏，并保持当前声音来源规则和已上传人物/产品/场景替换规则。"
         % note
     )
 
@@ -19106,7 +22435,7 @@ def _run_hybrid_lipsynced_replacement_segment(job, segment):
         _replace_replacement_segment_audio_with_uploaded(job, segment, final_path)
     segment["audioStatus"] = "passed"
     segment["status"] = "qc"
-    _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行换音轨后音频和视觉质检" % idx)
+    _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行换音轨后视频和视觉质检" % idx)
     qc = _run_replacement_segment_qc(job, segment, final_path)
     segment["qcFrames"] = list(qc.get("frames") or [])
     segment["qcChecks"] = dict(qc.get("checks") or {})
@@ -19842,7 +23171,7 @@ def _ensure_segment_audio(before_face_swap, after_face_swap):
         return after_face_swap
     before_meta = validate_video_file(before_face_swap)
     if not (before_meta.get("ok") and before_meta.get("hasAudio")):
-        raise RuntimeError("source_audio_missing")
+        return after_face_swap
     repaired = after_face_swap + ".audio-repaired.mp4"
     cmd = [
         _ffmpeg_exe(), "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
@@ -19861,8 +23190,6 @@ def _ensure_segment_audio(before_face_swap, after_face_swap):
     if completed.returncode != 0 or not os.path.isfile(repaired):
         raise RuntimeError("audio_mux_failed:%s" % str(completed.stderr or "")[:160])
     os.replace(repaired, after_face_swap)
-    if not validate_video_file(after_face_swap).get("hasAudio"):
-        raise RuntimeError("audio_mux_missing_stream")
     return after_face_swap
 
 
@@ -20325,11 +23652,8 @@ def _replace_video_audio(video_path, audio_input, output_path, require_full_audi
     if not (audio_input and (os.path.isfile(audio_input) or _is_remote_fetchable_media_url(audio_input))):
         raise RuntimeError("replacement_audio_missing")
     video_duration = float(_probe_video(video_path).get("duration") or 0.0)
-    audio_duration = _probe_media_duration(audio_input)
     if video_duration <= 0:
         raise RuntimeError("replacement_audio_video_duration_missing")
-    if require_full_audio and audio_duration + 0.25 < video_duration:
-        raise RuntimeError("replacement_uploaded_audio_too_short")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     completed = subprocess.run(
         [
@@ -20349,9 +23673,6 @@ def _replace_video_audio(video_path, audio_input, output_path, require_full_audi
     )
     if completed.returncode != 0 or not validate_video_file(output_path).get("ok"):
         raise RuntimeError("replacement_audio_mux_failed:%s" % str(completed.stderr or "")[:160])
-    audio = _replacement_audio_qc(output_path)
-    if not audio.get("ok"):
-        raise RuntimeError("replacement_audio_mux_invalid:%s" % (audio.get("code") or "unknown"))
     return output_path
 
 
@@ -20949,17 +24270,14 @@ def _run_replacement_visual_qc(job, segment, video_path):
 
 
 def _run_replacement_segment_qc(job, segment, video_path=None):
-    """Run deterministic media/audio gates and collect frames for manual visual approval."""
+    """Run deterministic video gates and collect frames for manual visual approval."""
     job = job or {}
     segment = segment or {}
     path = video_path or segment.get("faceSwapPath") or segment.get("videoPath") or ""
     media = _breakdown_source_validation(path)
     if not media.get("ok"):
         return {"ok": False, "code": media.get("code") or "media_invalid", "frames": []}
-    audio = _replacement_audio_qc(path)
-    if not audio.get("ok"):
-        return {"ok": False, "code": audio.get("code") or "audio_failed",
-                "audio": audio, "frames": []}
+    audio = {"status": "skipped", "code": "disabled"}
     frames = _extract_replacement_qc_frames(
         path,
         os.path.join(job.get("outDir") or data_dir(), "qc_frames"),
@@ -21008,7 +24326,7 @@ def _run_replacement_segment_qc(job, segment, video_path=None):
                 "code": "visual_qc_deferred",
                 "audio": audio,
                 "frames": frames,
-                "checks": dict({"media": "passed", "audio": "passed"}, **visual["checks"]),
+                "checks": dict({"media": "passed", "audio": "skipped"}, **visual["checks"]),
                 "visual": visual,
             }
         if principal_mode and visual.get("code") == "principal_visual_qc_invalid_response":
@@ -21019,7 +24337,7 @@ def _run_replacement_segment_qc(job, segment, video_path=None):
                 "frames": frames,
                 "visual": visual,
                 "checks": dict(
-                    {"media": "passed", "audio": "passed"},
+                    {"media": "passed", "audio": "skipped"},
                     **(visual.get("checks") or {
                         "principalReplacement": "awaiting_review",
                         "fullBodyAppearance": "awaiting_review",
@@ -21058,7 +24376,7 @@ def _run_replacement_segment_qc(job, segment, video_path=None):
                 "frames": frames,
                 "visual": visual,
                 "warnings": [warning],
-                "checks": dict({"media": "passed", "audio": "passed"}, **(visual.get("checks") or {})),
+                "checks": dict({"media": "passed", "audio": "skipped"}, **(visual.get("checks") or {})),
             }
     face_similarity = None
     if not no_person_mode and not principal_mode and _replacement_face_similarity_enabled(job):
@@ -21094,7 +24412,7 @@ def _run_replacement_segment_qc(job, segment, video_path=None):
                     "visual": visual,
                     "faceSimilarity": face_similarity,
                     "warnings": [warning],
-                    "checks": dict({"media": "passed", "audio": "passed"}, **((visual or {}).get("checks") or {})),
+                    "checks": dict({"media": "passed", "audio": "skipped"}, **((visual or {}).get("checks") or {})),
                 }
     return {
         "ok": True,
@@ -21104,7 +24422,7 @@ def _run_replacement_segment_qc(job, segment, video_path=None):
         "faceSimilarity": face_similarity,
         "checks": dict({
             "media": "passed",
-            "audio": "passed",
+            "audio": "skipped",
         }, **((visual or {}).get("checks") or {
             "face": "awaiting_review", "product": "awaiting_review",
             "logoText": "awaiting_review", "scene": "awaiting_review",
@@ -21306,15 +24624,17 @@ def _run_hybrid_non_talking_segment(job, segment):
                 _replacement_emit_stage(job, segment, "audio_muxing", "生成片段 %s：保留生成视频自带声音" % idx)
                 segment["audioMode"] = "auto"
             else:
-                _replacement_emit_stage(job, segment, "audio_muxing", "生成片段 %s：回填源片段音频" % idx)
-                if principal_mode:
+                _replacement_emit_stage(job, segment, "audio_muxing", "生成片段 %s：保留待最终替换的音轨" % idx)
+                if audio_mode == "uploaded":
+                    segment["audioMode"] = "uploaded"
+                elif principal_mode:
                     _replace_segment_audio_from_source(source_segment, edited_path)
                 else:
                     _ensure_segment_audio(source_segment, edited_path)
                 segment["audioMode"] = audio_mode
             segment["audioStatus"] = "passed"
             segment["status"] = "qc"
-            _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行音频和视觉质检" % idx)
+            _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行视频和视觉质检" % idx)
             qc = _run_replacement_segment_qc(job, segment, edited_path)
             segment["qcFrames"] = list(qc.get("frames") or [])
             segment["qcChecks"] = dict(qc.get("checks") or {})
@@ -21394,7 +24714,8 @@ def _run_hybrid_non_talking_segment(job, segment):
         audio_message = (
             "替换为所选音色配音" if audio_mode == "tts" else
             ("保留生成视频自带声音" if audio_mode == "auto" else
-             ("回填换脸后音频" if final_path == face_path else "回填源片段音频"))
+             ("保留待最终替换的音轨" if audio_mode == "uploaded" else
+              ("回填换脸后音频" if final_path == face_path else "回填源片段音频")))
         )
         _replacement_emit_stage(job, segment, "audio_muxing", "生成片段 %s：%s" % (idx, audio_message))
         if audio_mode == "tts":
@@ -21403,12 +24724,14 @@ def _run_hybrid_non_talking_segment(job, segment):
             if final_path == face_path:
                 _ensure_segment_audio(edited_path, final_path)
             segment["audioMode"] = "auto"
+        elif audio_mode == "uploaded":
+            segment["audioMode"] = "uploaded"
         else:
             _ensure_segment_audio(audio_source, final_path)
             segment["audioMode"] = audio_mode
         segment["audioStatus"] = "passed"
         segment["status"] = "qc"
-        _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行音频和视觉质检" % idx)
+        _replacement_emit_stage(job, segment, "qc", "生成片段 %s：执行视频和视觉质检" % idx)
         qc = _run_replacement_segment_qc(job, segment, final_path)
         segment["qcFrames"] = list(qc.get("frames") or [])
         segment["qcChecks"] = dict(qc.get("checks") or {})
@@ -21536,11 +24859,7 @@ def _replacement_final_block_reasons(segments, job=None):
             )
             if not validation.get("ok"):
                 reasons.append("片段%s视频缺失或损坏" % index)
-            elif not validation.get("hasAudio"):
-                reasons.append("片段%s没有声音" % index)
             continue
-        if item.get("audioStatus") != "passed":
-            reasons.append("片段%s音频检查未通过" % index)
         if item.get("qcStatus") != "passed":
             reasons.append("片段%s质量检查未通过" % index)
     return reasons
@@ -21762,7 +25081,7 @@ def _prepare_replacement_product_anchor(job, segment, out_dir):
             "产品的外形、颜色、Logo、包装文字和材质必须以产品参考图为准。"
             "不要添加任何文字、水印或装饰元素。"
         )
-        img, public_url = lk888_image_result(
+        img, public_url = _lk888_image_result_download(
             prompt,
             size=job.get("keyframeSize") or "1024x1792",
             image_urls=[base_url] + product_urls[:2],
@@ -21963,7 +25282,7 @@ def _ensure_replacement_keyframe(job, segment):
     size = job.get("keyframeSize") or "1024x1792"
     model = job.get("imageModel") or None
     try:
-        img, public_url = lk888_image_result(
+        img, public_url = _lk888_image_result_download(
             prompt[:1800],
             size=size,
             model=model,
@@ -21978,7 +25297,7 @@ def _ensure_replacement_keyframe(job, segment):
             raise
         segment["keyframeStatus"] = "retrying"
         segment["keyframeRetryReason"] = str(exc)[:180]
-        img, public_url = lk888_image_result(
+        img, public_url = _lk888_image_result_download(
             prompt[:1200],
             size=_replacement_keyframe_retry_size(),
             model=model,
@@ -22422,9 +25741,6 @@ def _concat_replacement_segments(paths, output_path):
         size_label="竖屏 9:16",
         preserve_source_audio=True,
     )
-    audio = _replacement_audio_qc(result)
-    if not audio.get("ok"):
-        raise RuntimeError("replacement_final_audio_failed:%s" % (audio.get("code") or "unknown"))
     return result
 
 
@@ -22640,7 +25956,14 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
                 "message": "音频转写失败：视频文件不存在。"}
     out_dir = out_dir or os.path.join(data_dir(), "video_breakdowns", "audio-" + uuid.uuid4().hex)
     chunk_sec = max(1, int(os.getenv("VIDEO_TRANSCRIBE_CHUNK_SEC", "60") or 60))
-    max_sec = max(chunk_sec, int(os.getenv("VIDEO_TRANSCRIBE_MAX_SEC", "600") or 600))
+    max_sec_value = str(os.getenv("VIDEO_TRANSCRIBE_MAX_SEC", "") or "").strip()
+    if max_sec_value:
+        try:
+            max_sec = max(chunk_sec, int(max_sec_value))
+        except (TypeError, ValueError):
+            max_sec = None
+    else:
+        max_sec = None
     timeout = max(10, int(os.getenv("VIDEO_TRANSCRIBE_TIMEOUT_SEC", "180") or 180))
     retries = max(0, int(os.getenv("VIDEO_TRANSCRIBE_RETRIES", "2") or 2))
     model = (os.getenv("VIDEO_TRANSCRIBE_MODEL") or "gemini-3.1-pro-preview").strip()
@@ -22658,12 +25981,16 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
     if exported.get("status") == "no_audio":
         return {"status": "no_audio", "code": "media_missing_audio_stream", "text": "",
                 "segments": [], "failedRanges": export_failures, "errors": export_errors,
-                "duration": exported.get("duration"), "truncated": exported.get("truncated", False),
+                "duration": exported.get("duration"),
+                "transcribedThroughSec": exported.get("limit"),
+                "truncated": exported.get("truncated", False),
                 "message": "视频没有可转写的音轨。"}
     if not exported.get("chunks"):
         return {"status": "failed", "code": exported.get("code") or "audio_export_failed", "text": "",
                 "segments": [], "chunks": [], "failedRanges": export_failures, "errors": export_errors,
-                "duration": exported.get("duration"), "truncated": exported.get("truncated", False),
+                "duration": exported.get("duration"),
+                "transcribedThroughSec": exported.get("limit"),
+                "truncated": exported.get("truncated", False),
                 "message": "音频导出失败，已继续使用画面与 OCR 分析。"}
     cfg = lk888_config()
     base = (cfg.get("base_url") or "").rstrip("/")
@@ -22672,7 +25999,9 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
         return {"status": "failed", "code": "lk888_not_configured", "text": "",
                 "segments": [], "chunks": [], "failedRanges": export_failures,
                 "errors": export_errors,
-                "duration": exported.get("duration"), "truncated": exported.get("truncated", False),
+                "duration": exported.get("duration"),
+                "transcribedThroughSec": exported.get("limit"),
+                "truncated": exported.get("truncated", False),
                 "message": "远程转写未配置，已继续使用画面与 OCR 分析。"}
     result = transcribe_audio_chunks(
         chunks=exported.get("chunks") or [],
@@ -22685,6 +26014,11 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
         only_ranges=only_ranges,
         progress=progress,
         logger=_CLIENT_JSON_LOGGER,
+        billing_context={
+            "scenario": "video_breakdown",
+            "stage": "audio_transcription",
+            "detail": "audio extraction and speech transcription",
+        },
     )
     remote_failures = list(result.get("failedRanges") or [])
     remote_errors = list(result.get("errors") or remote_failures)
@@ -22709,6 +26043,7 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
         "failedRanges": failed_ranges,
         "errors": errors,
         "duration": exported.get("duration"),
+        "transcribedThroughSec": exported.get("limit"),
         "truncated": bool(exported.get("truncated")),
         "retryCount": 0,
         "message": message,
@@ -23048,10 +26383,7 @@ class GenCard(QtWidgets.QFrame):
             twl.setContentsMargins(0, 1, 0, 0)
             twl.setSpacing(2)
             twl.addWidget(th)
-            if e.get("mode") == "video":
-                ref_label = "参考图%d" % (i + 1)
-            else:
-                ref_label = "待修改图" if i == 0 else "参考图%d" % i
+            ref_label = _prodgen_ref_label_for(e.get("mode"), e.get("model"), i)
             lab = QtWidgets.QLabel(ref_label)
             lab.setAlignment(QtCore.Qt.AlignCenter)
             lab.setStyleSheet("color:#6b7488;font-size:9.5px;background:transparent;border:0;")
@@ -23084,7 +26416,7 @@ class GenCard(QtWidgets.QFrame):
         if st == "生成中":
             self._build_gen_panel(e)
         elif st == "失败":
-            self.lay.addWidget(self._note("生成失败:" + str(e.get("error") or ""), "#ef5555"))
+            self.lay.addWidget(self._note("生成失败：" + _prodgen_user_error_text(e.get("error")), "#ef5555"))
         elif st == "已中断":
             self.lay.addWidget(self._note("已中断(客户端重启),点『再次生成』重跑。", "#8b93a3"))
         else:  # 完成
@@ -23115,6 +26447,13 @@ class GenCard(QtWidgets.QFrame):
         busy = st == "生成中"
         if e.get("mode") == "video" and st == "完成":
             foot.addWidget(_icon_text_btn("play", "播放", _PROD_ACT, "#98a2b6", 14, cb=self._play))
+            if prodgen_video_publish_material_id(e):
+                pb = _icon_text_btn("publish", "已加入", _PROD_ACT, "#22c55e", 14)
+                pb.setEnabled(False)
+                foot.addWidget(pb)
+            else:
+                foot.addWidget(_icon_text_btn("publish", "加入发布", _PROD_ACT, "#22c55e", 14,
+                                              cb=lambda: self.page.add_to_publish(self.entry)))
         foot.addWidget(_icon_text_btn("edit", "重新编辑", _PROD_ACT, "#98a2b6", 14,
                                       cb=lambda: self.page.reedit(self.entry), disabled=busy))
         foot.addWidget(_icon_text_btn("refresh", "再次生成", _PROD_ACT, "#98a2b6", 14,
@@ -23350,6 +26689,7 @@ class ProductGenPage(BasePage):
         self._mode = "image"
         self._ref = ""
         self._refs = []
+        self._reference_video = ""
         self.ref_buttons = []
         self._cards = {}
         self._style = 0
@@ -23442,6 +26782,11 @@ class ProductGenPage(BasePage):
         ctl.addWidget(_round_icon_btn("grid", 40, "#8b93a3", cb=self.pick_from_assets, tip="从资产库选参考图"))
         ctl.addWidget(_round_icon_btn("trash", 40, "#8b93a3", cb=lambda: self.inp.clear(), tip="清空输入"))
         ctl.addWidget(_round_icon_btn("plus", 40, "#8b93a3", cb=self.pick_ref, tip="上传图片"))
+        self.ref_video_btn = _round_icon_btn(
+            "video", 40, "#8b93a3", cb=self.pick_reference_video,
+            tip="上传动作控制参考视频")
+        self.ref_video_btn.setVisible(False)
+        ctl.addWidget(self.ref_video_btn)
         self.send_btn = QtWidgets.QPushButton()
         self.send_btn.setFixedSize(46, 46)
         self.send_btn.setIcon(QtGui.QIcon(_draw_icon("arrowup", 22, "#ffffff")))
@@ -23461,6 +26806,7 @@ class ProductGenPage(BasePage):
 
     def on_show(self):
         load_prodgen()
+        load_pending()
         self._ensure_model_catalog()
         # 清空并重建生成流
         while self.msgs.count() > 1:
@@ -23500,8 +26846,8 @@ class ProductGenPage(BasePage):
 
     def _model_rows(self, mode=None):
         if (mode or self._mode) == "video":
-            return self._video_models or [x for x in _LK888_FALLBACK_MODELS if x.get("type") == "video"]
-        return self._image_models or [x for x in _LK888_FALLBACK_MODELS if x.get("type") == "image"]
+            return self._video_models or _lk888_fallback_models_by_type("video")
+        return self._image_models or _lk888_fallback_models_by_type("image")
 
     def _set_current_model(self, name, mode=None):
         mode = mode or self._mode
@@ -23512,6 +26858,8 @@ class ProductGenPage(BasePage):
             self._video_model = name
         else:
             self._image_model = name
+        if mode == self._mode:
+            self._set_refs(self._refs)
         self._sync_model_ui()
 
     def _sync_model_ui(self):
@@ -23533,6 +26881,26 @@ class ProductGenPage(BasePage):
             if not self._models_loaded:
                 base = "LK888 模型目录待同步"
             self.model_meta.setText(base + " · 当前使用 " + label)
+        if getattr(self, "ref_video_btn", None) is not None:
+            media = _agent_video_media_requirements(cur) if self._mode == "video" else {}
+            supports_reference_video = (
+                self._mode == "video" and int(media.get("video_limit") or 0) > 0
+            )
+            self.ref_video_btn.setVisible(supports_reference_video)
+            self.ref_video_btn.setToolTip("")
+        self._sync_duration_ui()
+
+    def _current_video_duration_slots(self):
+        return _agent_video_duration_slots(self._video_model)
+
+    def _sync_duration_ui(self):
+        if getattr(self, "b_duration", None) is None:
+            return
+        slots = self._current_video_duration_slots()
+        if self.duration_i >= len(slots):
+            self.duration_i = 0
+        self.b_duration.setText("  %d 秒" % self._current_video_duration())
+        self.b_duration.setEnabled(self._mode == "video" and len(slots) > 1)
 
     def _pick_model(self):
         rows = self._model_rows()
@@ -23550,7 +26918,7 @@ class ProductGenPage(BasePage):
         title = menu.addAction("选择%s模型" % ("视频" if mode == "video" else "图像"))
         title.setEnabled(False)
         menu.addSeparator()
-        for family, items in _lk888_grouped_models(mode):
+        for family, items in _lk888_grouped_models(mode, rows):
             sub = menu.addMenu(family)
             for row in items:
                 name = str(row.get("name") or "")
@@ -23579,9 +26947,8 @@ class ProductGenPage(BasePage):
         self.b_vid.setStyleSheet(_PROD_PILL_SEL if m == "video" else _PROD_PILL)
         self.b_vid.setIcon(QtGui.QIcon(_draw_icon("video", 15, "#ffffff" if m == "video" else "#aab3c5")))
         self.b_count.setEnabled(m == "image")
-        self.b_duration.setEnabled(m == "video")
         self.inp.setPlaceholderText("描述你想要的图片素材…(可先上传参考图)" if m == "image"
-                                    else "描述你想要的视频素材…(按所选 LK888 视频模型出片)")
+                                    else "描述你想要的视频素材…")
         self._style_ref_slot()
         self._sync_model_ui()
 
@@ -23594,13 +26961,15 @@ class ProductGenPage(BasePage):
         self.b_count.setText("  %d 条" % (self.count_i + 1))
 
     def _current_video_duration(self):
+        slots = self._current_video_duration_slots()
         try:
-            return int(AGENT_VIDEO_DURATIONS[self.duration_i])
+            return int(slots[self.duration_i])
         except (IndexError, TypeError):
-            return AGENT_VIDEO_DURATIONS[0]
+            return slots[0]
 
     def _cycle_video_duration(self):
-        self.duration_i = (self.duration_i + 1) % len(AGENT_VIDEO_DURATIONS)
+        slots = self._current_video_duration_slots()
+        self.duration_i = (self.duration_i + 1) % len(slots)
         self.b_duration.setText("  %d 秒" % self._current_video_duration())
 
     def _cycle_style(self):
@@ -23615,11 +26984,12 @@ class ProductGenPage(BasePage):
 
     def _set_refs(self, refs):
         cleaned = []
+        limit = _prodgen_entry_ref_limit({"mode": self._mode, "model": self._current_model()})
         for p in refs or []:
             p = str(p or "").strip()
             if p and p not in cleaned and os.path.isfile(p):
                 cleaned.append(p)
-            if len(cleaned) >= self.MAX_REFS:
+            if len(cleaned) >= limit:
                 break
         self._refs = cleaned
         self._ref = self._refs[0] if self._refs else ""
@@ -23648,9 +27018,7 @@ class ProductGenPage(BasePage):
             self._set_refs(refs)
 
     def _ref_label(self, i):
-        if self._mode == "video":
-            return "参考图%d" % (i + 1)
-        return "待修改图" if i == 0 else "参考图%d" % i
+        return _prodgen_ref_label_for(self._mode, self._current_model(), i)
 
     def _make_ref_cell(self, path, i):
         cell = QtWidgets.QWidget()
@@ -23714,12 +27082,16 @@ class ProductGenPage(BasePage):
         self.ref_buttons = []
         for i, path in enumerate(self._refs):
             self.ref_strip.addWidget(self._make_ref_cell(path, i), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        if len(self._refs) < self.MAX_REFS:
+        limit = _prodgen_entry_ref_limit({"mode": self._mode, "model": self._current_model()})
+        if len(self._refs) < limit:
             self.ref_strip.addWidget(self._make_ref_add_cell(), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         if self._refs:
-            hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"
-                         if self._mode == "video"
-                         else "图片模式：第1张为待修改图，第2张起为参考图。")
+            if self._mode == "video" and _agent_video_is_first_last_frame_model(self._current_model()):
+                hint_text = "首尾帧模型：只使用首帧和尾帧两张图。"
+            else:
+                hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"
+                             if self._mode == "video"
+                             else "图片模式：第1张为待修改图，第2张起为参考图。")
             hint = QtWidgets.QLabel(hint_text)
             hint.setStyleSheet("color:#6b7488;font-size:11px;background:transparent;border:0;")
             self.ref_strip.addWidget(hint, 0, QtCore.Qt.AlignVCenter)
@@ -23737,6 +27109,51 @@ class ProductGenPage(BasePage):
     def clear_ref(self):
         self._set_refs([])
 
+    def pick_reference_video(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择参考视频", "", "视频 (*.mp4 *.mov *.webm *.m4v)")
+        if path:
+            self._reference_video = path
+            self._sync_model_ui()
+
+    def clear_reference_video(self):
+        self._reference_video = ""
+        self._sync_model_ui()
+
+    def add_to_publish(self, entry):
+        entry = entry if isinstance(entry, dict) else {}
+        files = [f for f in (entry.get("files") or []) if os.path.isfile(f)]
+        if entry.get("mode") != "video" or entry.get("status") != "完成" or not files:
+            QtWidgets.QMessageBox.warning(self, "加入素材发布", "当前视频文件不存在或还没有生成完成。")
+            return
+        if getattr(self, "model_meta", None) is not None:
+            self.model_meta.setText("正在加入素材发布…")
+
+        def work(ent=entry):
+            try:
+                material_id = add_prodgen_video_to_publish_library(ent)
+                pending = add_prodgen_video_to_pending(ent, material_id=material_id)
+                if not pending:
+                    BRIDGE.payload.emit("prodgen_publish_add", {
+                        "id": ent.get("id"),
+                        "ok": False,
+                        "error": "当前视频文件不存在或还没有生成完成。",
+                    })
+                    return
+                BRIDGE.payload.emit("prodgen_publish_add", {
+                    "id": ent.get("id"),
+                    "ok": True,
+                    "materialId": material_id,
+                    "pendingId": pending.get("id"),
+                })
+            except Exception as exc:
+                BRIDGE.payload.emit("prodgen_publish_add", {
+                    "id": ent.get("id"),
+                    "ok": False,
+                    "error": str(exc)[:140],
+                })
+        run_bg(work)
+
     def reedit(self, entry):
         """把这条记录的提示词/参数载回输入区,方便微调后再次生成。"""
         self.inp.setPlainText(entry.get("prompt") or "")
@@ -23750,10 +27167,12 @@ class ProductGenPage(BasePage):
                 self.aspect_i = i
                 self.b_aspect.setText("  " + lb)
                 break
-        duration = _agent_video_duration(entry.get("duration"))
-        self.duration_i = AGENT_VIDEO_DURATIONS.index(duration)
-        self.b_duration.setText("  %d 秒" % duration)
+        duration = _agent_video_request_duration(self._video_model, entry.get("duration"))
+        slots = self._current_video_duration_slots()
+        self.duration_i = slots.index(duration) if duration in slots else 0
+        self.b_duration.setText("  %d 秒" % self._current_video_duration())
         self._set_refs(entry.get("refs") or ([entry.get("ref")] if entry.get("ref") else []))
+        self._reference_video = str(entry.get("referenceVideo") or "").strip()
         self._sync_model_ui()
         try:
             self.inp.setFocus()
@@ -23784,6 +27203,7 @@ class ProductGenPage(BasePage):
             "duration": self._current_video_duration(),
             "refs": list(self._refs),
             "ref": (self._refs[0] if self._refs else ""),
+            "referenceVideo": self._reference_video,
             "model": (self._image_model if self._mode == "image" else self._video_model),
             "modelLabel": _lk888_model_label(self._image_model if self._mode == "image" else self._video_model,
                                              self._image_models if self._mode == "image" else self._video_models),
@@ -23857,8 +27277,11 @@ class ProductGenPage(BasePage):
                 BRIDGE.payload.emit("prodgen", {"id": pid, "status": "完成", "files": files})
             except Exception as ex:
                 refund_cap(cap, ref)  # 生成失败:退回本次扣费
-                update_prodgen(pid, status="失败", error=str(ex)[:160])
-                BRIDGE.payload.emit("prodgen", {"id": pid, "status": "失败", "error": str(ex)[:160]})
+                raw_error = str(ex)[:240]
+                user_error = _prodgen_user_error_text(raw_error)
+                log("prodgen generation failed: %s" % raw_error)
+                update_prodgen(pid, status="失败", error=user_error, rawError=raw_error)
+                BRIDGE.payload.emit("prodgen", {"id": pid, "status": "失败", "error": user_error})
         run_bg(work)
 
     def _on(self, tag, d):
@@ -23902,6 +27325,22 @@ class ProductGenPage(BasePage):
                     self.inp.setFocus()
                 except Exception:
                     pass
+            return
+        if tag == "prodgen_publish_add":
+            data = d or {}
+            pid = data.get("id")
+            card = self._cards.get(pid)
+            if card:
+                for entry in PRODGEN:
+                    if entry.get("id") == pid:
+                        card.entry = entry
+                        break
+                card.refresh()
+            if getattr(self, "model_meta", None) is not None:
+                if data.get("ok"):
+                    self.model_meta.setText("已加入素材发布，可到「素材发布」选择抖音账号后发布。")
+                else:
+                    self.model_meta.setText("加入素材发布失败：" + str(data.get("error") or "请稍后重试"))
             return
         if tag != "prodgen":
             return
@@ -24071,7 +27510,7 @@ class AssetLibraryPage(BasePage):
         frow.setSpacing(8)
         self._fbtns = {}
         for key, lbl, ic in (("all", "全部", "grid"), ("image", "图片", "image"), ("video", "视频", "video"),
-                             ("collected_reference", "采集参考视频", "video"), ("note_template", "图文模板", "grid")):
+                             ("collected_reference", "采集参考视频", "video")):
             b = _icon_text_btn(ic, lbl, _PROD_PILL_SEL if key == "all" else _PROD_PILL,
                                "#ffffff" if key == "all" else "#aab3c5", 14, cb=lambda k=key: self._set_filter(k))
             self._fbtns[key] = b
@@ -24368,12 +27807,25 @@ class AssetLibraryPage(BasePage):
             QtWidgets.QMessageBox.warning(self, "资产库", "文本不存在或已被移动。")
             return
         try:
-            text = open(path, "r", encoding="utf-8").read()
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
         except UnicodeDecodeError:
-            text = open(path, "r", encoding="utf-8-sig", errors="replace").read()
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+                text = f.read()
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "资产库", "无法读取文本:%s" % str(e)[:80])
             return
+        analysis = {}
+        analysis_path = str(a.get("breakdownAnalysisPath") or "").strip()
+        if analysis_path and os.path.isfile(analysis_path):
+            try:
+                import json as _json
+                with open(analysis_path, "r", encoding="utf-8") as f:
+                    loaded = _json.load(f)
+                if isinstance(loaded, dict):
+                    analysis = loaded
+            except Exception:
+                analysis = {}
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle((a.get("name") or os.path.basename(path) or "文本拆解")[:80])
         dlg.resize(760, 560)
@@ -24383,15 +27835,25 @@ class AssetLibraryPage(BasePage):
         editor.setPlainText(text)
         editor.setStyleSheet("font-size:13px;line-height:1.5;")
         dv.addWidget(editor, 1)
-        use_btn = QtWidgets.QPushButton("用此文本生成视频")
+        use_btn = QtWidgets.QPushButton("按此视频改造")
         use_btn.setObjectName("primary")
+        use_btn.setVisible(video_replacement_enabled())
         close_btn = QtWidgets.QPushButton("关闭")
         close_btn.clicked.connect(dlg.accept)
 
         def use_text():
             current_text = editor.toPlainText().strip()
-            BRIDGE.payload.emit("breakdown_to_product_video", {"text": current_text, "assetId": a.get("id") or ""})
-            BRIDGE.payload.emit("goto_nav", "🛍️ Agent.模式")
+            payload = _reference_breakdown_to_replacement_payload({
+                "path": a.get("path") or "",
+                "text": current_text,
+                "title": a.get("name") or a.get("prompt") or "",
+                "platform": a.get("platform") or "",
+                "sourceUrl": a.get("sourceUrl") or a.get("url") or "",
+                "assetId": a.get("id") or "",
+                "breakdownAnalysis": analysis,
+            })
+            BRIDGE.payload.emit("goto_nav", "🧬 同款替换")
+            BRIDGE.payload.emit("video_replace_start", payload)
             dlg.accept()
 
         use_btn.clicked.connect(use_text)
@@ -24737,6 +28199,7 @@ class RiskControlPage(BasePage):
             rows = clean_accounts(d or [])
             stored_events = load_account_risk_events()
         safety_state = load_xhs_safety_state()
+        comment_risk_state = load_comment_risk_state()
         self.table.setRowCount(0)
         for x in rows:
             r = self.table.rowCount()
@@ -24761,6 +28224,18 @@ class RiskControlPage(BasePage):
                     risk = "高风险"
                     reason = str(usage.get("pausedReason") or reason or "-")
                     advice = "已暂停小红书自动操作，请人工处理平台提示后再恢复。"
+            elif plat == "抖音":
+                usage = _douyin_comment_account_usage(x, comment_risk_state)
+                daily_comment = _douyin_comment_usage_text(x, comment_risk_state)
+                cooldown = _douyin_comment_cooldown_text(x, comment_risk_state)
+                try:
+                    paused_until = float(usage.get("pausedUntil") or usage.get("cooldownUntil") or 0)
+                except Exception:
+                    paused_until = 0
+                if usage.get("paused") and paused_until > time.time():
+                    risk = "高风险"
+                    reason = str(usage.get("pausedReason") or usage.get("lastRiskReason") or reason or "-")
+                    advice = "已暂停抖音评论自动操作，请人工处理平台提示或等待冷却结束。"
             for c, val in enumerate([name, plat, status, risk, daily_publish, daily_comment, cooldown, reason, advice]):
                 it = QtWidgets.QTableWidgetItem(str(val))
                 if c == 3:
@@ -25211,12 +28686,25 @@ class AccountPage(BasePage):
         self.v.setContentsMargins(20, 16, 20, 16)
         self.v.setSpacing(10)
         self._cd = 0
+        self._balance_seq = 0
         self._analytics_seq = 0
         self._ledger_seq = 0
         self._ledger_page = 1
         self._ledger_total_pages = 0
         self._group_by = "day"
-        self.v.addWidget(make_header("账户中心", "消费概览与扣费明细"))
+        self._analytics_balance_authoritative = False
+        self._manual_refresh_active = False
+        self._manual_refresh_pending = {}
+        self.refresh_btn = QtWidgets.QPushButton("刷新")
+        self.refresh_btn.setObjectName("ghost")
+        self.refresh_btn.setStyleSheet("QPushButton#ghost{padding-left:8px;padding-right:8px;}")
+        self.refresh_btn.setFixedSize(100, 34)
+        self._refresh_icon = QtGui.QIcon(_draw_icon("refresh", 16, TK["ghostText"]))
+        self.refresh_btn.setIcon(self._refresh_icon)
+        self.refresh_btn.setIconSize(QtCore.QSize(16, 16))
+        self.refresh_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.refresh_btn.clicked.connect(self.refresh_all)
+        self.v.addWidget(make_header("账户中心", "消费概览与扣费明细", [self.refresh_btn]))
 
         metrics = QtWidgets.QHBoxLayout()
         metrics.setSpacing(10)
@@ -25317,8 +28805,15 @@ class AccountPage(BasePage):
         self.ltable.setMinimumHeight(180)
         self.ltable.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.ltable.setTextElideMode(QtCore.Qt.ElideRight)
-        self.ltable.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        for column, width in enumerate((142, 90, 128, 284, 100, 100, 82)):
+        self.ltable.setToolTip("")
+        self.ltable.viewport().setToolTip("")
+        header = self.ltable.horizontalHeader()
+        header.setDefaultAlignment(QtCore.Qt.AlignCenter)
+        header.setStretchLastSection(False)
+        for column in (0, 1, 2, 4, 5, 6):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
+        for column, width in ((0, 92), (1, 82), (2, 120), (4, 98), (5, 98), (6, 76)):
             self.ltable.setColumnWidth(column, width)
         self.v.addWidget(self.ltable, 1)
 
@@ -25451,6 +28946,9 @@ class AccountPage(BasePage):
         BRIDGE.payload.connect(self._on)
         self._cd_timer = QtCore.QTimer(self)
         self._cd_timer.timeout.connect(self._tick)
+        self._billing_refresh_timer = QtCore.QTimer(self)
+        self._billing_refresh_timer.setInterval(15000)
+        self._billing_refresh_timer.timeout.connect(self._auto_refresh_billing)
 
         self.analytics_start.dateChanged.connect(self._analytics_filters_changed)
         self.analytics_end.dateChanged.connect(self._analytics_filters_changed)
@@ -25497,9 +28995,56 @@ class AccountPage(BasePage):
 
     def _date_edit(self, value):
         edit = QtWidgets.QDateEdit(value)
+        edit.setObjectName("billingDateEdit")
         edit.setCalendarPopup(True)
         edit.setDisplayFormat("yyyy-MM-dd")
         edit.setFixedSize(112, 30)
+        edit.setStyleSheet(
+            "QDateEdit#billingDateEdit{background:%s;border:1px solid %s;border-radius:8px;"
+            "padding:4px 24px 4px 8px;color:%s;selection-background-color:%s;selection-color:#ffffff;}"
+            "QDateEdit#billingDateEdit:focus{border:1px solid %s;background:%s;}"
+            "QDateEdit#billingDateEdit::drop-down{subcontrol-origin:padding;subcontrol-position:top right;"
+            "width:22px;border-left:1px solid %s;}"
+            "QDateEdit#billingDateEdit::down-arrow{width:0;height:0;border-left:4px solid transparent;"
+            "border-right:4px solid transparent;border-top:5px solid %s;margin-right:7px;}"
+            % (
+                TK["inputBg"], TK["inputBorder"], TK["text"], TK["accent"],
+                TK["accent"], TK["inputFocusBg"], TK["inputBorder"], TK["sub"],
+            )
+        )
+        calendar = QtWidgets.QCalendarWidget(edit)
+        calendar.setObjectName("billingDateCalendar")
+        calendar.setGridVisible(False)
+        calendar.setVerticalHeaderFormat(QtWidgets.QCalendarWidget.NoVerticalHeader)
+        calendar.setStyleSheet(
+            "QCalendarWidget#billingDateCalendar{background:%s;color:%s;border:1px solid %s;}"
+            "QCalendarWidget#billingDateCalendar QWidget#qt_calendar_navigationbar{background:%s;color:%s;"
+            "border-bottom:1px solid %s;}"
+            "QCalendarWidget#billingDateCalendar QToolButton{background:%s;color:%s;border:1px solid %s;"
+            "border-radius:7px;padding:4px;min-width:24px;}"
+            "QCalendarWidget#billingDateCalendar QToolButton:hover{background:%s;color:#ffffff;border-color:%s;}"
+            "QCalendarWidget#billingDateCalendar QToolButton::menu-indicator{image:none;width:0px;}"
+            "QCalendarWidget#billingDateCalendar QMenu{background:%s;color:%s;border:1px solid %s;}"
+            "QCalendarWidget#billingDateCalendar QMenu::item:selected{background:%s;color:#ffffff;}"
+            "QCalendarWidget#billingDateCalendar QSpinBox{background:%s;color:#ffffff;border:1px solid %s;"
+            "border-radius:8px;padding:2px 8px;selection-background-color:%s;selection-color:#ffffff;min-width:72px;}"
+            "QCalendarWidget#billingDateCalendar QSpinBox::up-button,"
+            "QCalendarWidget#billingDateCalendar QSpinBox::down-button{width:14px;background:%s;border:0;}"
+            "QCalendarWidget#billingDateCalendar QAbstractItemView{background:%s;color:%s;"
+            "selection-background-color:%s;selection-color:#ffffff;outline:0;}"
+            % (
+                TK["tableBg"], TK["text"], TK["accent"],
+                TK["headerBg"], TK["text"], TK["headerBorder"],
+                TK["ghostBg"], TK["text"], TK["ghostBorder"],
+                TK["ghostHoverBg"], TK["accent"],
+                TK["menuBg"], TK["menuText"], TK["menuBorder"],
+                TK["accent"],
+                TK["inputFocusBg"], TK["accent"], TK["accent"],
+                TK["inputFocusBg"],
+                TK["tableBg"], TK["text"], TK["accent"],
+            )
+        )
+        edit.setCalendarWidget(calendar)
         return edit
 
     def _segment_button(self, text, checked):
@@ -25520,26 +29065,53 @@ class AccountPage(BasePage):
         button.setFixedSize(30, 30)
         button.setIcon(self.style().standardIcon(icon))
         button.setIconSize(QtCore.QSize(14, 14))
-        button.setToolTip(tooltip)
+        button.setToolTip("")
+        attach_hover_info(button, tooltip, tooltip)
         button.setCursor(QtCore.Qt.PointingHandCursor)
         return button
 
     def _set_request_state(self, label, retry, text="", error=False):
         label.setText(text)
-        label.setToolTip(text)
+        label.setToolTip("")
         label.setStyleSheet("color:%s;font-size:10px;" % ("#ef5555" if error else TK["muted"]))
         retry.setVisible(bool(error))
+
+    def _set_initial_metric_loading(self, labels=None):
+        for label in (labels or self.metric_values.keys()):
+            widget = self.metric_values.get(label)
+            if widget is not None and str(widget.text() or "").strip() in ("", "—", "-"):
+                widget.setText("加载中")
+
+    def _ledger_table_item(self, text, color=None):
+        item = QtWidgets.QTableWidgetItem(str(text))
+        item.setTextAlignment(QtCore.Qt.AlignCenter)
+        if color:
+            item.setForeground(QtGui.QColor(color))
+        return item
+
+    def _set_ledger_loading_row(self):
+        if self.ltable.rowCount() == 0:
+            self.ltable.setRowCount(1)
+            item = self._ledger_table_item("正在读取扣费明细…", TK["muted"])
+            self.ltable.setItem(0, 0, item)
+            for column in range(1, self.ltable.columnCount()):
+                self.ltable.setItem(0, column, self._ledger_table_item(""))
 
     def _request_error(self, label, retry, payload, event):
         payload = payload if isinstance(payload, dict) else {}
         error_id = str(payload.get("errorId") or ("err-" + uuid.uuid4().hex[:16]))
+        code = str(payload.get("error") or "billing_request_failed")[:80]
         message = str(payload.get("message") or "账单数据暂时不可用")[:80]
-        self._set_request_state(label, retry, "%s，请重试 · 错误编号 %s" % (message, error_id), True)
+        if code == "date_range_too_large":
+            display_text = "查询范围最多366天，请重试"
+        else:
+            display_text = "%s，请重试 · 错误编号 %s" % (message, error_id)
+        self._set_request_state(label, retry, display_text, True)
         json_log(
             _CLIENT_JSON_LOGGER,
             event,
             errorId=error_id,
-            code=str(payload.get("error") or "billing_request_failed")[:80],
+            code=code,
         )
 
     def _analytics_filters_changed(self, *_args):
@@ -25561,26 +29133,104 @@ class AccountPage(BasePage):
         self._ledger_page = target
         self.load_ledger()
 
+    def _set_manual_refresh_busy(self, busy):
+        self._manual_refresh_active = bool(busy)
+        self.refresh_btn.setEnabled(not busy)
+        self.refresh_btn.setText("刷新中..." if busy else "刷新")
+        self.refresh_btn.setIcon(QtGui.QIcon() if busy else self._refresh_icon)
+
+    def _finish_manual_refresh_request(self, request_name, seq):
+        if not self._manual_refresh_active:
+            return
+        if self._manual_refresh_pending.get(request_name) != seq:
+            return
+        self._manual_refresh_pending.pop(request_name, None)
+        if self._manual_refresh_pending:
+            return
+        self._set_manual_refresh_busy(False)
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "billing_manual_refresh_completed",
+            level="info",
+        )
+
+    def _track_manual_refresh_request(self, request_name, seq):
+        if self._manual_refresh_active:
+            self._manual_refresh_pending[request_name] = seq
+
+    def _cancel_manual_refresh(self, reason):
+        if not self._manual_refresh_active:
+            return
+        self._manual_refresh_pending.clear()
+        self._set_manual_refresh_busy(False)
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "billing_manual_refresh_cancelled",
+            level="info",
+            reason=str(reason or "cancelled")[:40],
+        )
+
+    def refresh_all(self):
+        if self._manual_refresh_active:
+            return
+        self._manual_refresh_pending = {
+            "balance": self._balance_seq + 1,
+            "analytics": self._analytics_seq + 1,
+            "ledger": self._ledger_seq + 1,
+        }
+        self._set_manual_refresh_busy(True)
+        json_log(
+            _CLIENT_JSON_LOGGER,
+            "billing_manual_refresh_started",
+            level="info",
+            balanceSeq=self._manual_refresh_pending["balance"],
+            analyticsSeq=self._manual_refresh_pending["analytics"],
+            ledgerSeq=self._manual_refresh_pending["ledger"],
+            page=self._ledger_page,
+        )
+        self.load_balance()
+        self.load_analytics()
+        self.load_ledger(reset_page=False)
+
     def on_show(self):
         self.billing_box.setVisible(product_role() == "platform_admin")
         self.phone_bind_panel.setVisible(product_role() == "platform_admin")
         self.load_balance()
         self.load_analytics()
         self.load_ledger(reset_page=True)
+        self._billing_refresh_timer.start()
         if product_role() == "platform_admin":
             self.load_users()
         else:
             self.admin_box.setVisible(False)
 
+    def hideEvent(self, event):
+        self._billing_refresh_timer.stop()
+        self._cancel_manual_refresh("page_hidden")
+        super().hideEvent(event)
+
+    def _auto_refresh_billing(self):
+        if not self.isVisible() or self._manual_refresh_active:
+            return
+        self.load_balance()
+        self.load_analytics()
+        self.load_ledger()
+
     def load_balance(self):
+        self._balance_seq += 1
+        seq = self._balance_seq
+        self._track_manual_refresh_request("balance", seq)
+        if not self._analytics_balance_authoritative:
+            self._set_initial_metric_loading(["云豆余额"])
         def work():
             bal = fetch_balance()
-            BRIDGE.payload.emit("acct_bal", {"balance": bal})
+            BRIDGE.payload.emit("acct_bal", {"seq": seq, "balance": bal})
         run_bg(work)
 
     def load_analytics(self):
         self._analytics_seq += 1
         seq = self._analytics_seq
+        self._track_manual_refresh_request("analytics", seq)
         if self.analytics_start.date() > self.analytics_end.date():
             self._request_error(
                 self.analytics_error,
@@ -25588,12 +29238,14 @@ class AccountPage(BasePage):
                 {"message": "开始日期不能晚于结束日期", "error": "invalid_date_range"},
                 "billing_analytics_request_failed",
             )
+            self._finish_manual_refresh_request("analytics", seq)
             return
         query = _billing_query({
             "startDate": self.analytics_start.date().toString("yyyy-MM-dd"),
             "endDate": self.analytics_end.date().toString("yyyy-MM-dd"),
             "groupBy": self._group_by,
         })
+        self._set_initial_metric_loading(["云豆余额", "期间总消耗", "日均消耗", "单条视频平均消耗"])
         self._set_request_state(self.analytics_error, self.analytics_retry, "正在加载…")
         json_log(
             _CLIENT_JSON_LOGGER,
@@ -25620,6 +29272,7 @@ class AccountPage(BasePage):
             self._ledger_page = 1
         self._ledger_seq += 1
         seq = self._ledger_seq
+        self._track_manual_refresh_request("ledger", seq)
         if self.detail_start.date() > self.detail_end.date():
             self._request_error(
                 self.ledger_error,
@@ -25627,6 +29280,7 @@ class AccountPage(BasePage):
                 {"message": "明细开始日期不能晚于结束日期", "error": "invalid_date_range"},
                 "billing_ledger_request_failed",
             )
+            self._finish_manual_refresh_request("ledger", seq)
             return
         query = _billing_query({
             "startDate": self.detail_start.date().toString("yyyy-MM-dd"),
@@ -25636,6 +29290,7 @@ class AccountPage(BasePage):
             "page": self._ledger_page,
             "pageSize": int(self.page_size.currentText() or 20),
         })
+        self._set_ledger_loading_row()
         self._set_request_state(self.ledger_error, self.ledger_retry, "正在加载…")
         json_log(
             _CLIENT_JSON_LOGGER,
@@ -25782,10 +29437,31 @@ class AccountPage(BasePage):
     def _on(self, tag, d):
         d = d or {}
         if tag == "acct_bal":
+            seq = d.get("seq")
+            if seq is not None:
+                self._finish_manual_refresh_request("balance", seq)
+            if seq is not None and seq != self._balance_seq:
+                json_log(
+                    _CLIENT_JSON_LOGGER,
+                    "billing_balance_stale_response_dropped",
+                    level="info",
+                    seq=seq,
+                    currentSeq=self._balance_seq,
+                )
+                return
+            if self._analytics_balance_authoritative:
+                json_log(
+                    _CLIENT_JSON_LOGGER,
+                    "billing_legacy_balance_ignored",
+                    level="info",
+                )
+                return
             bal = d.get("balance")
-            self.bal_lab.setText("∞ 运营方" if bal == float("inf") else _billing_amount(bal))
+            if bal is not None:
+                self.bal_lab.setText("∞ 运营方" if bal == float("inf") else _billing_amount(bal))
         elif tag == "acct_analytics":
             seq = d.get("seq")
+            self._finish_manual_refresh_request("analytics", seq)
             if seq != self._analytics_seq:
                 json_log(
                     _CLIENT_JSON_LOGGER,
@@ -25816,6 +29492,7 @@ class AccountPage(BasePage):
                 )
                 return
             self.metric_values["云豆余额"].setText(_billing_amount(metrics.get("balance")))
+            self._analytics_balance_authoritative = True
             self.metric_values["期间总消耗"].setText(_billing_amount(metrics.get("totalConsumption")))
             self.metric_values["日均消耗"].setText(_billing_amount(metrics.get("dailyAverage")))
             self.metric_values["单条视频平均消耗"].setText(_billing_amount(metrics.get("videoAverage")))
@@ -25835,6 +29512,7 @@ class AccountPage(BasePage):
             )
         elif tag == "acct_ledger":
             seq = d.get("seq")
+            self._finish_manual_refresh_request("ledger", seq)
             if seq != self._ledger_seq:
                 json_log(
                     _CLIENT_JSON_LOGGER,
@@ -25871,7 +29549,8 @@ class AccountPage(BasePage):
                         created = "—"
                 else:
                     created = "—"
-                detail = str(x.get("detail") or "—")
+                model_text = _billing_ledger_model_text(x)
+                detail = _billing_ledger_detail_text(x)
                 change = x.get("change") or 0
                 try:
                     change_value = float(change)
@@ -25880,21 +29559,19 @@ class AccountPage(BasePage):
                 change_text = _billing_amount(change_value)
                 if change_value > 0:
                     change_text = "+" + change_text
-                self.ltable.setItem(r, 0, QtWidgets.QTableWidgetItem(created))
-                self.ltable.setItem(r, 1, QtWidgets.QTableWidgetItem(str(x.get("typeLabel") or "—")))
-                self.ltable.setItem(r, 2, QtWidgets.QTableWidgetItem(str(x.get("modelId") or "—")))
-                detail_item = QtWidgets.QTableWidgetItem(detail)
-                detail_item.setToolTip(detail)
+                self.ltable.setItem(r, 0, self._ledger_table_item(created))
+                self.ltable.setItem(r, 1, self._ledger_table_item(str(x.get("typeLabel") or "—")))
+                self.ltable.setItem(r, 2, self._ledger_table_item(model_text))
+                detail_item = self._ledger_table_item(detail)
+                detail_item.setToolTip("")
+                detail_item.setData(QtCore.Qt.ToolTipRole, "")
                 self.ltable.setItem(r, 3, detail_item)
-                change_item = QtWidgets.QTableWidgetItem(change_text)
-                if change_value < 0:
-                    change_item.setForeground(QtGui.QColor("#ef5555"))
-                elif change_value > 0:
-                    change_item.setForeground(QtGui.QColor("#22c55e"))
+                change_color = "#ef5555" if change_value < 0 else ("#22c55e" if change_value > 0 else None)
+                change_item = self._ledger_table_item(change_text, change_color)
                 self.ltable.setItem(r, 4, change_item)
                 balance_after = "—" if x.get("balanceAfter") is None else _billing_amount(x.get("balanceAfter"))
-                self.ltable.setItem(r, 5, QtWidgets.QTableWidgetItem(balance_after))
-                self.ltable.setItem(r, 6, QtWidgets.QTableWidgetItem(str(x.get("statusLabel") or "—")))
+                self.ltable.setItem(r, 5, self._ledger_table_item(balance_after))
+                self.ltable.setItem(r, 6, self._ledger_table_item(str(x.get("statusLabel") or "—")))
             self._ledger_page = max(1, int(pagination.get("page") or 1))
             self._ledger_total_pages = max(0, int(pagination.get("totalPages") or 0))
             total = max(0, int(pagination.get("total") or 0))
@@ -25957,6 +29634,7 @@ class AccountPage(BasePage):
             if d.get("ok"):
                 self.load_users()
                 self.load_balance()
+                self.load_analytics()
             else:
                 QtWidgets.QMessageBox.warning(self, "充值失败", str(d.get("err") or ""))
         elif tag == "acct_redeem":
@@ -25970,6 +29648,7 @@ class AccountPage(BasePage):
                 self.redeem_in.clear()
                 self.redeem_msg.setText("充值成功  +%s 云豆 ✓" % amt_s)
                 self.load_balance()
+                self.load_analytics()
                 self.load_ledger()
             else:
                 err = (d.get("j") or {}).get("error") or ""
@@ -26047,13 +29726,14 @@ class TabbedWorkspacePage(BasePage):
 
 
 class PublishWorkspacePage(TabbedWorkspacePage):
-    nav_aliases = ("🎬 素材与发布", "📤 待发布队列")
-
     def __init__(self):
-        super().__init__([
-            ("素材库与发布", lambda: PublishPage()),
-            ("待发布队列", lambda: PendingPublishPage()),
-        ])
+        tabs = [("素材库与发布", lambda: PublishPage())]
+        aliases = ["🎬 素材与发布"]
+        if pending_publish_ui_enabled():
+            tabs.append(("待发布队列", lambda: PendingPublishPage()))
+            aliases.append("📤 待发布队列")
+        self.nav_aliases = tuple(aliases)
+        super().__init__(tabs)
 
 
 class KnowledgeWorkspacePage(TabbedWorkspacePage):
@@ -26076,6 +29756,8 @@ class EnterpriseCenterPage(TabbedWorkspacePage):
         ])
 
 
+XHS_NOTE_NAV_ITEM = ("🧩 " + "图文同款", lambda: XhsNoteReplacementPage())
+
 NAV = [
     ("账号与配置", [
         ("🏢 企业中心", lambda: EnterpriseCenterPage()),
@@ -26090,14 +29772,13 @@ NAV = [
         ("🔎 内容采集", lambda: ContentPage()),
         ("🔬 分解视频", lambda: VideoBreakdownPage()),
         ("🧬 同款替换", lambda: VideoReplacementPage()),
-        ("🧩 图文同款", lambda: XhsNoteReplacementPage()),
+        *(([XHS_NOTE_NAV_ITEM] if xhs_enabled() else [])),
         ("🛍️ Agent.模式", lambda: ProductGenPage()),
         ("🗂️ 资产库", lambda: AssetLibraryPage()),
         ("🧑 数字人口播", lambda: DigitalHumanPage()),
     ]),
     ("安全与自动化", [
         ("🤖 工作流助手", lambda: AgentChatPage()),
-        ("🔀 自动化工作流", lambda: WorkflowPage()),
         ("🛡️ 风控中心", lambda: RiskControlPage()),
         ("✅ 任务中心", lambda: TaskCenterPage()),
     ]),
@@ -26666,7 +30347,7 @@ class LoginView(QtWidgets.QWidget):
 
         frow = QtWidgets.QHBoxLayout()
         frow.setSpacing(10)
-        for t in ("🛍️  Agent.模式", "🎞️  混剪短视频", "🤖  自动化工作流"):
+        for t in ("🛍️  Agent.模式", "🎞️  混剪短视频", "🤖  工作流助手"):
             fc = QtWidgets.QLabel(t)
             fc.setStyleSheet("background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);"
                              "border-radius:10px;color:#dfe5f2;font-size:12.5px;padding:8px 13px;")
@@ -26688,7 +30369,7 @@ class LoginView(QtWidgets.QWidget):
         cv.setSpacing(13)
         title = QtWidgets.QLabel("登录 / 加入企业")
         title.setStyleSheet("color:#f4f7ff;font-size:21px;font-weight:800;background:transparent;")
-        self.sub = QtWidgets.QLabel("使用账号密码登录，或通过邀请码加入企业")
+        self.sub = QtWidgets.QLabel("使用用户名和密码登录，或通过邀请码加入企业")
         self.sub.setStyleSheet("color:rgba(160,172,196,0.9);font-size:12.5px;background:transparent;")
         cv.addWidget(title)
         cv.addWidget(self.sub)
@@ -26737,9 +30418,9 @@ class LoginView(QtWidgets.QWidget):
         self.invite_name_in.setMinimumHeight(46)
         _login_ph(self.invite_name_in)
         cv.addWidget(self.invite_name_in)
-        # 手机号 / 账号
+        # 用户名 / 注册手机号
         self.phone_in = QtWidgets.QLineEdit()
-        self.phone_in.setPlaceholderText("手机号 / 用户名")
+        self.phone_in.setPlaceholderText("用户名")
         self.phone_in.setMaxLength(64)
         self.phone_in.setStyleSheet(_LOGIN_INPUT_QSS)
         self.phone_in.setMinimumHeight(46)
@@ -26782,7 +30463,7 @@ class LoginView(QtWidgets.QWidget):
         cv.addWidget(self.invite_current_pw_in)
         self._invite_verified_code = ""
         self._invite_request_generation = 0
-        # 手机验证码(登录=账号密码后二次验证 2FA / 注册=验证手机号)
+        # 手机验证码(仅注册=验证手机号)
         self.code_row = QtWidgets.QWidget()
         self.code_row.setStyleSheet("background:transparent;")
         crl = QtWidgets.QHBoxLayout(self.code_row)
@@ -26908,7 +30589,7 @@ class LoginView(QtWidgets.QWidget):
             self.phone_in.clear()
             self.invite_email_in.clear()
         else:
-            self.phone_in.setPlaceholderText("手机号" if is_reg else "手机号 / 用户名")
+            self.phone_in.setPlaceholderText("手机号" if is_reg else "用户名")
             self.phone_in.setMaxLength(11 if is_reg else 64)
         self.phone_in.setVisible(not is_invite)
         self.pw_in.setVisible(True)
@@ -26926,12 +30607,12 @@ class LoginView(QtWidgets.QWidget):
         if not is_invite:
             self.invite_current_pw_in.clear()
         self.invite_current_pw_in.setVisible(False)
-        self.code_row.setVisible(not is_invite)
+        self.code_row.setVisible(is_reg)
         self.opt_row.setVisible(is_login)
         self.btn.setText("加入企业" if is_invite else ("注 册" if is_reg else "登 录"))
         self.sub.setText("校验邀请码后填写账号信息" if is_invite else (
             "手机号验证 + 设置密码,即可开始使用" if is_reg
-            else "手机号登录需验证码;用户名登录只需密码"
+            else "请输入用户名和密码登录"
         ))
         if is_invite:
             self._card_layout.setContentsMargins(28, 20, 28, 20)
@@ -26954,9 +30635,7 @@ class LoginView(QtWidgets.QWidget):
     def _sync_login_code_ui(self):
         if not hasattr(self, "code_row"):
             return
-        need_code = self._mode != "invite" and (
-            self._mode == "register" or login_needs_phone_code(self.phone_in.text().strip())
-        )
+        need_code = self._mode == "register"
         self.code_row.setVisible(need_code)
         if not need_code:
             self.code_in.clear()
@@ -27112,8 +30791,8 @@ class LoginView(QtWidgets.QWidget):
 
     def send_code(self):
         phone = self.phone_in.text().strip()
-        if self._mode == "login" and not login_needs_phone_code(phone):
-            self._set_msg("用户名登录无需验证码", "info")
+        if self._mode != "register":
+            self._set_msg("当前登录方式不需要验证码", "info")
             return
         if not (phone.isdigit() and len(phone) == 11):
             self._set_msg("请输入 11 位手机号", "err")
@@ -27139,7 +30818,7 @@ class LoginView(QtWidgets.QWidget):
                 self._set_mode("login")   # 内部已复位验证码/倒计时并回填账号密码
             except Exception:
                 pass
-            self._set_msg("登录已过期,请重新获取验证码后登录", "err")
+            self._set_msg("登录已过期，请重新登录", "err")
             return
         if tag == "login_invite_verify":
             d = d or {}
@@ -27290,20 +30969,16 @@ class LoginView(QtWidgets.QWidget):
                 "password": pw,
                 "legalConsent": _legal_consent_payload(),
             }
-        else:  # login:手机号 + 密码 + 验证码, 或用户名 + 密码
+        else:  # login:用户名 + 密码
             if not acct:
-                self._set_msg("请输入手机号或用户名", "err")
+                self._set_msg("请输入用户名", "err")
                 return
             if not pw:
                 self._set_msg("请输入密码", "err")
                 return
-            if login_needs_phone_code(acct) and not code:
-                self._set_msg("请输入短信验证码(账号密码需二次验证)", "err")
-                return
             path, body = "/api/auth/login", {
                 "identifier": acct,
                 "password": pw,
-                "code": code,
                 "legalConsent": _legal_consent_payload(),
             }
         remember = self._mode == "login" and self.remember_cb.isChecked()
@@ -27532,6 +31207,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._page_widgets.append(page)
                 self._page_hosts.append(host)
                 b = NavButton(name)
+                if name == SAME_STYLE_REPLACEMENT_NAV:
+                    attach_hover_info(
+                        b,
+                        "同款替换",
+                        SAME_STYLE_REPLACEMENT_TOOLTIP,
+                    )
                 b.clicked.connect(lambda _=False, i=idx: self._nav(i))
                 nvl.addWidget(b)
                 self.nav_btns.append(b)
@@ -27565,10 +31246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conn_name = QtWidgets.QLabel("未登录")
         self.conn_name.setStyleSheet("color:#e8eaf0;font-size:12px;font-weight:700;background:transparent;")
         self.conn_name.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
-        self.conn = QtWidgets.QLabel("● 未连接")
-        self.conn.setObjectName("conn")
         acol.addWidget(self.conn_name)
-        acol.addWidget(self.conn)
         user_row.addWidget(self.avatar)
         user_row.addLayout(acol, 1)
         foot.addLayout(user_row)
@@ -27614,18 +31292,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _goto_nav(self, tag, d):
         if tag == "goto_nav":
             i = self._nav_labels.get(d)
-            if i is not None and (i >= len(getattr(self, "_nav_names", [])) or nav_allowed(self._nav_names[i])):
-                self._nav(i)
+            if i is None:
+                return
+            if i < len(getattr(self, "_nav_names", [])):
+                name = self._nav_names[i]
+                if not nav_allowed(name) or not nav_feature_enabled(name):
+                    return
+            self._nav(i)
 
     def _apply_role_visibility(self):
         for i, b in enumerate(getattr(self, "nav_btns", [])):
             name = self._nav_names[i] if i < len(getattr(self, "_nav_names", [])) else ""
-            if not nav_allowed(name):
-                b.setVisible(False)
-                b.setEnabled(False)
-            else:
-                b.setVisible(True)
-                b.setEnabled(True)
+            allowed = nav_allowed(name)
+            b.setVisible(allowed)
+            b.setEnabled(allowed and nav_feature_enabled(name))
 
     def _toast(self, msg, ms=6200):
         """Small non-blocking in-window notice for background actions."""
@@ -27669,31 +31349,24 @@ class MainWindow(QtWidgets.QMainWindow):
         st = d.get("status")
         msg = d.get("msg") or ""
         if st == "starting":
-            self.conn.setText("● 已连接 · 正在预热抖音")
-            self.conn.setToolTip("")
             self._toast(msg, 7600)
         elif st == "done":
-            self.conn.setText("● 已连接 · 抖音预热完成")
-            self.conn.setToolTip("")
             self._toast(msg, 5200)
-            QtCore.QTimer.singleShot(5200, lambda: self.conn.setText("● 已连接 · 数据隔离"))
         elif st == "skipped":
-            self.conn.setText("● 已连接 · 已跳过抖音预热")
-            self.conn.setToolTip("")
             self._toast(msg, 7600)
-            QtCore.QTimer.singleShot(7600, lambda: self.conn.setText("● 已连接 · 数据隔离"))
         elif st == "error":
-            self.conn.setText("● 已连接 · 抖音预热未完成")
-            self.conn.setToolTip("")
             self._toast(msg, 6200)
-            QtCore.QTimer.singleShot(6200, lambda: self.conn.setText("● 已连接 · 数据隔离"))
 
     def _nav(self, i):
+        if i < len(getattr(self, "_nav_names", [])) and not nav_feature_enabled(self._nav_names[i]):
+            return
         if i < len(getattr(self, "_nav_names", [])) and not nav_allowed(self._nav_names[i]):
             for j, name in enumerate(getattr(self, "_nav_names", [])):
-                if nav_allowed(name):
+                if nav_allowed(name) and nav_feature_enabled(name):
                     i = j
                     break
+            else:
+                return
         self.pages.setCurrentIndex(i)
         for k, b in enumerate(self.nav_btns):
             b.setChecked(k == i)
@@ -27737,11 +31410,9 @@ class MainWindow(QtWidgets.QMainWindow):
         disp = user.get("name") or user.get("phone") or str(acc)
         self.conn_name.setText(str(disp))
         self.avatar.setText((str(disp)[:1] or "·").upper())
-        self.conn.setText("● 已连接 · 数据隔离")
         BRIDGE.payload.connect(self._on_balance)
         self.refresh_balance()
         self._start_balance_timer()
-        self._start_scheduler()
 
     def _start_balance_timer(self):
         if getattr(self, "_balance_timer", None) is None:
@@ -27837,11 +31508,33 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._logout_btn.setIcon(QtGui.QIcon(_draw_icon("logout", 14, TK["iconText"])))
         except Exception:
             pass
-        self._rebuild_pages()
+        self._refresh_theme_ui()
         return True
 
+    def _refresh_theme_ui(self):
+        """主题切换只刷新现有控件,不销毁页面,避免清空输入、聊天和任务状态。"""
+        try:
+            app = QtWidgets.QApplication.instance()
+            widgets = [self] + list(self.findChildren(QtWidgets.QWidget))
+            if app is not None:
+                style = app.style()
+                for w in widgets:
+                    try:
+                        style.unpolish(w)
+                        style.polish(w)
+                    except Exception:
+                        pass
+            for w in widgets:
+                try:
+                    if isinstance(w, AuroraBg) or w.objectName() in ("root", "sidebar", "page"):
+                        w.update()
+                except Exception:
+                    pass
+        except Exception as e:
+            log("theme refresh: %s" % e)
+
     def _rebuild_pages(self):
-        """主题切换后重建所有页面(内联样式读 TK 的控件随之更新);侧栏/chrome 已随 setStyleSheet 生效。"""
+        """重建所有页面。仅保留给需要完整重建的场景,主题切换不再调用。"""
         try:
             cur = self.pages.currentIndex()
         except Exception:

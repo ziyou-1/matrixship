@@ -64,6 +64,92 @@ class BillingAnalyticsTest(unittest.TestCase):
             "usage-7": ("charged", Decimal("-10")),
         })
 
+    def test_authoritative_recharges_deduplicate_camel_case_source_rows(self):
+        paid_at = "2026-07-29T10:00:00+08:00"
+        used_at = "2026-07-29T11:00:00+08:00"
+        rows = normalize_billing_records(
+            44,
+            [
+                {
+                    "id": "ledger-wxpay",
+                    "userId": 44,
+                    "delta": "100",
+                    "reason": "微信充值",
+                    "ref": "wxpay:order-1",
+                    "ts": paid_at,
+                    "balanceAfter": "200",
+                },
+                {
+                    "id": "ledger-redeem",
+                    "userId": 44,
+                    "delta": "50",
+                    "reason": "兑换码充值",
+                    "ref": "redeem:GIFT-1",
+                    "ts": used_at,
+                    "balanceAfter": "250",
+                },
+            ],
+            [],
+            [
+                {
+                    "id": "order-source",
+                    "userId": 44,
+                    "orderNo": "order-1",
+                    "status": "paid",
+                    "credit": "100",
+                    "paidAt": paid_at,
+                }
+            ],
+            [
+                {
+                    "id": "redeem-source",
+                    "usedBy": 44,
+                    "code": "GIFT-1",
+                    "status": "used",
+                    "amount": "50",
+                    "usedAt": used_at,
+                }
+            ],
+        )
+
+        self.assertEqual([row["id"] for row in rows], ["ledger-redeem", "ledger-wxpay"])
+        self.assertEqual(
+            {row["requestId"] for row in rows},
+            {"wxpay:order-1", "redeem:GIFT-1"},
+        )
+
+    def test_charge_and_refund_preserve_shared_ledger_ref_for_traceability(self):
+        shared_ref = "video:req-shared"
+        rows = normalize_billing_records(
+            44,
+            [
+                {
+                    "id": "charge",
+                    "userId": 44,
+                    "delta": "-9",
+                    "reason": "视频生成",
+                    "ref": shared_ref,
+                    "ts": "2026-07-29T10:00:00+08:00",
+                    "balanceAfter": "91",
+                },
+                {
+                    "id": "refund",
+                    "userId": 44,
+                    "delta": "9",
+                    "reason": "退款:视频生成",
+                    "ref": shared_ref,
+                    "ts": "2026-07-29T10:05:00+08:00",
+                    "balanceAfter": "100",
+                },
+            ],
+            [],
+            [],
+            [],
+        )
+
+        self.assertEqual({row["requestId"] for row in rows}, {shared_ref})
+        self.assertEqual({row["status"] for row in rows}, {"charged", "refunded"})
+
     def test_normalized_amounts_remain_decimal_until_ledger_response_conversion(self):
         rows = normalize_billing_records(
             44,

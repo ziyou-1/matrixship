@@ -52,6 +52,38 @@ class WorkflowResilienceTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.client["_wf_out_dir"] = mock.Mock(return_value=self._tmpdir.name)
+        for key in ("lk888_vision", "lk888_chat", "kb_context", "add_asset"):
+            self.client.pop(key, None)
+
+        def fake_reference_analysis(path, item=None, topic="", out_dir=None, progress=None):
+            del item, topic, out_dir
+            if callable(progress):
+                progress("stub reference analysis")
+            vision = self.client.get("lk888_vision")
+            visual = vision("stub reference analysis", [path]) if callable(vision) else "镜头1：参考画面"
+            return {
+                "analysis": {
+                    "meta": {"duration": 8.0, "path": path},
+                    "visual": str(visual),
+                    "transcript": {"status": "ok", "text": "", "segments": []},
+                },
+                "markdown": "镜头1：参考画面\n" + str(visual),
+            }
+
+        def fake_save_reference_analysis_artifact(ctx, path, analysis):
+            ctx.setdefault("referenceAnalyses", {})[path] = analysis
+            return ""
+
+        def add_reference_asset(path, **kwargs):
+            kwargs.pop("analysis_path", None)
+            kwargs.setdefault("kind", self.client["_workflow_artifact_kind"](path))
+            kwargs.setdefault("text_path", kwargs.get("breakdown_path") or "")
+            kwargs.setdefault("preview", kwargs.get("thumbnail") or "")
+            return self.client["add_asset"](path, **kwargs)
+
+        self.client["_workflow_analyze_reference_video"] = fake_reference_analysis
+        self.client["_workflow_save_reference_analysis_artifact"] = fake_save_reference_analysis_artifact
+        self.client["_workflow_add_reference_asset"] = add_reference_asset
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -465,11 +497,11 @@ class WorkflowResilienceTest(unittest.TestCase):
         self.assertNotIn("_publish_done", ctx)
         self.client["add_pending"].assert_not_called()
 
-    def test_orchestrator_prompt_forbids_publishing_collected_source_video(self):
+    def test_direct_assistant_prompt_forbids_workflow_json_and_source_video_publish(self):
         src = CLIENT.read_text(encoding="utf-8-sig")
-        self.assertIn("采集视频只能作为“采集参考视频”入资产库,不得直接发布", src)
-        self.assertIn("强制文本型工作流", src)
-        self.assertIn("禁止编排 image/video/tts/publish", src)
+        self.assertIn("不得输出工作流 JSON", src)
+        self.assertIn("不得引导用户进入自动化工作流页面", src)
+        self.assertIn("不得把采集到的原视频当成可发布素材", src)
 
 
 if __name__ == "__main__":

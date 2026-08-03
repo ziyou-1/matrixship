@@ -156,6 +156,17 @@ class StructuredLogTest(unittest.TestCase):
         self.assertNotIn("url-secret", raw)
         self.assertEqual(len(logger.rows), 1)
 
+    def test_json_log_info_success_does_not_auto_generate_error_id(self):
+        self.require_module()
+        logger = FakeLogger()
+
+        raw = self.logs.json_log(logger, "billing_analytics_completed", level="info", rows=3)
+        payload = json.loads(raw)
+
+        self.assertEqual(payload["event"], "billing_analytics_completed")
+        self.assertNotIn("errorId", payload)
+        self.assertEqual(payload["rows"], 3)
+
     def test_json_log_redacts_embedded_url_query_values_in_plain_text(self):
         self.require_module()
         logger = FakeLogger()

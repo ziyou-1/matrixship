@@ -243,6 +243,36 @@ class VideoTranscriptionTest(unittest.TestCase):
         self.assertEqual(merged["segments"][0]["endSec"], 124.0)
         self.assertIn("[02:01.500-02:04.000] 测试文本", merged["text"])
 
+    def test_merge_transcription_segments_removes_adjacent_text_overlap(self):
+        self.require_module()
+        repeated = "就这个法汀妮的粉底液啊，我自用三四年了，真的巨好用。"
+        merged = self.transcription.merge_transcription_segments([
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "language": "zh-CN",
+                "segments": [{
+                    "startSec": 0.0,
+                    "endSec": 8.0,
+                    "text": "我想过它会卖69、59、49啊，但是没想到它居然能便宜到这个价格。" + repeated,
+                }],
+            },
+            {
+                "start": 60.0,
+                "end": 120.0,
+                "language": "zh-CN",
+                "segments": [{
+                    "startSec": 0.0,
+                    "endSec": 8.0,
+                    "text": repeated + "你们看它上脸这个流动性啊，特别的水润。",
+                }],
+            },
+        ])
+
+        texts = [row["text"] for row in merged["segments"]]
+        self.assertEqual(texts[1], "你们看它上脸这个流动性啊，特别的水润。")
+        self.assertEqual(merged["text"].count(repeated), 1)
+
     def test_remote_failures_retry_twice_and_return_partial(self):
         self.require_module()
         calls = []
@@ -308,6 +338,42 @@ class VideoTranscriptionTest(unittest.TestCase):
         self.assertEqual(result["segments"][0]["startSec"], 60.0)
         self.assertEqual(result["segments"][0]["endSec"], 120.0)
         self.assertIn("真实的口播文本", result["text"])
+
+    def test_transcription_requests_can_tag_billing_stage(self):
+        self.require_module()
+        calls = []
+
+        def request_fn(url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse(gemini_payload({
+                "language": "zh-CN",
+                "segments": [{"startSec": 0.0, "endSec": 1.0, "text": "测试口播"}],
+            }))
+
+        with tempfile.TemporaryDirectory() as td:
+            chunk = Path(td) / "chunk.mp3"
+            chunk.write_bytes(b"audio")
+            result = self.transcription.transcribe_audio_chunks(
+                [{"start": 0.0, "end": 60.0, "path": str(chunk)}],
+                "http://127.0.0.1:9080/lk888",
+                "session-token",
+                "gemini-test",
+                timeout=1,
+                retries=0,
+                request_fn=request_fn,
+                sleep_fn=lambda _seconds: None,
+                billing_context={
+                    "scenario": "video_breakdown",
+                    "stage": "audio_transcription",
+                    "detail": "audio chunk 0.000-60.000",
+                },
+            )
+
+        self.assertEqual(result["status"], "ok")
+        headers = calls[0][1]["headers"]
+        self.assertEqual(headers["X-Matrix-Billing-Scenario"], "video_breakdown")
+        self.assertEqual(headers["X-Matrix-Billing-Stage"], "audio_transcription")
+        self.assertEqual(headers["X-Matrix-Billing-Detail"], "audio chunk 0.000-60.000")
 
     def test_valid_schema_refusal_segment_is_marked_failed(self):
         self.require_module()
@@ -468,6 +534,16 @@ class VideoTranscriptionTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "transcription_refused"):
             self.transcription._parse_candidate(
                 "I am sorry, but I am unable to fulfill this transcription request.",
+                60.0,
+            )
+
+    def test_english_transcription_explanation_is_not_accepted_as_transcript(self):
+        self.require_module()
+
+        with self.assertRaisesRegex(RuntimeError, "transcription_invalid_response"):
+            self.transcription._parse_candidate(
+                "**JSON Transcription of Chinese Video**\n"
+                "Okay, so I need to create a JSON transcription for this short Chinese video.",
                 60.0,
             )
 

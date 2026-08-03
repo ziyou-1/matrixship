@@ -67,9 +67,10 @@ class WorkflowAccountScopeTest(unittest.TestCase):
         calls = _method_calls("WorkflowPage", "__init__")
         self.assertIn("_reload_list", calls)
 
-    def test_account_scoped_state_loader_includes_workflows(self):
+    def test_account_scoped_state_loader_excludes_legacy_workflows(self):
         calls = _function_calls("reload_account_scoped_state")
-        self.assertEqual(calls[:5], ["load_workflows", "load_pending", "load_assets", "load_brand", "load_risk"])
+        self.assertNotIn("load_workflows", calls)
+        self.assertEqual(calls[:4], ["load_pending", "load_assets", "load_brand", "load_risk"])
 
     def test_workflow_page_exposes_delete_current_workflow_action(self):
         block = _class_source("WorkflowPage")

@@ -1,25 +1,81 @@
 # 部署说明
 
+## 2026-08-03 公开下载页 `/download`
+
+- 中心服内置公开页面 `/download`，不依赖独立前端构建产物。部署中心服新版本并重启中心服后即可访问。
+- 当前页面仅展示下载说明，下载按钮处于禁用状态，文案为“Windows 客户端即将开放下载”，不连接真实安装包。
+- 正式开放下载前，不需要发布安装包文件；现有安装包直链 `/MatrixShipAgent-Setup.exe` 不随本页面变更。
+- 数据库、Docker 镜像结构、环境变量和 `migration.sql` 均无影响。
+- 回滚方式：回滚中心服代码到上一稳定版本，或删除 `/download` 路由与页面渲染函数。若页面异常率超过 1%，可先通过中心服代码回滚移除该页面，不影响客户端更新检查和安装包直链。
+
+## 2026-08-03 MiniMax H3 Official Direct Release
+
+- Scope: central server `backend/central_server.py` and remote AI Canvas `/root/AI-CanvasPro/server.py`.
+- Center env: `MINIMAX_ENABLED=1`, `MINIMAX_CENTER_API_BASE=https://api.minimaxi.com`, `MINIMAX_CENTER_API_KEY=<center-only-key>`.
+- Remote comic env: `MINIMAX_ENABLED=1`, `MINIMAX_COMIC_API_BASE=https://api.minimaxi.com`, `MINIMAX_COMIC_API_KEY=<comic-only-key>`.
+- Shared runtime limits: `MINIMAX_MAX_ACTIVE_TASKS=2`, `MINIMAX_TASK_TIMEOUT_SEC=900`, `MINIMAX_POLL_INTERVAL_SEC=5`.
+- Secrets stay in process env or uncommitted `.env` files. Do not reuse the center key for the remote comic generator.
+- Packaging guard: do not copy or archive the whole workspace for release. Use Git-tracked source export or Docker build context only. `backend/.dockerignore` excludes `.env`, `.env.*`, runtime data, logs, uploads, caches, and backups; `.tmp-validation/` and local ignored env backups must never be included in manual release bundles.
+- Rollback: set `MINIMAX_ENABLED=0` to block new H3 submissions. For remote AI Canvas code rollback, restore the deployment backup `/root/AI-CanvasPro/server.py.bak.<timestamp>`, restart `ai-canvas.service`, then verify service active, port `8777` listening, and `/login` returns 200.
+- Database impact: none. `migration.sql` contains a no-op release note only.
+- Remote deploy evidence: `/root/AI-CanvasPro/server.py` was updated at `20260803_122102`; backup `/root/AI-CanvasPro/server.py.bak.minimax-h3-poll-20260803_122102`; previous SHA `581f254102277914742d15e0384f8c8aa94341e04e2756dc97108f715ecdfa89`; deployed SHA `5bd0ee530bd5c3629d1ec91b5f733e04deb33e6ef09eafd717660f070537b295`; `ai-canvas.service` active; port `8777` listening; `/login` returned 200.
+
+## 2026-08-03 抖音单平台运行开关
+
+当前默认只开放抖音。`backend/.env.example`、`backend/.env.dev`、`backend/.env.prod` 和 `docker-compose.prod.yml` 均声明 `MATRIX_XHS_ENABLED=0`；本地客户端、本地执行器和中心服启动后会隐藏/拒绝小红书/XHS 入口、接口、平台适配器和任务类型。
+
+恢复小红书时设置 `MATRIX_XHS_ENABLED=1`，并重启三个运行单元：本地客户端、`backend/api_server.py` 本地执行器、`backend/central_server.py` 中心服。上线前必须重新执行小红书账号登录态、搜索、下载、评论、发布和图文同款冒烟；失败时把开关改回 `0` 并重启即可回滚到抖音单平台。
+
+历史小红书账号不需要保留。清理前先 dry-run：
+
+```powershell
+.\.venv-win\Scripts\python.exe scripts\disable_xhs_accounts.py --data-dir backend\datas --central-state backend\central_data\scheduler_state.json --dry-run
+```
+
+确认只命中小红书 profile/账号行后去掉 `--dry-run` 执行。该脚本不删除抖音账号目录、素材库或媒体文件；数据库结构无变化，`migration.sql` 仅记录 no-op 发布说明。
+
+## 2026-08-03 临时原生界面功能开关
+
+`dev`、`staging`、`prod` 均应由各自环境文件或编排系统显式注入以下非敏感开关。仓库模板和生产 Compose 默认值均为 `0`：
+
+```text
+MATRIX_VIDEO_REPLACEMENT_ENABLED=0
+MATRIX_PENDING_PUBLISH_UI_ENABLED=0
+MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED=0
+```
+
+| 开关 | `0` 的生产行为 | 恢复步骤 |
+| --- | --- | --- |
+| `MATRIX_VIDEO_REPLACEMENT_ENABLED` | 同款替换侧栏置灰并显示“功能完善中，敬请期待”；三个次级跳转隐藏 | 设为 `1`，重启本地客户端，验证侧栏和三个入口后再执行真实生成冒烟 |
+| `MATRIX_PENDING_PUBLISH_UI_ENABLED` | 隐藏待发布队列标签页，保留现有队列文件和后台逻辑 | 设为 `1`，重启本地客户端，验证旧队列仍可读取 |
+| `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` | 隐藏 TTS 上传和声音预览，自动 TTS 不变 | 设为 `1`，重启本地客户端，验证上传、预览和自动 TTS 两条路径 |
+
+这三个开关只改变原生客户端可见性；Compose 中的同名变量用于保持统一配置契约，不改变中心服接口。`MATRIX_XHS_ENABLED` 仍是跨本地客户端、本地执行器和中心服的独立平台开关，切换它必须重启三个运行单元。
+
+发布前登记上一稳定客户端包及 SHA-256；中心服镜像结构未变，仍保留上一稳定镜像 Tag。若启用任一隐藏功能后的观察窗口错误率超过 1%，立即把对应开关恢复为 `0` 并重启客户端；XHS 能力异常则把 `MATRIX_XHS_ENABLED` 恢复为 `0` 并重启三个运行单元。此次没有 API 路径/JSON Schema、OpenAPI、数据库表、Docker 镜像结构或 `migration.sql` 行为变更。
+
 ## 2026-07-30 账户中心账单看板发布与回滚门禁
 
 ### 环境与配置所有权
 
 | 环境 | 配置来源 | 账单验证规则 |
 | --- | --- | --- |
-| `dev` | 未提交的 `backend/.env.dev` 或显式进程环境 | 允许使用隔离数据目录、测试 Token 和非生产端口。 |
-| `staging` | 未提交的 `backend/.env.staging` 或编排环境 | 使用独立数据与凭据，先完成鉴权、范围、Schema 和性能门禁。 |
-| `prod` | 现有 `backend/.env.prod` 与 Compose/发布系统 | 保持中心服现有 `.env` 加载、主库和状态目录所有权，不设置测试覆盖。 |
+| `dev` | 未提交的 `backend/.env.dev` 或显式进程环境 | 隔离 JSON/假数据冒烟可显式设置 `MAINDB_ENABLED=0`；连接开发主库时保持为 `1`。 |
+| `staging` | 未提交的 `backend/.env.staging` 或编排环境 | 代表性 MySQL 验收必须保持 `MAINDB_ENABLED=1`；纯 JSON 隔离冒烟才可临时设为 `0`。 |
+| `prod` | 现有 `backend/.env.prod` 与 Compose/发布系统 | 发布系统负责主库变量，`MAINDB_ENABLED` 保持未设置或 `1`；禁止因故障改为 `0` 规避 503。 |
 
 `CENTRAL_LOAD_DOTENV=0` 只允许隔离的 dev/staging 冒烟进程使用，并且必须同时使用隔离 `CENTRAL_DATA_DIR`、测试 Token 和非生产端口。生产保持该变量未设置，让既有 `.env` 加载行为不变。本功能不新增密钥或数据库连接串；`BILLING_SMOKE_TOKEN`、`BILLING_MONITOR_TOKEN` 只从环境读取，不能写入命令输出、日志或仓库。
 
-`backend/Dockerfile` 继续安装 `backend/requirements.txt`，本地与主机部署文件 `backend/requirements.deploy.txt` 均锁定 `jsonschema==4.23.0`。Dockerfile 与 `docker-compose.prod.yml` 继续检查 `/api/health`，本次不修改容器拓扑。
+`MAINDB_ENABLED` 默认启用。只有 dev/staging 的隔离 JSON 冒烟可以显式关闭；默认启用时，`maindb` 导入、配置、健康检查、用量查询或严格余额查询任一失败，`/api/account/balance`、analytics 与参数化 ledger 都返回 503，不输出局部统计或虚假 0 余额。导入异常对象只保存在进程内用于状态判断，不写入日志。
+
+`backend/Dockerfile` 继续安装 `backend/requirements.txt`，本地与主机部署文件 `backend/requirements.deploy.txt` 均精确锁定 `jsonschema==4.23.0`、`PyMySQL==1.1.1` 和 `passlib[bcrypt]==1.7.4`。Dockerfile 与 `docker-compose.prod.yml` 继续检查 `/api/health`，本次不修改容器拓扑。
 
 ### 发布验收
 
 - 正常 30 天账户查询目标：20 QPS、P95 不超过 800 ms。验收脚本固定发送 200 个请求、使用 20 个 worker，并对每个响应执行运行时 analytics JSON Schema 校验。
-- 性能脚本只接受 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，禁止对生产环境运行。
+- 性能脚本只接受 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`，禁止对生产环境运行。请求器在收到任何 3xx 时直接拒绝跳转并把原始状态记为无效，不会向跳转目标发起第二次请求或转发 Authorization。
 - analytics/参数化 ledger 最大日期跨度为 366 天；主库读取使用 50,001 行硬门禁，达到上限即返回错误，不输出部分统计。
-- 参数化接口为 `GET /api/billing/analytics` 与 `GET /api/billing/ledger`。无参数 `GET /api/billing/ledger` 保持原响应路径，作为兼容与回滚后冒烟项。
+- 权威余额接口为 `GET /api/account/balance`，返回数字或运营方精确字符串 `inf`；参数化接口为 `GET /api/billing/analytics` 与 `GET /api/billing/ledger`。无参数 `GET /api/billing/ledger` 保持原响应路径，作为兼容与回滚后冒烟项。
 
 ### 可追溯基线
 
@@ -34,13 +90,13 @@
 | `.tmp-validation/sdd/task-5-before/backend/matrix_native_client.py` | `3C0DE2CCDF71CE5FB6FC42439548385DB30CA670C170041C496B022B36C11F30` | 1245363 |
 | `.tmp-validation/sdd/task-4-before/docs/openapi.yaml` | `2BB3E0101E012E5FC3EF9AE2F12FF8DD56C6D91D3F8FD8D6C2F18E6783712E97` | 50520 |
 
-本次验证前的当前工作区源码哈希为：中心服 `FD8DF8F18F3E95DB2E68337D0107B14196CD766023F1F8E3DD2FAFBE88D4F7A6`，原生客户端 `072D2DDD89EE34013763290CE307D4CFBFE9E1883E300B8BAC613178D0748489`，账单领域模块 `FAB289B7EB67E9196A396781024C2EBA28F0C829A96922815A3B42DC00802D1D`。这些同样是源码证据，不是已部署版本。
+最终阻断修复复核时的当前工作区源码哈希为：中心服 `09577E4A37FB94E5399E788AC13F785563AD25AF4207F311FD542339C0DB7CC1`，主库适配 `E2E1C47F149DB56265CB053BD1C029DBEF130F28CF78D0DF0718A58485761182`，原生客户端 `BF440E746CFB0C289AEF9B25AF90DE551788290A06315839D308079C8A9C0571`，账单领域模块 `2BDA3CEEF718212CFCF28C113EC73AB5899A4FE85357798699D05C1899CC08A7`，OpenAPI `921C02EBC61C541149782A81EDEBA0C26D86A2330B2DB6535FF260C9197C59C6`。这些同样只是当前候选源码证据，不是已部署版本；计算前已用两次长度、时间戳和 SHA-256 检查确认相关文件稳定。
 
 生产发布前必须另外在发布单登记并校验两个**可部署制品**：上一稳定中心服镜像 Tag，以及上一稳定客户端包的版本、存放位置和 SHA-256。仓库当前没有足以证明这两个制品存在的记录；未登记时生产发布门禁不通过。演练值 `stable-previous` 只用于 dry-run，不得当作真实镜像证据。
 
 ### 回滚监控
 
-监控窗口固定为 100 个账单 analytics 请求。只有新接口错误率严格大于 1% 时才选择回滚；正好 1% 不回滚。`PREVIOUS_IMAGE_TAG` 必须完整匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`。
+监控窗口固定为 100 个账单 analytics 请求。只有新接口错误率严格大于 1% 时才选择回滚；正好 1% 不回滚。任何 3xx 都按原始状态计为错误，监控不会跟随跳转或把 Authorization 发送到跳转目标。`PREVIOUS_IMAGE_TAG` 必须完整匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`。
 
 必需环境变量：
 
@@ -91,9 +147,10 @@ set +a
 
 - 远程服务文件：`/root/AI-CanvasPro/server.py`，监听端口 `8777`。发布前先比较本地测试镜像与远程文件 SHA-256，再将远程文件备份为 `/root/AI-CanvasPro/server.py.bak.<timestamp>`。
 - 上传后先在远程执行 Python 语法检查，成功后只重启 8777 对应 AI Canvas 服务；不要重启中心服或本地客户端。健康检查失败时立即恢复时间戳备份并再次启动 8777。
-- 冒烟新建三个分镜，不恢复历史失败项目。若 Ark 拒绝真人参考图，首个备用模型必须是 `vidu/viduq3-mix_reference2video`；任务响应必须保留本地任务 ID，并返回 `fallback_applied=true`、实际模型和完整 `fallback_history`。
-- `COMIC_REAL_PERSON_VIDEO_FALLBACK_MODELS` 默认值为 `vidu/viduq3-mix_reference2video,wan2.7-shouweizhen,kling-v3-omni-shouweizhen,pixverse-v6-shouweizhen`；显式空值关闭降级。旧单值变量只作兼容。配置由远程 AI Canvas 进程读取，修改后只重启 8777。
-- 查询超时、HTTP 502 和限流先继续查询已有远程任务，禁止因此提交下一个模型。供应商明确返回失败才退款并推进链路；发现重复计费或三片段中任一代码错误时，立即恢复本次发布前备份。
+- 当前同款替换 Seedance 路径不再自动切备用模型；用户在本地客户端选中的视频模型就是唯一提交模型。`COMIC_REAL_PERSON_VIDEO_FALLBACK_MODELS` 仍保留给历史兼容和其他旧流程，但不再驱动这条同款替换链路的自动降级。
+- Seedance 真人/版权/品牌/策略拒绝会直接返回中文失败提示；任务响应可保留诊断字段，但不应再提交 `vidu/viduq3-mix_reference2video`、`wan2.7-shouweizhen`、`kling-v3-omni-shouweizhen` 或 `pixverse-v6-shouweizhen` 作为自动后继模型。
+- 查询超时、HTTP 502 和限流只继续查询既有远程任务，不会触发新模型提交；发现重复计费、部署后语法错误或健康检查失败时，立即恢复备份。
+- 2026-08-01 发布记录：旧文件 SHA-256 为 `0cdbbd45b95817883ff0711faa6678b108f3f76a50b57f60c15fb3f54184f2fe`，备份为 `/root/AI-CanvasPro/server.py.bak.comic-inline-media-20260801_161136`；新文件 SHA-256 为 `e1b807eceac6527f9f30a86a78df09d3c798915bcfc8fa425939f6a973841e81`。`ai-canvas.service` 重启后为 active，8777 监听和 `/login` 200 均已验证。
 - 2026-07-28 发布记录：旧文件 SHA-256 为 `27e49707684eeb1c3024afe305723f4576e52d8571f33c20560d27ed0acfc069`，备份为 `/root/AI-CanvasPro/server.py.bak.20260728_160337`；新文件 SHA-256 为 `bfbe4c1e310562d2b5a5dd9445d24fb1c134016ce834173f32a59b55b49b8e93`。`ai-canvas.service` 重启后为 active，8777 正常监听。
 - 历史 2026-07-28 单模型冒烟只重提项目 294 分镜 294001，任务 `ai-86996340` 最终为 `completed`。该记录仅用于旧版本追溯，当前发布验收以五模型链和新三片段任务为准。
 
@@ -216,6 +273,7 @@ tesseract --list-langs
 | `CENTRAL_HOST` | `0.0.0.0` | 中心服监听地址；本地建议 `127.0.0.1` |
 | `CENTRAL_PORT` | `9080` | 中心服端口 |
 | `CENTRAL_DATA_DIR` | `backend/central_data` | 中心服数据目录 |
+| `CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC` | `900` | 本地浏览器长任务在中心服被重新排队前允许运行的秒数；覆盖 AI触达、寻找线索、发布和下载类任务 |
 | `LK888_BASE_URL` | `https://api.lk888.ai` | LK888 上游地址；本地网络无法直连 LK888 TLS 时可设为 `https://img.yunlingai.net/lk888-upstream` |
 | `LK888_API_KEY` | 无 | 仅中心服保存的密钥 |
 | `PUBLIC_MEDIA_BASE_URL` | 无 | 公网 HTTPS 素材代理地址；临时测试可用 Cloudflare Tunnel 的 `https://*.trycloudflare.com` |
@@ -233,7 +291,7 @@ tesseract --list-langs
 | `TESSERACT_CMD` | 自动查找 | 自定义 Tesseract 路径 |
 | `VIDEO_TRANSCRIBE_MODEL` | `gemini-3.1-pro-preview` | 音频理解模型 |
 | `VIDEO_TRANSCRIBE_CHUNK_SEC` | `60` | 分片秒数 |
-| `VIDEO_TRANSCRIBE_MAX_SEC` | `600` | 单视频转写上限 |
+| `VIDEO_TRANSCRIBE_MAX_SEC` | 空 | 默认转写整条视频；设置正数后才限制单视频转写范围 |
 | `VIDEO_TRANSCRIBE_TIMEOUT_SEC` | `180` | 单分片远程超时 |
 | `VIDEO_TRANSCRIBE_RETRIES` | `2` | 单分片重试次数 |
 | `VIDEO_BREAKDOWN_MAX_CONCURRENCY` | `1` | 产品约束；当前页面固定串行 |
@@ -283,6 +341,8 @@ tesseract --list-langs
 | `FACEFUSION_MODEL_DIR` | 无 | 已取得商业许可的模型目录；不得提交到源码仓库 |
 | `FACEFUSION_LICENSE_REF` | 无 | 内部许可证记录编号或受控文档引用，不是密钥 |
 | `FACEFUSION_EXECUTION_PROVIDER` | `coreml,cpu` | M2 优先 CoreML、失败时 CPU；逗号分隔 |
+
+LK888 模型结算固定为后付费实际成本：部署配置中不存在预扣开关，历史 `LK888_LEGACY_PRECHARGE_ENABLED` 即使残留在 `.env` 中也不会被读取。发布或回滚计费代码时必须把中心服和本地客户端作为同一版本单元重启；禁止新客户端连接旧预扣中心服，也禁止旧客户端连接新中心服。上线后检查新流水只包含稳定任务 `ref`、`billingSource=lk888_actual`、`actualAmount`、实际 `modelId` 和 `taskId`。
 
 ## LK888 出口代理
 
@@ -555,7 +615,7 @@ DY_PROFILE_DIR=backend\datas\dy_profile
 | `XHS_STRICT_LEAD_FILTER_ENABLED` | `1` | 开启主页校验、评论尾部清洗、用户名校验和主页级去重。仅在确认误过滤时临时设置为 `0/false/no/off`，修改后重启本地执行引擎。 |
 
 该过滤运行在本地执行引擎，不新增端口、数据库、外部密钥、网络请求或 GPU 服务。紧急降级只关闭严格校验和主页级去重，不修改历史数据；完整回滚前先校验 `backups/xhs-lead-filtering-20260727/manifest.sha256`，再恢复归档中的 `backend/platform_adapters.py` 和相关文档。
-## 小红书安全模式
+## 小红书安全模式与抖音评论风控
 
 环境变量：
 
@@ -564,11 +624,14 @@ DY_PROFILE_DIR=backend\datas\dy_profile
 | `XHS_GUEST_COLLECTION_DEFAULT` | `1` | 小红书搜索、下载、读取评论、图文同款下载和获客中心寻客默认使用游客采集。设置为 `0/false/no/off` 并重启本地客户端和本地执行引擎后，可临时恢复旧的账号采集默认模式；该开关不关闭安全模式。 |
 | `XHS_SAFETY_MODE` | `1` | 开启小红书执行前安全拦截。设置为 `0/false/no/off` 并重启本地客户端和本地执行引擎后，可临时恢复旧行为。 |
 
+抖音评论风控不新增环境变量，默认读取风控中心保存到 `risk_config.json` 的 `dailyComment` 和 `minInterval`。每日评论上限、最小间隔冷却和评论风险暂停是硬门禁，命中后 `force=true`、`safeMode=false`、普通 API 通道、自动 UI 回退和强制 `edge-ui` 通道都会在打开浏览器或调用平台前停止；`force` 只跳过浏览器 DOM 预检，`safeMode=false` 只关闭评论文案清洗与 DOM 预检。
+
 运行态文件：
 
 | 文件 | 说明 |
 | --- | --- |
 | `backend/datas/risk_config.json` | 风控中心保存的每日发布上限、每日评论上限、最小间隔和并发配置。 |
 | `backend/datas/xhs_safety_state.json` | 小红书安全模式写入的账号当天计数、最后动作时间、冷却和平台风险暂停状态。 |
+| `backend/datas/comment_risk_state.json` | 抖音评论写入 `accounts.<accountId>.day/commentCount/lastCommentAt`、账号级冷却状态、平台评论风险暂停和脱敏后的风险响应摘要；风控中心抖音“今日评论 / 冷却”列读取该文件。 |
 
-发布与回滚：本功能不新增数据库表，不需要 `migration.sql`；不新增接口路径，因此不需要 OpenAPI 路径变更。上线后如果游客模式误判，可先设置 `XHS_GUEST_COLLECTION_DEFAULT=0` 临时恢复账号采集默认值；如果安全模式误拦截，优先在风控中心调整上限/间隔，或临时设置 `XHS_SAFETY_MODE=0` 后重启本地客户端和本地执行引擎。代码级回滚恢复 `backend/platform_adapters.py`、`backend/api_server.py`、`backend/matrix_native_client.py`、相关测试和本次文档即可。
+发布与回滚：本功能不新增数据库表，不需要 `migration.sql`；不新增接口路径，因此不需要 OpenAPI 路径变更。上线后如果游客模式误判，可先设置 `XHS_GUEST_COLLECTION_DEFAULT=0` 临时恢复账号采集默认值；如果小红书安全模式误拦截，优先在风控中心调整上限/间隔，或临时设置 `XHS_SAFETY_MODE=0` 后重启本地客户端和本地执行引擎；如果抖音评论误拦截，优先在风控中心调高每日评论上限或缩短最小间隔，确认 `comment_risk_state.json` 没有残留风险暂停，再重启本地执行器和本地客户端。代码级回滚恢复 `backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_comment_cooldown.py` 和本次文档即可。

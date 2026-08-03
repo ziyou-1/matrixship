@@ -21,6 +21,20 @@ try:
     from utils.structured_log import json_log
 except ModuleNotFoundError:
     from backend.utils.structured_log import json_log
+try:
+    from platform_features import (
+        is_xhs_platform,
+        log_platform_disabled,
+        platform_disabled_result,
+        xhs_enabled,
+    )
+except ModuleNotFoundError:
+    from backend.platform_features import (
+        is_xhs_platform,
+        log_platform_disabled,
+        platform_disabled_result,
+        xhs_enabled,
+    )
 
 
 PLATFORM_ALIASES = {
@@ -41,6 +55,12 @@ def platform_code(value, default="douyin"):
 
 def platform_label(code):
     return "小红书" if platform_code(code) == "xhs" else "抖音"
+
+
+def _xhs_disabled(route="", task_type="", stage="adapter"):
+    result = platform_disabled_result("xhs", route=route, task_type=task_type, stage=stage)
+    log_platform_disabled(logger, "xhs", route=route, task_type=task_type, stage=stage)
+    return result
 
 
 def compact_text(text, max_len=160):
@@ -221,6 +241,8 @@ def _xhs_close_guest_login_modal(page):
 
 
 def xhs_login(data_dir="", login_timeout=None):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/login", task_type="xhs.login")
     """Open a visible persistent Xiaohongshu browser and wait for the user to log
     in (QR/phone). Login state stays in the local xhs_profile; only status is
     returned. Mirrors cookie_util's Douyin persistent login."""
@@ -351,6 +373,8 @@ def _xhs_profile_has_login_cookie(data_dir):
 
 
 def xhs_profile_ready(data_dir):
+    if not xhs_enabled():
+        return False
     """Fast, non-invasive readiness signal for account matrix.
 
     不启动浏览器:优先看 XHS_ACCOUNT_ENABLED / xhs_auth_state.json 标记,再直接读 profile
@@ -478,6 +502,29 @@ def _xhs_apply_risk_from_debug(result, debug):
         result["riskCode"] = "300031"
         result["error"] = "xhs_note_unavailable"
         result["message"] = "xhs_note_temporarily_unavailable"
+    return result
+
+
+def _xhs_apply_search_login_state(result, debug, guest_mode=True, search_verified=True):
+    result = result if isinstance(result, dict) else {}
+    debug = debug if isinstance(debug, dict) else {}
+    if bool(guest_mode) or bool(search_verified) or not debug:
+        return result
+    url = str(debug.get("url") or "")
+    body = str(debug.get("bodyText") or "")
+    login_like = (
+        "source=tourist_search" in url or
+        "登录后查看搜索结果" in body or
+        "手机号登录" in body or
+        "获取验证码" in body or
+        "登录小红书" in body
+    )
+    if login_like and not result.get("riskCode"):
+        result["ok"] = False
+        result["blocked"] = True
+        result["needLogin"] = True
+        result["error"] = "xhs_login_required"
+        result["message"] = "xhs_account_search_tourist_search_login_required"
     return result
 
 
@@ -624,6 +671,8 @@ def _xhs_search_page_matches_keyword(page_url, keyword):
 
 
 def xhs_search_notes(keyword, limit=10, data_dir="", guest_mode=True):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/search", task_type="xhs.search")
     from playwright.sync_api import sync_playwright
 
     keyword = (keyword or "").strip()
@@ -829,8 +878,9 @@ def xhs_search_notes(keyword, limit=10, data_dir="", guest_mode=True):
     if debug:
         result["debug"] = debug
         result = _xhs_apply_risk_from_debug(result, debug)
+        result = _xhs_apply_search_login_state(result, debug, guest_mode=guest_mode, search_verified=search_verified)
         body = debug.get("bodyText") or ""
-        if "登录后查看搜索结果" in body or "手机号登录" in body or "获取验证码" in body:
+        if not result.get("riskCode") and ("登录后查看搜索结果" in body or "手机号登录" in body or "获取验证码" in body):
             result["ok"] = False
             result["needLogin"] = True
             result["error"] = "xhs_login_required"
@@ -1277,6 +1327,8 @@ def _xhs_filter_comment_candidates(
 
 
 def xhs_get_comments(note_url, limit=120, data_dir="", source=None, guest_mode=True):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/comments", task_type="xhs.comments")
     from playwright.sync_api import sync_playwright
 
     note_url = _xhs_note_url(note_url)
@@ -1390,6 +1442,8 @@ def xhs_get_comments(note_url, limit=120, data_dir="", source=None, guest_mode=T
 
 
 def discover_xhs_leads_by_keyword(keyword, video_num=5, comment_mode="page", data_dir="", guest_mode=True):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/finder/discover", task_type="xhs.discover")
     keyword = (keyword or "").strip()
     if not keyword:
         raise RuntimeError("missing_keyword")
@@ -1626,6 +1680,8 @@ def _xhs_download_meta(note_id, note_url, out_dir, files, note_copy=None):
     return meta
 
 def xhs_download_note(note_url, base_dir, data_dir="", max_files=20, guest_mode=True):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/download", task_type="xhs.download")
     from playwright.sync_api import sync_playwright
     import requests
 
@@ -1757,6 +1813,8 @@ def xhs_download_note(note_url, base_dir, data_dir="", max_files=20, guest_mode=
 
 
 def xhs_publish_comment(note_url, content, dry_run=False, safe_mode=True, data_dir=""):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/comment/publish", task_type="xhs.comment.publish")
     from playwright.sync_api import sync_playwright
 
     note_url = _xhs_note_url(note_url)
@@ -1936,6 +1994,8 @@ def _xhs_select_image_note_tab(page):
 
 
 def xhs_publish_material(files, title, material_type="video", dry_run=True, data_dir="", body="", tags=None):
+    if not xhs_enabled():
+        return _xhs_disabled(route="/api/publish/run", task_type="xhs.publish")
     from playwright.sync_api import sync_playwright
 
     files = [f for f in (files or []) if f and os.path.exists(f)]

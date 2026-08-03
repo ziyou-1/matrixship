@@ -33,6 +33,7 @@ import traceback
 from typing import Any, Dict
 
 import requests
+from platform_features import filter_xhs_capabilities
 from runtime_paths import agent_data_dir
 
 VERSION = "2.0.0-local-browser"
@@ -65,6 +66,10 @@ LONG_TASKS = {
 }
 
 
+def advertised_capabilities():
+    return filter_xhs_capabilities(CAPABILITIES)
+
+
 def stdout_utf8():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -84,7 +89,8 @@ def read_local_token() -> str:
     try:
         p = os.path.join(appdata_data_dir(), "agent_token.txt")
         if os.path.isfile(p):
-            return open(p, "r", encoding="utf-8").read().strip()
+            with open(p, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
     except Exception:
         pass
     return ""
@@ -194,13 +200,17 @@ class LocalBrowserWorker:
 
     @property
     def local_headers(self):
-        return {"X-Matrix-Agent-Token": self.local_token} if self.local_token else {}
+        current = read_local_token()
+        if current and current != self.local_token:
+            self.local_token = current
+        token = self.local_token or current
+        return {"X-Matrix-Agent-Token": token} if token else {}
 
     def register(self):
         payload = {
             "clientId": self.client_id, "name": self.name, "version": VERSION,
             "browser": "local-engine", "platform": platform.platform(),
-            "capabilities": CAPABILITIES, "status": "registered", "orgId": self.org_id,
+            "capabilities": advertised_capabilities(), "status": "registered", "orgId": self.org_id,
         }
         data = post_json(self.central + "/api/local-browser/register", payload, headers=self.central_headers, timeout=30)
         if not data.get("ok"):
@@ -211,7 +221,7 @@ class LocalBrowserWorker:
 
     def poll(self):
         payload = {"clientId": self.client_id, "name": self.name, "version": VERSION,
-                   "capabilities": CAPABILITIES, "status": "polling", "orgId": self.org_id}
+                   "capabilities": advertised_capabilities(), "status": "polling", "orgId": self.org_id}
         return post_json(self.central + "/api/local-browser/poll", payload, headers=self.central_headers, timeout=40)
 
     def report(self, task_id, ok, result=None, error=""):

@@ -1,8 +1,14 @@
 from pathlib import Path
+import importlib
+import io
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BACKEND = ROOT / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
 
 
 class WebSurfaceRemovedTest(unittest.TestCase):
@@ -37,6 +43,50 @@ class WebSurfaceRemovedTest(unittest.TestCase):
         self.assertIn("def serve_agent_installer", source)
         self.assertIn("MATRIXSHIP_AGENT_INSTALLER", source)
         self.assertIn('path == "/MatrixShipAgent-Setup.exe"', source)
+
+    def test_center_serves_public_download_page_contract(self):
+        central = importlib.import_module("central_server")
+        html = central.Handler.download_page_html()
+
+        self.assertIn("云灵星图 AI 爆款复刻平台 Windows 客户端下载", html)
+        self.assertIn("云灵星图数字科技有限公司", html)
+        self.assertIn("Windows 客户端即将开放下载", html)
+        self.assertIn("disabled", html)
+        self.assertNotIn("/MatrixShipAgent-Setup.exe", html)
+
+    def test_download_page_response_is_public_html(self):
+        central = importlib.import_module("central_server")
+        handler = object.__new__(central.Handler)
+        handler.wfile = io.BytesIO()
+        handler.headers = {}
+        sent = []
+
+        def send_response(status):
+            sent.append(("status", status))
+
+        def send_header(name, value):
+            sent.append(("header", name, value))
+
+        handler.send_response = send_response
+        handler.send_header = send_header
+        handler.end_headers = lambda: sent.append(("end",))
+
+        central.Handler.serve_download_page(handler)
+
+        body = handler.wfile.getvalue().decode("utf-8")
+        self.assertIn(("status", 200), sent)
+        self.assertIn(("header", "Content-Type", "text/html; charset=utf-8"), sent)
+        self.assertIn("云灵星图 AI 爆款复刻平台 Windows 客户端下载", body)
+        self.assertIn("Windows 客户端即将开放下载", body)
+        self.assertNotIn("/MatrixShipAgent-Setup.exe", body)
+
+    def test_download_route_is_public_before_auth_gate(self):
+        source = (ROOT / "backend" / "central_server.py").read_text(encoding="utf-8")
+        route_index = source.index('if path == "/download":')
+        auth_index = source.index("if not require_user(self):", route_index)
+
+        self.assertLess(route_index, auth_index)
+        self.assertIn("return self.serve_download_page()", source[route_index:auth_index])
 
     def test_build_stays_native_only(self):
         build = (ROOT / "backend" / "build_matrix_agent.ps1").read_text(encoding="utf-8")

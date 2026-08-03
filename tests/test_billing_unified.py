@@ -128,28 +128,31 @@ class UnifiedBillingTest(unittest.TestCase):
 
     def test_capability_charge_uses_server_price_instead_of_client_amount(self):
         ok, balance, err = self.server.charge_capability_user(
-            "u1", "copywriting", requested_amount=0.01, ref="copywriting:test"
+            "u1", "mix", requested_amount=0.01, ref="mix:test"
         )
 
         self.assertTrue(ok)
         self.assertIsNone(err)
-        self.assertEqual(balance, 99.93)
-        self.assertEqual(self.state["ledger"][0]["delta"], -0.07)
-        self.assertEqual(self.state["ledger"][0]["ref"], "copywriting:test")
+        self.assertEqual(balance, 99.86)
+        self.assertEqual(self.state["ledger"][0]["delta"], -0.14)
+        self.assertEqual(self.state["ledger"][0]["ref"], "mix:test")
 
-    def test_capability_prices_are_one_yundou_per_yuan(self):
-        self.assertEqual(self.server.capability_price_yundou("copywriting")[0], 0.07)
-        self.assertEqual(self.server.capability_price_yundou("comic_keyframe_image")[0], 0.14)
-        self.assertEqual(self.server.capability_price_yundou("product_video")[0], 3.08)
-        self.assertEqual(self.server.capability_price_yundou("digital_human")[0], 25.2)
-        self.assertEqual(self.server.gen_price_yundou("doubao-seedance", {}), 3.08)
-        self.assertEqual(self.server.gen_price_yundou("gpt-image-2", {}), 0.14)
+    def test_local_capability_prices_are_one_yundou_per_yuan(self):
+        self.assertEqual(self.server.capability_price_yundou("copywriting")[0], 0.24)
+        self.assertEqual(self.server.capability_price_yundou("product_video")[0], 5.57)
+        self.assertEqual(self.server.capability_price_yundou("digital_human")[0], 9.81)
+
+    def test_lk888_local_estimate_settlement_helpers_are_removed(self):
+        self.assertFalse(hasattr(self.server, "gen_price_yundou"))
+        self.assertFalse(hasattr(self.server, "lk888_media_price_yundou"))
+        self.assertFalse(hasattr(self.server, "LK888_MEDIA_FIXED_PRICES_YUNDOU"))
+        self.assertFalse(hasattr(self.server, "LK888_MEDIA_SECOND_PRICES_YUNDOU"))
 
     def test_capability_charge_blocks_insufficient_balance_before_ledger_write(self):
         self.state["users"][0]["balance"] = 0.01
 
         ok, balance, err = self.server.charge_capability_user(
-            "u1", "copywriting", requested_amount=999, ref="copywriting:test"
+            "u1", "mix", requested_amount=999, ref="mix:test"
         )
 
         self.assertFalse(ok)
@@ -157,21 +160,61 @@ class UnifiedBillingTest(unittest.TestCase):
         self.assertEqual(err, "insufficient_balance")
         self.assertEqual(self.state["ledger"], [])
 
+    def test_actual_capability_charge_preserves_reason_model_and_allows_arrears(self):
+        self.state["users"][0]["balance"] = 1.0
+
+        ok, balance, err = self.server.charge_capability_user(
+            "u1",
+            "comic_video_generation",
+            requested_amount=10.898,
+            ref="comic_video:job:project:9:seg:4:actual",
+            reason="漫剧视频生成 · 项目9 · 片段4 · viduq3-cankaosheng · LK888实扣",
+            meta={"modelId": "viduq3-cankaosheng", "actualAmount": 10.898},
+            allow_arrears=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.assertEqual(balance, -9.898)
+        self.assertEqual(self.state["ledger"][0]["reason"], "漫剧视频生成 · 项目9 · 片段4 · viduq3-cankaosheng · LK888实扣")
+        self.assertEqual(self.state["ledger"][0]["modelId"], "viduq3-cankaosheng")
+        self.assertEqual(self.state["ledger"][0]["actualAmount"], 10.898)
+        self.assertTrue(self.state["ledger"][0]["arrears"])
+
+    def test_actual_keyframe_charge_uses_lk888_amount_not_local_capability_price(self):
+        self.state["users"][0]["balance"] = 1.0
+
+        ok, balance, err = self.server.charge_capability_user(
+            "u1",
+            "comic_keyframe_image",
+            requested_amount=0.0371,
+            ref="comic_keyframe:job:seg:4:task:image-1:frame:1:actual",
+            reason="漫剧首帧图生成 · LK888实扣",
+            meta={"modelId": "gpt-image-2", "actualAmount": 0.0371},
+            allow_arrears=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.assertEqual(balance, 0.9629)
+        self.assertEqual(self.state["ledger"][0]["delta"], -0.0371)
+        self.assertEqual(self.state["ledger"][0]["actualAmount"], 0.0371)
+
     def test_maindb_capability_charge_converts_yundou_to_power(self):
         fake = FakeMainDb(rowcount=1)
 
         with mock.patch.object(self.server, "maindb", fake), \
                 mock.patch.object(self.server, "maindb_on", return_value=True):
             ok, balance, err = self.server.charge_capability_user(
-                42, "copywriting", requested_amount=999, ref="copywriting:test"
+                42, "mix", requested_amount=999, ref="mix:test"
             )
 
         self.assertTrue(ok)
         self.assertEqual(balance, 10.0)
         self.assertIsNone(err)
-        self.assertEqual(fake.calls[0][1], ("0.7", 42, "0.7"))
-        self.assertEqual(self.state["ledger"][0]["delta"], -0.7)
-        self.assertEqual(self.state["ledger"][0]["yundouAmount"], 0.07)
+        self.assertEqual(fake.calls[0][1], ("1.4", 42, "1.4"))
+        self.assertEqual(self.state["ledger"][0]["delta"], -1.4)
+        self.assertEqual(self.state["ledger"][0]["yundouAmount"], 0.14)
         self.assertEqual(self.state["ledger"][0]["wallet"], "maindb_generic")
 
     def test_maindb_topup_writes_traceable_positive_ledger(self):
@@ -259,6 +302,30 @@ class UnifiedBillingTest(unittest.TestCase):
 
         self.assertEqual(result, rows)
         query.assert_called_once_with(expected_sql, (42, "2026-07-01", "2026-08-01", 50001))
+
+    def test_maindb_strict_balance_propagates_query_failure(self):
+        source = load_maindb_module()
+        with mock.patch.object(
+            source,
+            "_q",
+            side_effect=RuntimeError("balance secret-fixture unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "secret-fixture"):
+                source.get_balance_strict(42)
+
+    def test_maindb_strict_balance_reads_current_computing_power(self):
+        source = load_maindb_module()
+        with mock.patch.object(
+            source,
+            "_q",
+            return_value={"computing_power": "12.345678"},
+        ) as query:
+            balance = source.get_balance_strict(42)
+
+        self.assertEqual(balance, 12.345678)
+        query.assert_called_once()
+        self.assertIn("computing_power", query.call_args.args[0])
+        self.assertEqual(query.call_args.args[1], (42,))
 
     def test_maindb_refund_generation_database_exception_rolls_back_and_propagates(self):
         source = load_maindb_module()

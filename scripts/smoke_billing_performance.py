@@ -26,6 +26,14 @@ P95_LIMIT_MS = 800.0
 REQUEST_TIMEOUT_SECONDS = 10
 
 
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_RejectRedirectHandler())
+
+
 def _required_env(name):
     value = os.getenv(name, "").strip()
     if not value:
@@ -71,7 +79,7 @@ def _request_once(index, url, token):
     )
     started = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with _NO_REDIRECT_OPENER.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             status = response.status
             payload = json.loads(response.read().decode("utf-8"))
         validate_billing_payload("analytics_response", payload)

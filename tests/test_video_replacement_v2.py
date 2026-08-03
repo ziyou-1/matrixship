@@ -417,15 +417,14 @@ class VideoReplacementV2Test(unittest.TestCase):
         start = src.index("class ContentPage")
         search_start = src.index("    def search(self):", start)
         download_start = src.index("    def download(self):", search_start)
-        note_replace_start = src.index("    def note_replace(self):", download_start)
-        breakdown_start = src.index("    def breakdown(self):", note_replace_start)
+        breakdown_start = src.index("    def breakdown(self):", download_start)
         search_src = src[search_start:download_start]
-        download_src = src[download_start:note_replace_start]
-        note_replace_src = src[note_replace_start:breakdown_start]
+        download_src = src[download_start:breakdown_start]
 
-        self.assertIn("小红书采集中：正在打开浏览器", search_src)
-        self.assertIn("小红书下载中：正在打开浏览器", download_src)
-        self.assertIn("图文同款准备中：正在打开小红书浏览器", note_replace_src)
+        self.assertIn("账号采集中", search_src)
+        self.assertIn("小红书账号", search_src)
+        self.assertIn("账号下载中", download_src)
+        self.assertIn("小红书账号", download_src)
 
 
     def test_xhs_content_search_offline_error_names_xhs_not_douyin(self):
@@ -740,7 +739,7 @@ class VideoReplacementV2Test(unittest.TestCase):
             self.assertIn(icon, block)
         self.assertNotIn("videoUrl", block)
 
-    def test_comic_missing_media_states_are_distinct_and_include_error_id(self):
+    def test_comic_missing_media_states_are_distinct_and_use_readable_text(self):
         src = CLIENT.read_text(encoding="utf-8")
         self.assertIn("def _comic_video_cell_state", src)
         start = src.index("def _comic_video_cell_state")
@@ -749,7 +748,7 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertIn('"待生成"', block)
         self.assertIn('"待重新生成"', block)
         self.assertIn('"正在获取视频"', block)
-        self.assertIn('"获取失败（错误编号 %s）"', block)
+        self.assertIn('"获取失败，请重试。"', block)
         self.assertIn('"video_stale"', block)
         self.assertIn('"downloading"', block)
 
@@ -902,7 +901,7 @@ class VideoReplacementV2Test(unittest.TestCase):
                 first = self.client._comic_video_cell_state(segment)
                 second = self.client._comic_video_cell_state(segment)
 
-        self.assertEqual(first, ("invalid_media", "视频无效（错误编号 err-invalid-media）"))
+        self.assertEqual(first, ("invalid_media", "视频无效，请重试或查看日志。"))
         self.assertEqual(second, first)
         validate.assert_called_once_with(str(path))
         error_id.assert_called_once()
@@ -1097,7 +1096,9 @@ class VideoReplacementV2Test(unittest.TestCase):
                 app.processEvents()
 
         set_media.assert_not_called()
-        self.assertIn("错误编号 err-cell-invalid", cell.video_box.hint.text())
+        self.assertIn("视频无效，请重试或查看日志", cell.video_box.hint.text())
+        self.assertNotIn("错误编号", cell.video_box.hint.text())
+        self.assertNotIn("err-cell-invalid", cell.video_box.hint.text())
         cell.close()
 
     def test_hybrid_plan_defaults_to_non_talking_even_when_transcript_exists(self):
@@ -1262,18 +1263,17 @@ class VideoReplacementV2Test(unittest.TestCase):
 
     def test_image_result_preserves_public_upstream_url(self):
         response = mock.Mock(status_code=200)
-        response.json.return_value = {"data": [{"url": "https://cdn.example.com/keyframe.png"}]}
-        download = mock.Mock(content=b"generated-image")
+        response.json.return_value = {"data": {"task_id": "image-task-1"}, "accepted": True}
         with mock.patch.object(self.client, "lk888_config", return_value={
                 "base_url": "https://proxy.example.com", "api_key": "test-key"
         }), mock.patch.object(self.client.requests, "post", return_value=response), \
-                mock.patch.object(self.client.requests, "get", return_value=download):
-            image_bytes, public_url = self.client.lk888_image_result(
+                mock.patch.object(self.client.requests, "get") as download:
+            result = self.client.lk888_image_result(
                 "prompt", image_urls=["data:image/png;base64,AAAA"]
             )
 
-        self.assertEqual(image_bytes, b"generated-image")
-        self.assertEqual(public_url, "https://cdn.example.com/keyframe.png")
+        self.assertEqual({"data": {"task_id": "image-task-1"}, "accepted": True}, result)
+        download.assert_not_called()
 
     def test_lk888_media_task_exits_polling_when_cancel_requested(self):
         post_response = mock.Mock(ok=True, status_code=200, text="")
@@ -1408,21 +1408,11 @@ class VideoReplacementV2Test(unittest.TestCase):
 
     def test_digital_human_scene_composition_sends_reference_images_in_compatible_fields(self):
         captured = {}
-        post_response = mock.Mock(status_code=200)
-        post_response.json.return_value = {
-            "data": [{"url": "https://cdn.example.com/composed-avatar.png"}]
-        }
-        image_response = mock.Mock()
-        image_response.content = b"png-bytes"
+        def fake_image_result(_prompt, **kwargs):
+            captured.update(kwargs)
+            return b"png-bytes", "https://cdn.example.com/composed-avatar.png"
 
-        def fake_post(_url, **kwargs):
-            captured["json"] = kwargs.get("json")
-            return post_response
-
-        with mock.patch.object(self.client, "lk888_config", return_value={
-                "base_url": "https://proxy.example.com", "api_key": "test-key"
-        }), mock.patch.object(self.client.requests, "post", side_effect=fake_post), \
-                mock.patch.object(self.client.requests, "get", return_value=image_response):
+        with mock.patch.object(self.client, "_lk888_image_result_download", side_effect=fake_image_result):
             result = self.client._compose_digital_human_scene_avatar_url(
                 "https://cdn.example.com/avatar.png",
                 "https://cdn.example.com/showroom.png",
@@ -1430,10 +1420,9 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         refs = ["https://cdn.example.com/avatar.png", "https://cdn.example.com/showroom.png"]
         self.assertEqual(result, "https://cdn.example.com/composed-avatar.png")
-        self.assertEqual(captured["json"].get("image_urls"), refs)
-        self.assertEqual(captured["json"].get("images"), refs)
-        self.assertEqual(captured["json"].get("reference_images"), refs)
-        self.assertEqual((captured["json"].get("params") or {}).get("images"), refs)
+        self.assertEqual(captured.get("image_urls"), refs)
+        self.assertEqual(captured.get("model"), "gpt-image-2")
+        self.assertEqual(captured.get("size"), "1024x1536")
 
     def test_lk888_image_reference_url_fields_exclude_data_urls(self):
         captured = {}
@@ -1441,8 +1430,6 @@ class VideoReplacementV2Test(unittest.TestCase):
         post_response.json.return_value = {
             "data": [{"url": "https://cdn.example.com/generated.png"}]
         }
-        image_response = mock.Mock()
-        image_response.content = b"png-bytes"
         refs = [
             "https://cdn.example.com/avatar.png",
             "data:image/png;base64,c2NlbmU=",
@@ -1455,14 +1442,15 @@ class VideoReplacementV2Test(unittest.TestCase):
         with mock.patch.object(self.client, "lk888_config", return_value={
                 "base_url": "https://proxy.example.com", "api_key": "test-key"
         }), mock.patch.object(self.client.requests, "post", side_effect=fake_post), \
-                mock.patch.object(self.client.requests, "get", return_value=image_response):
+                mock.patch.object(self.client.requests, "get") as download:
             self.client.lk888_image_result("prompt", image_urls=refs)
 
         self.assertEqual(captured["json"].get("image_urls"), refs)
-        self.assertNotIn("images", captured["json"])
-        self.assertNotIn("reference_images", captured["json"])
-        self.assertNotIn("referenceImages", captured["json"])
-        self.assertNotIn("params", captured["json"])
+        self.assertEqual(captured["json"].get("images"), refs)
+        self.assertEqual(captured["json"].get("reference_images"), refs)
+        self.assertEqual(captured["json"].get("referenceImages"), refs)
+        self.assertEqual((captured["json"].get("params") or {}).get("images"), refs)
+        download.assert_not_called()
 
     def test_digital_human_sends_local_avatar_as_json_data_url(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1889,6 +1877,19 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         self.assertIn('QPushButton("上传场景图（强制换背景）")', src)
         self.assertIn("场景图可选；上传后会先强制合成背景", src)
+
+    def test_digital_human_uploaded_assets_have_hover_delete_controls(self):
+        src = CLIENT.read_text(encoding="utf-8")
+
+        self.assertIn("class HoverDeleteMediaFrame", src)
+        self.assertIn("deleteRequested = QtCore.Signal(str)", src)
+        self.assertIn("self.avatar_frame = HoverDeleteMediaFrame", src)
+        self.assertIn("self.scene_frame = HoverDeleteMediaFrame", src)
+        self.assertIn("self.sound_frame = HoverDeleteMediaFrame", src)
+        self.assertIn("def _clear_uploaded_asset(self, kind):", src)
+        self.assertIn("self.avatar_frame.set_preview_text(\"形象\\n预览\")", src)
+        self.assertIn("self.scene_frame.set_preview_text(\"场景\\n可选\")", src)
+        self.assertIn("self.sound_frame.set_preview_text(\"声音\\n可选\")", src)
 
     def test_digital_human_scene_error_and_status_identify_system_composed_image(self):
         src = CLIENT.read_text(encoding="utf-8")
@@ -2532,6 +2533,25 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         visual_qc.assert_called_once_with(job, segment, "/tmp/result.mp4")
+
+    def test_segment_qc_skips_audio_validation(self):
+        job = {"outDir": tempfile.gettempdir()}
+        segment = {"index": 1}
+        with mock.patch.object(
+            self.client, "_breakdown_source_validation", return_value={"ok": True}
+        ), mock.patch.object(
+            self.client, "_replacement_audio_qc",
+            side_effect=AssertionError("audio validation must be disabled"),
+        ) as audio_qc, mock.patch.object(
+            self.client, "_extract_replacement_qc_frames", return_value=["a", "b", "c"]
+        ):
+            result = self.client._run_replacement_segment_qc(
+                job, segment, "/tmp/result.mp4"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["checks"]["audio"], "skipped")
+        audio_qc.assert_not_called()
 
     def test_principal_visual_qc_describes_only_media_that_were_provided(self):
         job = {
@@ -3181,16 +3201,20 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertFalse(silence_result["ok"])
         self.assertEqual(silence_result["code"], "audio_silent")
 
-    def test_replacement_concat_preserves_audio_and_validates_output(self):
+    def test_replacement_concat_preserves_audio_without_validating_output_audio(self):
         paths = ["/tmp/one.mp4", "/tmp/two.mp4"]
         with mock.patch.object(self.client.os.path, "isfile", return_value=True), \
                 mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
                 mock.patch.object(self.client, "mix_clips", return_value="/tmp/final.mp4") as mix, \
-                mock.patch.object(self.client, "_replacement_audio_qc", return_value={"ok": True}):
+                mock.patch.object(
+                    self.client, "_replacement_audio_qc",
+                    side_effect=AssertionError("audio validation must be disabled"),
+                ) as audio_qc:
             result = self.client._concat_replacement_segments(paths, "/tmp/final.mp4")
 
         self.assertEqual(result, "/tmp/final.mp4")
         mix.assert_called_once_with(paths, "/tmp/final.mp4", size_label="竖屏 9:16", preserve_source_audio=True)
+        audio_qc.assert_not_called()
 
     def test_replacement_subtitle_ass_uses_segment_scripts_and_readable_style(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3333,7 +3357,7 @@ class VideoReplacementV2Test(unittest.TestCase):
                 mock.patch.object(self.client, "_save_replacement_job"):
             path = self.client._run_hybrid_non_talking_segment(job, segment)
 
-        self.assertEqual(order, ["upload", "edit", "download", "audio"])
+        self.assertEqual(order, ["upload", "edit", "download"])
         self.assertTrue(path.endswith("edited_01.mp4"))
         self.assertEqual(segment["sourceSegmentUrl"], "https://x/source.mp4")
         self.assertEqual(segment["sourceSegmentMaterialId"], "source-temp")
@@ -3381,7 +3405,7 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertIn("字幕安全", uploads[0][1])
         self.assertEqual(segment["sourceSegmentUploadPath"], "/tmp/source-segment.subtitle-safe.mp4")
         self.assertEqual(segment["sourceSegmentPath"], "/tmp/source-segment.mp4")
-        ensure_audio.assert_called_once_with("/tmp/source-segment.mp4", "/tmp/job/edited_01.mp4")
+        ensure_audio.assert_not_called()
 
     def test_prepare_subtitle_safe_source_segment_outputs_valid_masked_video(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3838,7 +3862,7 @@ class VideoReplacementV2Test(unittest.TestCase):
             path = self.client._run_hybrid_non_talking_segment(job, segment)
 
         facefusion.assert_not_called()
-        self.assertEqual(order, ["audio"])
+        self.assertEqual(order, [])
         self.assertTrue(path.endswith("edited_01.mp4"))
         self.assertEqual(segment["faceSwapPath"], "")
 
@@ -4380,7 +4404,7 @@ class VideoReplacementV2Test(unittest.TestCase):
             result = self.client._run_hybrid_replacement_segment(job, segment)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(order, ["upload", "edit", "download", "audio"])
+        self.assertEqual(order, ["upload", "edit", "download"])
         facefusion.assert_not_called()
         self.assertTrue(segment["videoPath"].endswith("edited_01.mp4"))
         self.assertEqual(segment["audioStatus"], "passed")
@@ -4389,7 +4413,9 @@ class VideoReplacementV2Test(unittest.TestCase):
     def test_review_gate_blocks_unapproved_or_failed_segments(self):
         good = {"status": "done", "audioStatus": "passed", "qcStatus": "passed", "reviewApproved": True}
         self.assertTrue(self.client._replacement_segments_ready_for_final([good]))
-        for field, value in (("reviewApproved", False), ("audioStatus", "failed"), ("qcStatus", "failed")):
+        audio_failed = dict(good, audioStatus="failed")
+        self.assertTrue(self.client._replacement_segments_ready_for_final([audio_failed]))
+        for field, value in (("reviewApproved", False), ("qcStatus", "failed"), ("status", "failed")):
             segment = dict(good)
             segment[field] = value
             with self.subTest(field=field):
@@ -5157,6 +5183,91 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertFalse(removed)
         self.assertEqual(len(job["segments"]), 1)
 
+    def test_replacement_transcription_issue_text_warns_about_failed_speech(self):
+        analysis = {
+            "transcript": {
+                "status": "failed",
+                "text": "",
+                "segments": [],
+                "failedRanges": [{"start": 0.0, "end": 17.77, "code": "remote_timeout"}],
+            }
+        }
+
+        text = self.client._replacement_transcription_issue_text(analysis)
+
+        self.assertIn("口播识别失败", text)
+        self.assertIn("超时", text)
+        self.assertIn("重试口播", text)
+
+    def test_replacement_transcription_retry_updates_source_and_job_analysis(self):
+        with tempfile.TemporaryDirectory() as td:
+            video = Path(td) / "video.mp4"
+            video.write_bytes(b"fake-video")
+            page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+            page._busy = False
+            page._source = {
+                "sourceVideoPath": str(video),
+                "breakdownAnalysis": {
+                    "meta": {"duration": 17.77},
+                    "transcript": {
+                        "status": "failed",
+                        "retryCount": 0,
+                        "text": "",
+                        "segments": [],
+                        "failedRanges": [{"start": 0.0, "end": 17.77, "code": "remote_timeout"}],
+                        "errors": [{"start": 0.0, "end": 17.77, "code": "remote_timeout"}],
+                    },
+                },
+            }
+            page._job = {
+                "id": "job-retry-transcript",
+                "outDir": td,
+                "breakdownAnalysis": dict(page._source["breakdownAnalysis"]),
+                "segments": [{"index": 1, "script": ""}],
+            }
+            page.status = _FakeWidget()
+            page.b_retry_transcript = _FakeWidget()
+            page.b_plan = _FakeWidget()
+            page.refresh_segments = mock.Mock()
+            page._set_generation_feedback = mock.Mock()
+            saved = []
+            emitted = []
+            bridge = types.SimpleNamespace(payload=types.SimpleNamespace(
+                emit=lambda tag, payload: emitted.append((tag, payload))
+            ))
+            retried = {
+                "status": "ok",
+                "chunks": [{
+                    "start": 0.0,
+                    "end": 17.77,
+                    "language": "zh-CN",
+                    "segments": [{"startSec": 0.0, "endSec": 2.0, "text": "重试后识别出的口播"}],
+                }],
+                "failedRanges": [],
+                "errors": [],
+            }
+
+            with mock.patch.object(self.client, "run_bg", side_effect=lambda fn: fn()), \
+                    mock.patch.object(self.client, "data_dir", return_value=td), \
+                    mock.patch.object(self.client, "write_video_breakdown_job_owner", create=True), \
+                    mock.patch.object(self.client, "_transcribe_breakdown_audio", return_value=retried), \
+                    mock.patch.object(self.client, "_generate_video_breakdown_report",
+                                      return_value=("## updated", "分析完成")), \
+                    mock.patch.object(self.client, "_save_replacement_job",
+                                      side_effect=lambda job: saved.append(dict(job))), \
+                    mock.patch.object(self.client, "BRIDGE", bridge):
+                page.retry_source_transcription()
+                done = [payload for tag, payload in emitted if tag == "video_replace_transcription_retry_done"][-1]
+                page._on("video_replace_transcription_retry_done", done)
+
+            transcript = page._source["breakdownAnalysis"]["transcript"]
+            self.assertEqual(transcript["status"], "ok")
+            self.assertEqual(transcript["failedRanges"], [])
+            self.assertIn("重试后识别出的口播", transcript["text"])
+            self.assertIn("重试后识别出的口播", page._job["breakdownAnalysis"]["transcript"]["text"])
+            self.assertEqual(saved[-1]["breakdownAnalysis"]["transcript"]["status"], "ok")
+            self.assertIn("可以重新生成替换方案", page.status.text())
+
     def test_replacement_error_display_uses_chinese_without_mutating_raw_code(self):
         segment = {
             "errorId": "err-face",
@@ -5165,9 +5276,10 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         display = self.client._replacement_segment_display_error(segment)
 
-        self.assertIn("错误编号 err-face", display)
         self.assertIn("质检失败", display)
         self.assertIn("人脸", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-face", display)
         self.assertNotIn("replacement_qc_failed", display)
         self.assertNotIn("face_mismatch", display)
         self.assertEqual(segment["error"], "replacement_qc_failed:face_mismatch")
@@ -5177,8 +5289,9 @@ class VideoReplacementV2Test(unittest.TestCase):
             "替换生成失败（错误编号 err-504）:图片生成 504: <html><h1>504 Gateway Time-out</h1>"
         )
 
-        self.assertIn("错误编号 err-504", display)
         self.assertIn("图片生成服务暂时不可用或超时", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-504", display)
         self.assertNotIn("Gateway", display)
         self.assertNotIn("<html>", display)
 
@@ -5187,8 +5300,9 @@ class VideoReplacementV2Test(unittest.TestCase):
             "错误编号 err-6077c2486cac4a3b; video_replace_remote_media_required"
         )
 
-        self.assertIn("错误编号 err-6077c2486cac4a3b", display)
         self.assertIn("源片段地址不是公网可访问地址", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-6077c2486cac4a3b", display)
         self.assertNotIn("video_replace_remote_media_required", display)
 
     def test_replacement_error_display_localizes_facefusion_timeout_and_green_check(self):
@@ -5201,9 +5315,131 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         self.assertIn("本地换脸增强超时", timeout_display)
         self.assertIn("已回退远程同款结果", timeout_display)
+        self.assertNotIn("错误编号", timeout_display)
+        self.assertNotIn("err-face", timeout_display)
         self.assertNotIn("facefusion_timeout", timeout_display)
         self.assertIn("上游内容审核未通过", green_display)
+        self.assertNotIn("错误编号", green_display)
+        self.assertNotIn("err-green", green_display)
         self.assertNotIn("绿网", green_display)
+
+    def test_replacement_error_display_localizes_remote_read_timeout(self):
+        raw = (
+            "替换生成失败（错误编号 err-timeout）:"
+            "HTTPConnectionPool(host='120.26.194.174', port=80): "
+            "Read timed out. (read timeout=60)"
+        )
+
+        display = self.client._localize_replacement_display_text(raw)
+
+        self.assertEqual(
+            "远程服务响应超时，本次生成没有在限定时间内返回。"
+            "请稍后重试；如果连续出现，请重启本地客户端后再试。",
+            display,
+        )
+        self.assertNotIn("HTTPConnectionPool", display)
+        self.assertNotIn("Read timed out", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-timeout", display)
+
+    def test_replacement_error_display_localizes_remote_connection_failure(self):
+        raw = (
+            "错误编号 err-connect；ConnectionError: "
+            "HTTPConnectionPool(host='120.26.194.174', port=80): "
+            "Max retries exceeded with url: /api/v1/comic-drama/projects "
+            "(Caused by NewConnectionError: Failed to establish a new connection)"
+        )
+
+        display = self.client._localize_replacement_display_text(raw)
+
+        self.assertEqual(
+            "无法连接远程服务，请检查网络状态或本地客户端是否为最新版本。",
+            display,
+        )
+        self.assertNotIn("ConnectionError", display)
+        self.assertNotIn("HTTPConnectionPool", display)
+        self.assertNotIn("错误编号", display)
+
+    def test_replacement_error_display_localizes_remote_file_descriptor_exhaustion(self):
+        raw = (
+            "comic_api_http_502:{'detail': "
+            "\"平台服务调用失败：URLError(OSError(24, 'Too many open files'))\"}"
+        )
+
+        display = self.client._localize_replacement_display_text(raw)
+
+        self.assertEqual(
+            "远程漫剧服务资源句柄耗尽，视频生成暂时不可用。请稍后重试；如果连续出现，需要重启远程漫剧服务并检查句柄泄漏。",
+            display,
+        )
+        self.assertNotIn("URLError", display)
+        self.assertNotIn("Too many open files", display)
+        self.assertNotIn("OSError", display)
+        self.assertNotIn("err-connect", display)
+
+    def test_replacement_error_display_localizes_invalid_comic_video_duration(self):
+        display = self.client._localize_replacement_display_text(
+            "替换生成失败（错误编号 err-video）:comic_segment_invalid:media_invalid_duration"
+        )
+
+        self.assertEqual("远程返回的生成片段不是有效视频，请单段重试。", display)
+        self.assertNotIn("comic_segment_invalid", display)
+        self.assertNotIn("media_invalid_duration", display)
+        self.assertNotIn("错误编号", display)
+
+    def test_replacement_error_display_keeps_remote_message_without_error_id(self):
+        display = self.client._localize_replacement_display_text(
+            "错误编号 err-real-person；kwvideo-v2-quannengcankao 生成失败:status=错误; "
+            "message=请求失败，因为输入视频可能包含真人。请求id："
+        )
+
+        self.assertIn("请求失败，因为输入视频可能包含真人", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-real-person", display)
+        self.assertNotIn("请根据错误编号查看日志", display)
+
+    def test_replacement_error_display_localizes_policy_violation(self):
+        display = self.client._localize_replacement_display_text(
+            "错误编号 err-policy；comic_task_failed:ark 400 Bad Request: "
+            "{\"error\":{\"code\":\"InputImageSensitiveContentDetected.PolicyViolation\","
+            "\"message\":\"The request failed because the input image 'content[6]' "
+            "may be related to copyright restrictions.\"}}"
+        )
+
+        self.assertIn("上游模型拒绝了输入参考图", display)
+        self.assertIn("版权", display)
+        self.assertIn("切换备用模型", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-policy", display)
+        self.assertNotIn("InputImageSensitiveContentDetected", display)
+
+    def test_replacement_segment_display_prefers_error_content_without_error_id(self):
+        segment = {
+            "status": "failed",
+            "errorId": "err-segment",
+            "error": "comic_storyboard_id_missing:segment_1",
+        }
+
+        display = self.client._replacement_segment_display_error(segment)
+
+        self.assertIn("comic_storyboard_id_missing:segment_1", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-segment", display)
+
+    def test_replacement_segment_display_prefers_remote_error_over_id_fallback(self):
+        segment = {
+            "status": "failed",
+            "errorId": "err-segment",
+            "remoteErrorId": "err-remote",
+            "remoteError": "kwvideo-v2-quannengcankao 生成失败:status=错误; message=请求失败，因为输入视频可能包含真人。",
+        }
+
+        display = self.client._replacement_segment_display_error(segment)
+
+        self.assertIn("请求失败，因为输入视频可能包含真人", display)
+        self.assertNotIn("错误编号", display)
+        self.assertNotIn("err-segment", display)
+        self.assertNotIn("err-remote", display)
 
     def test_segment_status_text_includes_drift_retry_and_block_reason(self):
         job = {"identityMode": "standard", "segments": [{"index": 1}]}
@@ -5616,7 +5852,9 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertIn("已用 1分05秒", text)
         self.assertIn("剩余 2分05秒", text)
         self.assertIn("质检提醒", text)
-        self.assertIn("错误编号 err-remote-first", text)
+        self.assertIn("上游队列繁忙", text)
+        self.assertNotIn("错误编号", text)
+        self.assertNotIn("err-remote-first", text)
 
     def test_segment_status_text_includes_identity_mode(self):
         job = {"identityMode": "standard", "segments": [{"index": 1}]}

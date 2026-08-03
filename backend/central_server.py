@@ -23,7 +23,7 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlencode
 import urllib.error
@@ -51,10 +51,18 @@ def _load_central_dotenv(load_dotenv_fn=None):
 
 _load_central_dotenv()
 
-try:
-    import maindb  # 漫剧(ai-education)共享主库访问层:用户/余额/价格/资产
-except Exception:
-    maindb = None
+MAINDB_ENABLED = os.getenv("MAINDB_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+MAINDB_IMPORT_ERROR = None
+maindb = None
+if MAINDB_ENABLED:
+    try:
+        import maindb  # 漫剧(ai-education)共享主库访问层:用户/余额/价格/资产
+    except Exception as exc:
+        # The dashboard checks this marker and fails closed without logging the
+        # exception, which may contain connection details from the runtime.
+        MAINDB_IMPORT_ERROR = exc
 
 from billing_analytics import (
     BillingQueryError,
@@ -68,6 +76,21 @@ from billing_analytics import (
 from jsonschema import ValidationError as JsonSchemaValidationError
 from utils.media_validation import cleanup_quarantine, validate_image_file, validate_video_file
 from utils.structured_log import json_log
+from platform_features import (
+    XHS_ENABLED_ENV,
+    filter_xhs_capabilities,
+    is_xhs_platform,
+    log_platform_disabled,
+    payload_uses_xhs,
+    platform_disabled_result,
+    xhs_enabled,
+)
+from utils.minimax_direct import (
+    H3_MODEL,
+    MiniMaxDirectClient,
+    MiniMaxDirectError,
+    normalize_video_request,
+)
 from matrix_sso import MatrixSsoError, issue_ticket as issue_matrix_sso_ticket
 
 
@@ -125,6 +148,14 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MATERIALS_DIR, exist_ok=True)
 os.makedirs(MATERIAL_QUARANTINE_DIR, exist_ok=True)
 LOCK = threading.RLock()
+
+
+def _xhs_disabled(route="", task_type="", stage="route"):
+    # Recovery switch: MATRIX_XHS_ENABLED=1 restores Xiaohongshu task routing.
+    _ = XHS_ENABLED_ENV
+    result = platform_disabled_result("xhs", route=route, task_type=task_type, stage=stage)
+    log_platform_disabled(logger, "xhs", route=route, task_type=task_type, stage=stage)
+    return result
 
 
 TASK_POST_PATHS = {
@@ -379,6 +410,7 @@ def init_state():
     st.setdefault("cloudLoginProgress", [])
     st.setdefault("enterpriseInvites", [])
     st.setdefault("legalConsents", {})
+    st.setdefault("minimax_pending_charges", {})
     st["publishRuntime"] = publish_runtime_from_state(st)
     st.setdefault("settings", {"perAccountPerDay": 1, "intervalMin": 60, "enabled": False})
     st.setdefault("orgSettings", {})
@@ -754,6 +786,12 @@ def audit_safe_body(body):
 
 def safe_local_browser_payload(task_type, payload):
     payload = payload if isinstance(payload, dict) else {}
+    if task_type == "douyin.dm":
+        return {
+            "targetFingerprint": _short_hash(payload.get("target") or payload.get("userUrl") or payload.get("secUid") or ""),
+            "contentFingerprint": _short_hash(payload.get("content") or payload.get("text") or ""),
+            "accountId": payload.get("accountId") or payload.get("account") or "",
+        }
     if task_type == "douyin.dm.inbox":
         return {
             "targetFingerprint": _short_hash(payload.get("target") or payload.get("userUrl") or payload.get("secUid") or ""),
@@ -765,6 +803,15 @@ def safe_local_browser_payload(task_type, payload):
 
 def safe_local_browser_result(task_type, result):
     result = result if isinstance(result, dict) else {}
+    if task_type == "douyin.dm":
+        return {
+            "ok": bool(result.get("ok")),
+            "accountId": result.get("accountId") or "",
+            "sentFingerprint": _short_hash(result.get("sent") or ""),
+            "error": result.get("error") or "",
+            "errorId": result.get("errorId") or "",
+            "needLogin": bool(result.get("needLogin")),
+        }
     if task_type != "douyin.dm.inbox":
         return strip_large_payloads(result, max_inline=20000)
     messages = []
@@ -840,6 +887,18 @@ def compact_state_for_persist(state):
             t["body"] = strip_large_payloads(t.get("body"), max_inline=20000)
         tasks_out[tid] = t
     out["tasks"] = tasks_out
+    local_tasks_out = {}
+    for tid, task in (src.get("localBrowserTasks") or {}).items():
+        if not isinstance(task, dict):
+            local_tasks_out[tid] = task
+            continue
+        item = dict(task)
+        task_type = str(item.get("type") or "")
+        if task_type in ("douyin.dm", "douyin.dm.inbox"):
+            item["payload"] = safe_local_browser_payload(task_type, item.get("payload") or {})
+            item["result"] = safe_local_browser_result(task_type, item.get("result") or {})
+        local_tasks_out[tid] = item
+    out["localBrowserTasks"] = local_tasks_out
     return out
 
 
@@ -911,6 +970,322 @@ def read_body(handler):
         return {}
 
 
+MINIMAX_GENERATE_PATH = "/api/v1/minimax/video/generate"
+MINIMAX_TASK_PATH_PREFIX = "/api/v1/minimax/video/tasks/"
+MINIMAX_ACTIVE_STATUSES = {"submitting", "pending", "processing"}
+
+
+def _minimax_error(error, status, stage, message="", context=None):
+    error_id = "err-" + uuid.uuid4().hex[:16]
+    trace_id = "trace-" + uuid.uuid4().hex[:16]
+    safe_message = str(message or error)[:240]
+    json_log(
+        logger,
+        "minimax_central_error",
+        level="warning",
+        errorId=error_id,
+        traceId=trace_id,
+        code=error,
+        stage=stage,
+        context=audit_safe_body(context if isinstance(context, dict) else {}),
+    )
+    payload = {
+        "ok": False,
+        "error": error,
+        "errorId": error_id,
+        "traceId": trace_id,
+        "stage": stage,
+    }
+    if safe_message:
+        payload["message"] = safe_message
+    return payload, status
+
+
+def _minimax_public_record(record):
+    record = record if isinstance(record, dict) else {}
+    fields = (
+        "businessTaskId",
+        "providerTaskId",
+        "requestedModel",
+        "actualModel",
+        "mode",
+        "duration",
+        "resolution",
+        "billingRef",
+        "status",
+        "traceId",
+        "failureStage",
+        "error",
+        "resultUrl",
+        "providerResultUrl",
+        "createdAt",
+        "updatedAt",
+    )
+    payload = {"ok": True}
+    for field in fields:
+        if field in record and record[field] not in (None, ""):
+            payload[field] = record[field]
+    return payload
+
+
+def _minimax_active_count():
+    with LOCK:
+        rows = STATE.get("minimax_pending_charges") or {}
+        return sum(
+            1
+            for value in rows.values()
+            if isinstance(value, dict)
+            and str(value.get("status") or "").lower() in MINIMAX_ACTIVE_STATUSES
+        )
+
+
+def minimax_generate(handler, body):
+    user = current_user(handler)
+    if not user:
+        payload, status = _minimax_error(
+            "not_authenticated",
+            401,
+            "authenticate",
+            context={"path": MINIMAX_GENERATE_PATH},
+        )
+        return json_response(handler, payload, status)
+    try:
+        request = normalize_video_request(body)
+    except (TypeError, ValueError) as exc:
+        payload, status = _minimax_error(
+            "invalid_minimax_request",
+            400,
+            "validate",
+            message=str(exc),
+            context={"userId": user.get("id")},
+        )
+        return json_response(handler, payload, status)
+    if request.get("duration") is None or request.get("resolution") is None:
+        payload, status = _minimax_error(
+            "invalid_minimax_request",
+            400,
+            "validate",
+            message="duration and resolution are required",
+            context={"userId": user.get("id")},
+        )
+        return json_response(handler, payload, status)
+    if not MINIMAX_ENABLED:
+        payload, status = _minimax_error(
+            "minimax_disabled",
+            503,
+            "feature_gate",
+            context={"userId": user.get("id")},
+        )
+        return json_response(handler, payload, status)
+    if not MINIMAX_CENTER_API_KEY:
+        payload, status = _minimax_error(
+            "minimax_not_configured",
+            503,
+            "configuration",
+            context={"userId": user.get("id")},
+        )
+        return json_response(handler, payload, status)
+    if _minimax_active_count() >= MINIMAX_MAX_ACTIVE_TASKS:
+        payload, status = _minimax_error(
+            "minimax_concurrency_limit",
+            429,
+            "admission",
+            context={"limit": MINIMAX_MAX_ACTIVE_TASKS},
+        )
+        return json_response(handler, payload, status)
+
+    org_id = request_org_id(handler, body)
+    business_task_id = "minimax-" + uuid.uuid4().hex[:16]
+    trace_id = "trace-" + uuid.uuid4().hex[:16]
+    requested_model = str(body.get("model") or H3_MODEL).strip() or H3_MODEL
+    actual_model = H3_MODEL
+    record = {
+        "businessTaskId": business_task_id,
+        "providerTaskId": "",
+        "requestedModel": requested_model,
+        "actualModel": actual_model,
+        "mode": request["mode"],
+        "duration": request.get("duration"),
+        "resolution": request.get("resolution"),
+        "billingRef": "",
+        "status": "submitting",
+        "userId": user.get("id"),
+        "orgId": org_id,
+        "traceId": trace_id,
+        "createdAt": now(),
+        "updatedAt": now(),
+    }
+    with LOCK:
+        STATE.setdefault("minimax_pending_charges", {})[business_task_id] = record
+        persist()
+    try:
+        client = MiniMaxDirectClient(
+            base_url=MINIMAX_CENTER_API_BASE,
+            api_key=MINIMAX_CENTER_API_KEY,
+            timeout_sec=MINIMAX_TASK_TIMEOUT_SEC,
+            poll_interval_sec=MINIMAX_POLL_INTERVAL_SEC,
+        )
+        provider_task_id = client.submit_video(request)
+    except Exception as exc:
+        with LOCK:
+            record["status"] = "failed"
+            record["failureStage"] = "submit"
+            record["error"] = "minimax_submit_failed"
+            record["updatedAt"] = now()
+            persist()
+        payload, status = _minimax_error(
+            "minimax_submit_failed",
+            502,
+            "submit",
+            message=type(exc).__name__,
+            context={"businessTaskId": business_task_id, "traceId": trace_id},
+        )
+        return json_response(handler, payload, status)
+
+    record.update(
+        {
+            "providerTaskId": str(provider_task_id),
+            "billingRef": "minimax:center:%s:%s" % (
+                business_task_id,
+                provider_task_id,
+            ),
+            "status": "pending",
+            "updatedAt": now(),
+        }
+    )
+    with LOCK:
+        STATE.setdefault("minimax_pending_charges", {})[business_task_id] = record
+        persist()
+    json_log(
+        logger,
+        "minimax_central_submitted",
+        level="info",
+        traceId=trace_id,
+        businessTaskId=business_task_id,
+        providerTaskId=str(provider_task_id),
+        actualModel=actual_model,
+        mode=request["mode"],
+        status="pending",
+    )
+    return json_response(handler, _minimax_public_record(record), 202)
+
+
+def minimax_task_status(handler, task_id):
+    user = current_user(handler)
+    if not user:
+        payload, status = _minimax_error(
+            "not_authenticated",
+            401,
+            "authenticate",
+            context={"taskId": task_id},
+        )
+        return json_response(handler, payload, status)
+    task_id = str(task_id or "").strip()
+    with LOCK:
+        record = dict(
+            (STATE.get("minimax_pending_charges") or {}).get(task_id) or {}
+        )
+    if not record:
+        payload, status = _minimax_error(
+            "minimax_task_not_found",
+            404,
+            "lookup",
+            context={"taskId": task_id},
+        )
+        return json_response(handler, payload, status)
+    if record.get("userId") != user.get("id") or item_org_id(record) != request_org_id(handler):
+        payload, status = _minimax_error(
+            "minimax_task_not_found",
+            404,
+            "lookup",
+            context={"taskId": task_id},
+        )
+        return json_response(handler, payload, status)
+    status_text = str(record.get("status") or "").lower()
+    if status_text in MINIMAX_ACTIVE_STATUSES:
+        provider_task_id = str(record.get("providerTaskId") or "").strip()
+        if not MINIMAX_ENABLED:
+            payload, status = _minimax_error(
+                "minimax_disabled",
+                503,
+                "feature_gate",
+                context={"taskId": task_id},
+            )
+            return json_response(handler, payload, status)
+        if not MINIMAX_CENTER_API_KEY:
+            payload, status = _minimax_error(
+                "minimax_not_configured",
+                503,
+                "configuration",
+                context={"taskId": task_id},
+            )
+            return json_response(handler, payload, status)
+        if not provider_task_id:
+            payload, status = _minimax_error(
+                "minimax_task_missing_provider_id",
+                500,
+                "lookup",
+                context={"taskId": task_id},
+            )
+            return json_response(handler, payload, status)
+        try:
+            client = MiniMaxDirectClient(
+                base_url=MINIMAX_CENTER_API_BASE,
+                api_key=MINIMAX_CENTER_API_KEY,
+                timeout_sec=MINIMAX_TASK_TIMEOUT_SEC,
+                poll_interval_sec=0,
+            )
+            provider_payload = client.poll_video(provider_task_id)
+            provider_status = str(provider_payload.get("status") or "").lower()
+            with LOCK:
+                stored = STATE["minimax_pending_charges"].get(task_id) or record
+                if provider_status == "success":
+                    result_url = client.retrieve_video(provider_payload)
+                    stored["status"] = "awaiting_actual_cost"
+                    stored["resultUrl"] = result_url
+                    stored["providerResultUrl"] = result_url
+                else:
+                    stored["status"] = "processing"
+                stored["updatedAt"] = now()
+                record = dict(stored)
+                persist()
+            json_log(
+                logger,
+                "minimax_central_polled",
+                level="info",
+                traceId=record.get("traceId"),
+                businessTaskId=record.get("businessTaskId"),
+                providerTaskId=provider_task_id,
+                actualModel=record.get("actualModel"),
+                status=record.get("status"),
+            )
+        except Exception as exc:
+            with LOCK:
+                stored = STATE["minimax_pending_charges"].get(task_id) or record
+                stored["status"] = "failed"
+                stored["failureStage"] = "poll"
+                stored["error"] = "minimax_poll_failed"
+                stored["updatedAt"] = now()
+                record = dict(stored)
+                persist()
+            payload, status = _minimax_error(
+                "minimax_poll_failed",
+                502,
+                "poll",
+                message=type(exc).__name__,
+                context={"businessTaskId": task_id, "traceId": record.get("traceId")},
+            )
+            return json_response(handler, payload, status)
+    elif status_text in {"success", "succeeded", "completed"}:
+        with LOCK:
+            stored = STATE["minimax_pending_charges"].get(task_id) or record
+            stored["status"] = "awaiting_actual_cost"
+            stored["updatedAt"] = now()
+            record = dict(stored)
+            persist()
+    return json_response(handler, _minimax_public_record(record), 200)
+
+
 _LK_SSLCTX = None
 
 
@@ -965,28 +1340,154 @@ def lk888_proxy_task_flags(obj):
     return failed, done
 
 
-def gen_price_yundou(model, params):
-    """服务端权威计费:按 lk888 模型(+关键 params)定云豆价。反代对每次 /v1/media/generate 强制
-    扣费,客户端改不了、也绕不过(分发客户端没有 lk888 直连 key,只能走反代)。与客户端展示价对齐。
-    mix(本地 ffmpeg,无 lk888 调用、无算力成本)与 copywriting/chat(便宜、且内部也用)不经此路径。
-    未知媒体模型给保底价,避免用没定价的模型白嫖;非生成类(状态查询/模型列表)不进这里。"""
-    m = (model or "").lower()
-    p = params or {}
-    if "kling-avatar" in m:  # 数字人
-        return 50.4 if str(p.get("mode") or "").lower() == "pro" else 25.2
-    if "vidu" in m:          # 工作流视频(vidu-jieshuoman)
-        return 25.2
-    if "seedance" in m:      # 商品视频(doubao-seedance)
-        return 3.08
-    if "gpt-image" in m or "image-2" in m or "image2" in m:  # 出图(商品/爆款/工作流/封面)
-        return 0.14
-    if "tts" in m or "speech" in m:  # 语音
-        return 0.21
-    if any(k in m for k in ("suno", "music", "audio", "sound")):  # 音乐/音频
-        return 0.21
-    if any(k in m for k in ("veo", "sora", "runway", "pika", "hailuo", "wan", "cog", "video", "avatar", "image", "flux", "midjourney", "sd")):
-        return 3.08          # 其它视频/图像类媒体模型:保底(不白嫖)
-    return 3.08              # 兜底:未知模型按视频价保底(客户端只用已定价模型;未知=改过的客户端,按高价扣防白嫖)
+def _lk888_request_billing_meta(handler):
+    headers = getattr(handler, "headers", {}) or {}
+    meta = {}
+    for key, header in (
+            ("billingScenario", "X-Matrix-Billing-Scenario"),
+            ("billingStage", "X-Matrix-Billing-Stage"),
+            ("billingDetail", "X-Matrix-Billing-Detail")):
+        value = str(headers.get(header) or "").strip()
+        if value:
+            meta[key] = value[:160]
+    return meta
+
+
+def _lk888_pending_billing_meta(pending):
+    pending = pending if isinstance(pending, dict) else {}
+    meta = {}
+    for key in ("billingScenario", "billingStage", "billingDetail"):
+        value = str(pending.get(key) or "").strip()
+        if value:
+            meta[key] = value[:160]
+    return meta
+
+
+def _lk888_generate_content_model(sub_path):
+    match = re.search(r"/models/([^/:]+):generatecontent", str(sub_path or ""), re.I)
+    if not match:
+        return ""
+    try:
+        return unquote(match.group(1)).strip()
+    except Exception:
+        return match.group(1).strip()
+
+
+def _lk888_amount_value(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        amount = float(value)
+        return round(amount, 6) if amount > 0 else None
+    except Exception:
+        pass
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", text)
+    if not match:
+        return None
+    try:
+        amount = float(match.group(1))
+    except Exception:
+        return None
+    return round(amount, 6) if amount > 0 else None
+
+
+def lk888_actual_charge_amount(payload):
+    """Read actual LK888 consumption amount from known response shapes."""
+    charge_keys = {
+        "amount", "cost", "consume", "consumption", "fee", "charge",
+        "total_cost", "totalcost", "total_amount", "totalamount",
+        "billing_amount", "billingamount", "actual_amount", "actualamount",
+    }
+
+    def direct(obj, path):
+        cur = obj
+        for key in path:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(key)
+        return _lk888_amount_value(cur)
+
+    for path in (
+        ("billing", "amount"), ("billing", "cost"), ("billing", "total"),
+        ("data", "billing", "amount"), ("data", "billing", "cost"),
+        ("data", "cost"), ("data", "amount"), ("data", "consume"),
+        ("cost",), ("amount",), ("consume",), ("consumption",),
+        ("total_cost",), ("totalAmount",),
+    ):
+        amount = direct(payload, path)
+        if amount is not None:
+            return amount
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                k = str(key or "").replace("-", "_").lower()
+                if k in charge_keys:
+                    amount = _lk888_amount_value(value)
+                    if amount is not None:
+                        return amount
+                found = walk(value)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = walk(item)
+                if found is not None:
+                    return found
+        return None
+
+    return walk(payload)
+
+
+def lk888_response_task_id(payload):
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else {}
+    for obj in (data, payload if isinstance(payload, dict) else {}):
+        tid = obj.get("task_id") or obj.get("taskId") or obj.get("id")
+        if tid:
+            return str(tid)
+        tids = obj.get("task_ids") or obj.get("taskIds")
+        if isinstance(tids, list) and tids:
+            return str(tids[0])
+    return ""
+
+
+def lk888_actual_model_id(payload, fallback=""):
+    aliases = {
+        "vidu/viduq3-mix_reference2video": "viduq3-cankaosheng",
+        "viduq3-mix_reference2video": "viduq3-cankaosheng",
+    }
+    payload = payload if isinstance(payload, dict) else {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    for source in (data, payload):
+        for key in (
+                "actual_model", "actualModel", "fallback_model", "fallbackModel",
+                "model_id", "modelId", "model"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return aliases.get(value, value)
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key in ("actual_model", "actualModel", "fallback_model", "fallbackModel"):
+                model = str(value.get(key) or "").strip()
+                if model:
+                    return aliases.get(model, model)
+            for child in value.values():
+                model = walk(child)
+                if model:
+                    return model
+        elif isinstance(value, list):
+            for child in value:
+                model = walk(child)
+                if model:
+                    return model
+        return ""
+
+    model = walk(payload) or str(fallback or "").strip()
+    return aliases.get(model, model)
 
 
 def _lk888_multipart_fields(body, content_type):
@@ -1031,8 +1532,8 @@ def lk888_proxy(handler, method, parsed):
     """lk888 反代中转:客户端 /lk888/<子路径> → https://api.lk888.ai/<子路径>,服务端注入真 key。
     这样分发的客户端既不用内置 lk888 key、也不用翻墙代理(服务器直连 lk888)。
     鉴权:必须是有效登录会话(客户端把 session token 放 Authorization: Bearer)。
-    **计费**:对 POST /v1/media/generate 服务端权威扣云豆(见 gen_price_yundou),余额不足直接 402
-    不转发;下单失败/任务失败自动退款(见 STATE['gen_charges'] 按 task_id 记账,轮询到失败即退)。"""
+    **计费**:模型调用先转发 LK888，只按同步响应、任务终态或消费明细中的实际费用后付费。
+    提交前不使用本地模型价格预扣；已欠费用户的新模型调用仍在转发前阻断。"""
     import ssl
     import urllib.request
     import urllib.error
@@ -1061,13 +1562,23 @@ def lk888_proxy(handler, method, parsed):
     if method == "POST":
         length = int(handler.headers.get("Content-Length", "0") or "0")
         data = handler.rfile.read(length) if length else b""
-    # ===== 服务端权威计费:媒体生成先扣云豆,余额不足直接拒绝转发 =====
-    # 异步任务生成走 /v1/media/generate(视频/数字人/TTS/部分图);同步图片走 /v1/images/generations。
+    # 异步媒体、同步图片、聊天和 generateContent 都只按 LK888 最终实际费用结算。
     _sub_path = sub.split("?", 1)[0].rstrip("/")
+    _is_async_media = (_sub_path == "/v1/media/generate")
     _is_sync_img = (_sub_path == "/v1/images/generations")
-    _is_gen = (_sub_path == "/v1/media/generate") or _is_sync_img
-    charge_ctx = None
-    if method == "POST" and _is_gen and u.get("id") != "user-owner":
+    _is_gen = _is_async_media or _is_sync_img
+    _is_chat = (_sub_path == "/v1/chat/completions")
+    _is_generate_content = "generatecontent" in _sub_path.lower()
+    _chat_model = None
+    if method == "POST" and _is_chat:
+        try:
+            _chat_model = (json.loads(data or b"{}") or {}).get("model")
+        except Exception:
+            _chat_model = None
+    _request_model = _chat_model
+    _request_params = {}
+    _bo = {}
+    if method == "POST" and (_is_gen or _is_chat):
         content_type = handler.headers.get("Content-Type") or ""
         if "multipart/form-data" in content_type.lower():
             _fields = _lk888_multipart_fields(data, content_type)
@@ -1080,35 +1591,19 @@ def lk888_proxy(handler, method, parsed):
                 _bo = json.loads(data or b"{}")
             except Exception:
                 _bo = {}
-        if maindb_on() and isinstance(u.get("id"), int):
-            # ===== 漫剧模式:按共享 model_prices 扣**算力**(与漫剧画布同一钱包/同一价) =====
-            _model = _bo.get("model")
-            _params = _bo.get("params") or {}
-            _rid = "msgen-" + uuid.uuid4().hex
-            _ok, _amt, _bal, _err = maindb.charge_generation(u.get("id"), _model, _params, request_id=_rid,
-                                                             multiplier=MAINDB_PRICE_MULTIPLIER)
-            if not _ok:
-                if _err == "insufficient_balance":
-                    return json_response(handler, {"ok": False, "error": "insufficient_balance",
-                                                   "need": _amt, "balance": _bal,
-                                                   "message": "算力余额不足(本次约需 %s,当前 %s),请充值后再生成。" % (_amt, _bal)}, 402)
-                # 模型未在 model_prices 配价:拒绝(避免白嫖 + 提示运营方补价)
-                return json_response(handler, {"ok": False, "error": "model_not_priced",
-                                               "model": _model,
-                                               "message": "该模型「%s」暂未接入计费,请联系管理员在 model_prices 配置价格。" % str(_model)[:40]}, 402)
-            if _amt > 0:
-                charge_ctx = {"ref": _rid, "userId": u.get("id"), "amount": _amt, "sync": _is_sync_img, "ts": now(), "mdb": True}
-        else:
-            # ===== 旧云豆模式(未接漫剧主库时的回退) =====
-            _amt = gen_price_yundou(_bo.get("model"), _bo.get("params") or {})
-            if _amt > 0:
-                _gref = "gen:" + uuid.uuid4().hex[:16]
-                _ok, _bal, _err = charge_user(u.get("id"), _amt, reason="AI生成·" + str(_bo.get("model") or "")[:24], ref=_gref)
-                if not _ok:
-                    return json_response(handler, {"ok": False, "error": "insufficient_balance",
-                                                   "need": _amt, "balance": _bal,
-                                                   "message": "云豆余额不足(需 %s,当前 %s),请充值后再生成。" % (_amt, _bal)}, 402)
-                charge_ctx = {"ref": _gref, "userId": u.get("id"), "amount": _amt, "sync": _is_sync_img, "ts": now()}
+        _request_model = _request_model or _bo.get("model")
+        _request_params = _bo.get("params") or {}
+    if method == "POST" and _is_generate_content and not _request_model:
+        _request_model = _lk888_generate_content_model(_sub_path)
+    _billing_meta = _lk888_request_billing_meta(handler) if method == "POST" else {}
+    _is_lk888_model_call = method == "POST" and (_is_gen or _is_chat or _is_generate_content)
+    if _is_lk888_model_call and u.get("id") != "user-owner" and user_has_arrears(u.get("id")):
+        return json_response(handler, {
+            "ok": False,
+            "error": "account_in_arrears",
+            "balance": get_balance(u.get("id")),
+            "message": "账户已欠费，请联系管理员充值后继续使用模型。",
+        }, 402)
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", "Bearer " + key)
     ct = handler.headers.get("Content-Type")
@@ -1130,11 +1625,6 @@ def lk888_proxy(handler, method, parsed):
             resp_ct = r.headers.get("Content-Type") or "application/json"
     except urllib.error.HTTPError as e:
         if 300 <= int(e.code or 0) < 400:
-            if charge_ctx:
-                try:
-                    refund_user_by_ref(charge_ctx["userId"], charge_ctx["ref"])
-                except Exception:
-                    pass
             try:
                 add_event("lk888_upstream_redirect_blocked", {"status": int(e.code or 0)})
             except Exception:
@@ -1144,22 +1634,12 @@ def lk888_proxy(handler, method, parsed):
         status = e.code
         resp_ct = e.headers.get("Content-Type") or "application/json"
     except _LK888UpstreamPolicyError:
-        if charge_ctx:
-            try:
-                refund_user_by_ref(charge_ctx["userId"], charge_ctx["ref"])
-            except Exception:
-                pass
         try:
             add_event("lk888_upstream_policy_blocked", {"error": "https_origin_required"})
         except Exception:
             pass
         return json_response(handler, {"ok": False, "error": "lk888_upstream_error"}, 502)
     except Exception as ex:
-        if charge_ctx:
-            try:
-                refund_user_by_ref(charge_ctx["userId"], charge_ctx["ref"])
-            except Exception:
-                pass
         try:
             add_event("lk888_proxy_error", {"errorType": type(ex).__name__})
         except Exception:
@@ -1168,41 +1648,111 @@ def lk888_proxy(handler, method, parsed):
     key_bytes = key.encode("utf-8")
     if key_bytes and key_bytes in payload:
         payload = payload.replace(key_bytes, b"[REDACTED]")
-    # ===== 计费善后 =====
-    if charge_ctx and charge_ctx.get("sync"):
-        # 同步图片(/v1/images/generations):非 200 = 上游没出图 → 退款;200 成功不退。
-        if status != 200:
+    _response_json = None
+    try:
+        _response_json = json.loads(payload)
+    except Exception:
+        _response_json = None
+    if (method == "POST" and status == 200
+            and _is_lk888_model_call and u.get("id") != "user-owner"):
+        _actual_amount = lk888_actual_charge_amount(_response_json) if isinstance(_response_json, dict) else None
+        _task_id = lk888_response_task_id(_response_json) if isinstance(_response_json, dict) else ""
+        if _is_async_media:
+            if _task_id:
+                register_lk888_pending_charge(
+                    _task_id, u.get("id"),
+                    model=_request_model or "",
+                    ref="lk888:" + _task_id,
+                    meta=dict(_billing_meta, params=_request_params if isinstance(_request_params, dict) else {}),
+                )
+        elif _actual_amount and _actual_amount > 0:
+            _ok, _bal, _err = settle_lk888_actual_charge(
+                u.get("id"), _actual_amount,
+                ref="lk888:" + (_task_id or uuid.uuid4().hex[:16]),
+                model=lk888_actual_model_id(
+                    _response_json, _request_model or _chat_model or ""
+                ),
+                task_id=_task_id,
+                meta=_billing_meta,
+            )
+            if not _ok:
+                return json_response(handler, {"ok": False, "error": _err or "billing_failed",
+                                               "need": _actual_amount, "balance": _bal,
+                                               "message": "LK888已完成调用，但本项目扣费记录失败，请联系管理员核对。"}, 402)
+        elif _is_gen and _task_id:
+            register_lk888_pending_charge(
+                _task_id, u.get("id"),
+                model=_request_model or "",
+                ref="lk888:" + _task_id,
+                meta=dict(_billing_meta, params=_request_params if isinstance(_request_params, dict) else {}),
+            )
+        elif _is_chat or _is_generate_content:
+            _chat_response_id = lk888_response_task_id(_response_json) if isinstance(_response_json, dict) else ""
+            register_lk888_pending_chat_charge(
+                u.get("id"),
+                model=_request_model or _chat_model or "",
+                response_id=_chat_response_id,
+                meta=_billing_meta,
+            )
+    if method == "GET" and _sub_path == "/v1/skills/usage":
+        _q = parse_qs(parsed.query)
+        if str((_q.get("detail") or [""])[0]).strip() == "1":
             try:
-                refund_user_by_ref(charge_ctx["userId"], charge_ctx["ref"])
-            except Exception:
-                pass
-    elif charge_ctx:
-        # 异步 media/generate:成功下单(200 + task_id)→ 记账等轮询退;非 200 → 退款。
-        # 200 但解析不到 task_id:保守**不退**(生成已受理,退款=白嫖),仅无法后续按 task 退。
-        _tid = None
-        try:
-            _rj = json.loads(payload)
-            _d = _rj.get("data") if isinstance(_rj.get("data"), dict) else {}
-            _tid = _d.get("task_id") or (_d.get("task_ids") or [None])[0] or _rj.get("task_id")
-        except Exception:
-            _tid = None
-        if status == 200:
-            if _tid:
-                with LOCK:
-                    _gc = STATE.setdefault("gen_charges", {})
-                    _gc[str(_tid)] = charge_ctx
-                    _cut = now() - 6 * 3600   # 只清 >6h 陈旧记录(任务早该终态),不删活跃的
-                    for _k in [k for k, v in list(_gc.items()) if float((v or {}).get("ts") or 0) < _cut]:
-                        _gc.pop(_k, None)
-                    persist()
-        else:
-            try:
-                refund_user_by_ref(charge_ctx["userId"], charge_ctx["ref"])
-            except Exception:
-                pass
+                settle_lk888_pending_chat_usage_records(_response_json, user_id=u.get("id"))
+            except Exception as exc:
+                try:
+                    add_event("lk888_usage_reconcile_error", {"errorType": type(exc).__name__})
+                except Exception:
+                    pass
     elif method == "GET" and _sub_path == "/v1/skills/task-status":
         _tid = (parse_qs(parsed.query).get("task_id") or [""])[0]
         if _tid:
+            with LOCK:
+                _pending = (STATE.get("lk888_pending_charges") or {}).get(str(_tid))
+            if _pending and _pending.get("userId") == u.get("id"):
+                _fail = _done = False
+                _actual_amount = None
+                _actual_model = str(_pending.get("model") or "")
+                try:
+                    _rj = _response_json if isinstance(_response_json, dict) else json.loads(payload)
+                    _fail, _done = lk888_proxy_task_flags(_rj)
+                    _actual_amount = lk888_actual_charge_amount(_rj)
+                    _actual_model = lk888_actual_model_id(
+                        _rj, _pending.get("model") or ""
+                    )
+                except Exception:
+                    pass
+                if _fail:
+                    with LOCK:
+                        (STATE.get("lk888_pending_charges") or {}).pop(str(_tid), None)
+                        persist()
+                elif _done and _actual_amount and _actual_amount > 0:
+                    _ok, _bal, _err = settle_lk888_actual_charge(
+                        _pending.get("userId"),
+                        _actual_amount,
+                        ref=_pending.get("ref") or ("lk888:" + str(_tid)),
+                        model=_actual_model,
+                        task_id=str(_tid),
+                        meta=_lk888_pending_billing_meta(_pending),
+                    )
+                    if _ok:
+                        with LOCK:
+                            (STATE.get("lk888_pending_charges") or {}).pop(str(_tid), None)
+                            persist()
+                    else:
+                        try:
+                            add_event("lk888_actual_billing_failed", {
+                                "taskId": str(_tid),
+                                "userId": _pending.get("userId"),
+                                "error": _err or "billing_failed",
+                            })
+                        except Exception:
+                            pass
+                elif _done:
+                    with LOCK:
+                        _pending["status"] = "awaiting_actual_cost"
+                        _pending["lastCheckedAt"] = now()
+                        persist()
             with LOCK:
                 _ch = (STATE.get("gen_charges") or {}).get(str(_tid))
             # 只有该扣费所属用户轮询才处理(防跨用户触发他人退款)
@@ -2619,6 +3169,8 @@ def maindb_on():
     """漫剧主库是否接管账号/余额。True 后永久缓存;未就绪时每 30s 重探一次
     (避免启动瞬间 MySQL 未起就把整机永久降级到本地 JSON)。"""
     global _MAINDB_OK, _MAINDB_LAST_PROBE
+    if not MAINDB_ENABLED:
+        return False
     if _MAINDB_OK:
         return True
     if not maindb:
@@ -2947,22 +3499,21 @@ def get_or_create_phone_user(phone):
 
 # ============ 余额 / 计费框架(单价规则留空,等业务方定) ============
 BILLING_CAPABILITY_PRICES_YUNDOU = {
-    "product_image": 0.14,
-    "product_video": 3.08,
-    "copywriting": 0.07,
-    "viral_image": 0.21,
-    "digital_human": 25.2,
-    "digital_human_pro": 50.4,
+    "product_image": 0.45,
+    "product_video": 5.57,
+    "copywriting": 0.24,
+    "viral_image": 0.70,
+    "digital_human": 9.81,
+    "digital_human_pro": 19.62,
     "mix": 0.14,
-    "workflow_image": 0.14,
-    "workflow_video": 25.2,
-    "workflow_tts": 0.21,
-    "comic_keyframe_image": 0.14,
+    "workflow_image": 0.45,
+    "workflow_video": 13.79,
+    "workflow_tts": 0.06,
 }
 
 LK888_PROXY_CHARGED_CAPABILITIES = {
     "product_image", "product_video", "viral_image", "digital_human", "digital_human_pro",
-    "workflow_image", "workflow_video", "workflow_tts",
+    "workflow_image", "workflow_video", "workflow_tts", "copywriting",
 }
 
 
@@ -3057,6 +3608,31 @@ def get_balance(user_id):
     return round(float((u or {}).get("balance") or 0.0), 6)
 
 
+def _billing_maindb_ready(user_id):
+    if not isinstance(user_id, int) or not MAINDB_ENABLED:
+        return False
+    if MAINDB_IMPORT_ERROR is not None or maindb is None:
+        raise RuntimeError("billing_data_source_failed")
+    try:
+        configured = bool(maindb.configured())
+    except Exception as exc:
+        raise RuntimeError("billing_data_source_failed") from exc
+    if not configured or not maindb_on():
+        raise RuntimeError("billing_data_source_failed")
+    return True
+
+
+def _billing_balance(user_id):
+    if user_id == "user-owner":
+        return "inf"
+    if _billing_maindb_ready(user_id):
+        try:
+            return round(float(maindb.get_balance_strict(user_id)), 6)
+        except Exception as exc:
+            raise RuntimeError("billing_data_source_failed") from exc
+    return get_balance(user_id)
+
+
 def collect_billing_records(user_id, period):
     with LOCK:
         ledger_rows = [
@@ -3073,14 +3649,7 @@ def collect_billing_records(user_id, period):
         ]
 
     model_usage_rows = []
-    main_db_configured = False
-    if isinstance(user_id, int) and maindb is not None:
-        try:
-            main_db_configured = bool(maindb.configured())
-        except Exception as exc:
-            raise RuntimeError("billing_data_source_failed") from exc
-        if main_db_configured and not maindb_on():
-            raise RuntimeError("billing_data_source_failed")
+    main_db_configured = _billing_maindb_ready(user_id)
     if main_db_configured:
         start_at = period["startDate"] + " 00:00:00"
         end_at = (date.fromisoformat(period["endDate"]) + timedelta(days=1)).isoformat() + " 00:00:00"
@@ -3141,10 +3710,19 @@ def billing_dashboard_payload(user_id, params, analytics=False):
     params = _normalized_billing_query(params)
     validate_billing_payload("analytics_query" if analytics else "ledger_query", params)
     period = parse_period(params)
+    try:
+        reconciled = reconcile_lk888_pending_chat_usage_from_upstream(user_id)
+        if reconciled:
+            add_event("lk888_usage_reconciled", {"userId": user_id, "count": reconciled})
+    except Exception as exc:
+        try:
+            add_event("lk888_usage_reconcile_error", {"userId": user_id, "errorType": type(exc).__name__})
+        except Exception:
+            pass
     records, meta = collect_billing_records(user_id, period)
     if analytics:
         payload = dict(
-            build_billing_analytics(records, get_balance(user_id), period), ok=True
+            build_billing_analytics(records, _billing_balance(user_id), period), ok=True
         )
         payload = _validated_billing_response("analytics_response", payload)
     else:
@@ -3152,7 +3730,7 @@ def billing_dashboard_payload(user_id, params, analytics=False):
         payload = dict(
             build_billing_ledger(records, filters),
             ok=True,
-            balance=get_balance(user_id),
+            balance=_billing_balance(user_id),
         )
         payload = _validated_billing_response("ledger_response", payload)
     elapsed_ms = round((time.perf_counter() - started_at) * 1000, 3)
@@ -3218,7 +3796,302 @@ def _add_ledger(user_id, delta, reason, ref, balance_after):
     return item
 
 
-def charge_user(user_id, amount, reason="生成", ref=""):
+def user_has_arrears(user_id):
+    if user_id == "user-owner":
+        return False
+    try:
+        if maindb_on() and isinstance(user_id, int):
+            return float(maindb.get_balance_strict(user_id)) < 0
+    except Exception:
+        return False
+    with LOCK:
+        u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
+        if not u:
+            return False
+        try:
+            return bool(u.get("arrears")) or float(u.get("balance") or 0) < 0
+        except Exception:
+            return bool(u.get("arrears"))
+
+
+def charge_user_allow_arrears(user_id, amount, reason="LK888实际扣费", ref="", meta=None):
+    try:
+        amount = round(float(amount or 0), 6)
+    except Exception:
+        return False, get_balance(user_id), "amount_invalid"
+    if amount <= 0:
+        return True, get_balance(user_id), None
+    if user_id == "user-owner":
+        return True, float("inf"), None
+    with LOCK:
+        for it in reversed(STATE.get("ledger") or []):
+            if it.get("userId") == user_id and it.get("ref") == ref and float(it.get("delta") or 0) < 0:
+                return True, get_balance(user_id), None
+    if maindb_on() and isinstance(user_id, int):
+        amount_power = maindb_power_from_yundou(amount)
+        try:
+            conn = maindb._conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET computing_power = computing_power - %s, updated_at=NOW() WHERE id=%s",
+                    (str(amount_power), int(user_id)),
+                )
+                if cur.rowcount != 1:
+                    return False, get_balance(user_id), "user_not_found"
+            bal = get_balance(user_id)
+            with LOCK:
+                item = _add_maindb_generic_ledger(user_id, amount_power, amount, reason, ref, bal)
+                item["billingSource"] = "lk888_actual"
+                item["arrears"] = float(bal or 0) < 0
+                if isinstance(meta, dict):
+                    item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
+                persist()
+            return True, bal, None
+        except Exception as e:
+            return False, get_balance(user_id), str(e)[:80]
+    with LOCK:
+        u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
+        if not u:
+            return False, 0.0, "user_not_found"
+        bal = float(u.get("balance") or 0.0)
+        u["balance"] = round(bal - amount, 6)
+        u["arrears"] = bool(u["balance"] < 0)
+        if u["arrears"]:
+            u["arrearsAt"] = u.get("arrearsAt") or now()
+        else:
+            u.pop("arrearsAt", None)
+        u["updatedAt"] = now()
+        item = _add_ledger(user_id, -amount, reason, ref, u["balance"])
+        item["billingSource"] = "lk888_actual"
+        item["actualAmount"] = amount
+        item["arrears"] = bool(u["balance"] < 0)
+        if isinstance(meta, dict):
+            item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
+        persist()
+        return True, u["balance"], None
+
+
+def register_lk888_pending_charge(task_id, user_id, model="", ref="", meta=None):
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+    item = {
+        "userId": user_id,
+        "model": str(model or ""),
+        "ref": ref or ("lk888:" + task_id),
+        "status": "pending",
+        "ts": now(),
+    }
+    if isinstance(meta, dict):
+        item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
+    with LOCK:
+        pending = STATE.setdefault("lk888_pending_charges", {})
+        pending[task_id] = item
+        cutoff = now() - 7 * 24 * 3600
+        for key in [k for k, v in list(pending.items()) if float((v or {}).get("ts") or 0) < cutoff]:
+            pending.pop(key, None)
+        persist()
+    return item
+
+
+def _lk888_record_timestamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _lk888_usage_record_success(record):
+    if not isinstance(record, dict):
+        return False
+    state = str(record.get("state") or record.get("status") or record.get("status_group") or "").strip().lower()
+    if not state:
+        return False
+    return state in ("success", "succeeded", "completed", "已完成", "生成完成") or "success" in state
+
+
+def register_lk888_pending_chat_charge(user_id, model="", response_id="", meta=None):
+    local_id = str(response_id or "").strip() or ("chat-" + uuid.uuid4().hex[:16])
+    item = {
+        "userId": user_id,
+        "model": str(model or ""),
+        "ref": "lk888-chat:" + local_id,
+        "status": "awaiting_lk888_usage_cost",
+        "source": "chat_usage_reconcile",
+        "createdAt": now(),
+        "ts": now(),
+    }
+    if isinstance(meta, dict):
+        item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
+    with LOCK:
+        pending = STATE.setdefault("lk888_pending_charges", {})
+        pending[local_id] = item
+        cutoff = now() - 7 * 24 * 3600
+        for key in [k for k, v in list(pending.items()) if float((v or {}).get("ts") or 0) < cutoff]:
+            pending.pop(key, None)
+        persist()
+    return item
+
+
+def settle_lk888_pending_chat_usage_records(payload, user_id=None):
+    records = []
+    if isinstance(payload, dict):
+        if isinstance(payload.get("records"), list):
+            records = payload.get("records") or []
+        elif isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("records"), list):
+            records = payload["data"].get("records") or []
+    if not records:
+        return 0
+    settled = 0
+    used_task_ids = set()
+    with LOCK:
+        pending_items = [
+            (key, dict(value or {}))
+            for key, value in (STATE.get("lk888_pending_charges") or {}).items()
+            if (value or {}).get("source") == "chat_usage_reconcile"
+            and (user_id is None or (value or {}).get("userId") == user_id)
+        ]
+        existing_refs = {
+            str(item.get("ref") or "")
+            for item in STATE.get("ledger") or []
+            if str(item.get("ref") or "").startswith("lk888:")
+        }
+    pending_items.sort(key=lambda item: float((item[1] or {}).get("createdAt") or (item[1] or {}).get("ts") or 0))
+    candidates = []
+    for record in records:
+        if not _lk888_usage_record_success(record):
+            continue
+        task_id = str(record.get("task_id") or record.get("taskId") or record.get("id") or "").strip()
+        if not task_id:
+            continue
+        ref = "lk888:" + task_id
+        if ref in existing_refs:
+            continue
+        amount = lk888_actual_charge_amount(record)
+        if not amount or amount <= 0:
+            continue
+        record_ts = _lk888_record_timestamp(
+            record.get("created_at") or record.get("createdAt") or record.get("completed_at") or record.get("completedAt")
+        )
+        candidates.append((record, task_id, ref, amount, record_ts))
+    for pending_key, pending in pending_items:
+        model = str(pending.get("model") or "").strip().lower()
+        pending_ts = float(pending.get("createdAt") or pending.get("ts") or 0)
+        best = None
+        best_score = None
+        for candidate in candidates:
+            record, task_id, ref, amount, record_ts = candidate
+            if task_id in used_task_ids:
+                continue
+            if ref in existing_refs:
+                continue
+            if str(record.get("model") or "").strip().lower() != model:
+                continue
+            if record_ts is not None and pending_ts:
+                # LK888 created_at may be before local response time by the model runtime.
+                if record_ts < pending_ts - 900 or record_ts > pending_ts + 180:
+                    continue
+                score = abs(record_ts - pending_ts)
+            else:
+                score = 999999
+            if best is None or score < best_score:
+                best = candidate
+                best_score = score
+        if not best:
+            continue
+        record, task_id, ref, amount, record_ts = best
+        ok, _bal, _err = settle_lk888_actual_charge(
+            pending.get("userId"),
+            amount,
+            ref=ref,
+            model=record.get("model") or pending.get("model") or "",
+            task_id=task_id,
+            meta=_lk888_pending_billing_meta(pending),
+            usage_ts=record_ts,
+        )
+        if ok:
+            used_task_ids.add(task_id)
+            existing_refs.add(ref)
+            settled += 1
+            with LOCK:
+                (STATE.get("lk888_pending_charges") or {}).pop(str(pending_key), None)
+                persist()
+        else:
+            try:
+                add_event("lk888_usage_reconcile_failed", {
+                    "taskId": task_id,
+                    "userId": pending.get("userId"),
+                    "error": _err or "billing_failed",
+                })
+            except Exception:
+                pass
+    return settled
+
+
+def has_lk888_pending_chat_usage(user_id=None):
+    with LOCK:
+        for item in (STATE.get("lk888_pending_charges") or {}).values():
+            if (item or {}).get("source") != "chat_usage_reconcile":
+                continue
+            if user_id is not None and (item or {}).get("userId") != user_id:
+                continue
+            return True
+    return False
+
+
+def reconcile_lk888_pending_chat_usage_from_upstream(user_id=None):
+    if not has_lk888_pending_chat_usage(user_id):
+        return 0
+    key = os.getenv("LK888_API_KEY", "")
+    base = (os.getenv("LK888_BASE_URL", "https://api.lk888.ai")).rstrip("/")
+    if not key or urlparse(base).scheme.lower() != "https":
+        return 0
+    import ssl
+    global _LK_SSLCTX
+    if _LK_SSLCTX is None:
+        _LK_SSLCTX = ssl.create_default_context()
+    query = urlencode({"days": 1, "detail": 1, "limit": 200, "scope": "key"})
+    req = urllib.request.Request(base + "/v1/skills/usage?" + query, method="GET")
+    req.add_header("Authorization", "Bearer " + key)
+    req.add_header("Accept", "application/json")
+    with _lk888_open(req, _LK_SSLCTX, 30) as response:
+        final_url = response.geturl() if hasattr(response, "geturl") else req.full_url
+        if _lk888_https_origin(final_url) != _lk888_https_origin(req.full_url):
+            raise _LK888UpstreamPolicyError("redirect_or_origin_change_blocked")
+        payload = response.read()
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return 0
+    return settle_lk888_pending_chat_usage_records(data, user_id=user_id)
+
+
+def settle_lk888_actual_charge(user_id, amount, ref="", model="", task_id="", meta=None, usage_ts=None):
+    charge_meta = {"modelId": str(model or ""), "taskId": str(task_id or "")}
+    if isinstance(meta, dict):
+        charge_meta.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
+    try:
+        if usage_ts is not None and float(usage_ts) > 0:
+            charge_meta["ts"] = float(usage_ts)
+    except Exception:
+        pass
+    return charge_user_allow_arrears(
+        user_id,
+        amount,
+        reason="LK888实际扣费 " + str(model or "")[:40],
+        ref=ref or ("lk888:" + (str(task_id or uuid.uuid4().hex[:16]))),
+        meta=charge_meta,
+    )
+
+
+def charge_user(user_id, amount, reason="生成", ref="", meta=None):
     """扣费。owner(运营方)免扣不限量;普通用户余额不足返回 ok=False。返回 (ok, balance_after, error)。"""
     try:
         amount = round(float(amount or 0), 6)
@@ -3249,7 +4122,9 @@ def charge_user(user_id, amount, reason="生成", ref=""):
             return False, bal, "insufficient_balance"
         u["balance"] = round(bal - amount, 6)
         u["updatedAt"] = now()
-        _add_ledger(user_id, -amount, reason, ref, u["balance"])
+        item = _add_ledger(user_id, -amount, reason, ref, u["balance"])
+        if isinstance(meta, dict):
+            item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
         persist()
         return True, u["balance"], None
 
@@ -3261,14 +4136,23 @@ def _add_maindb_generic_ledger(user_id, amount, yundou_amount, reason, ref, bala
     return item
 
 
-def charge_capability_user(user_id, capability="", requested_amount=None, ref=""):
+def charge_capability_user(user_id, capability="", requested_amount=None, ref="", reason=None, meta=None, allow_arrears=False):
     """Charge a business capability with server-owned pricing."""
-    amount_yundou, cap = capability_price_yundou(capability, requested_amount)
+    cap = _capability_key(capability)
+    if allow_arrears:
+        try:
+            amount_yundou = round(float(requested_amount or 0), 6)
+        except Exception:
+            amount_yundou = None
+    else:
+        amount_yundou, cap = capability_price_yundou(capability, requested_amount)
     if amount_yundou is None:
         return False, get_balance(user_id), "amount_invalid"
-    reason = cap or "生成"
+    reason = str(reason or "").strip() or cap or "生成"
     if cap in LK888_PROXY_CHARGED_CAPABILITIES:
         return True, get_balance(user_id), None
+    if allow_arrears:
+        return charge_user_allow_arrears(user_id, amount_yundou, reason=reason, ref=ref, meta=meta)
     if user_id == "user-owner":
         return True, float("inf"), None
     if maindb_on() and isinstance(user_id, int):
@@ -3285,12 +4169,14 @@ def charge_capability_user(user_id, capability="", requested_amount=None, ref=""
                     return False, get_balance(user_id), "insufficient_balance"
             bal = get_balance(user_id)
             with LOCK:
-                _add_maindb_generic_ledger(user_id, amount_power, amount_yundou, reason, ref, bal)
+                item = _add_maindb_generic_ledger(user_id, amount_power, amount_yundou, reason, ref, bal)
+                if isinstance(meta, dict):
+                    item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
                 persist()
             return True, bal, None
         except Exception as e:
             return False, get_balance(user_id), str(e)[:80]
-    return charge_user(user_id, amount_yundou, reason=reason, ref=ref)
+    return charge_user(user_id, amount_yundou, reason=reason, ref=ref, meta=meta)
 
 
 def topup_user(user_id, amount, reason="充值", ref=""):
@@ -4276,10 +5162,13 @@ def sync_node_accounts_locked(node):
     for raw in node.get("accounts") or []:
         if not isinstance(raw, dict):
             continue
+        if is_xhs_platform(raw.get("platform")) and not xhs_enabled():
+            continue
         local_id = str(raw.get("id") or raw.get("name") or "account")
         asset_id = node_id + ":" + local_id
         current_ids.add(asset_id)
         old = by_id.get(asset_id) or {"id": asset_id, "createdAt": now()}
+        display_override = str(old.get("displayNameOverride") or "").strip()
         prev_cookie_ready = bool(old.get("cookieReady"))
         prev_online = bool(old.get("online"))
         raw_cookie_ready = bool(raw.get("cookieReady", node.get("cookieReady")))
@@ -4305,6 +5194,11 @@ def sync_node_accounts_locked(node):
             "lastSeen": node.get("lastSeen") or now(),
             "updatedAt": now(),
         })
+        if display_override:
+            old["name"] = display_override
+            old["nickname"] = display_override
+            old["displayName"] = display_override
+            old["displayNameOverride"] = display_override
         if raw_cookie_ready:
             old.setdefault("authorizedAt", old.get("createdAt") or now())
             old["cookieUpdatedAt"] = node.get("lastSeen") or now()
@@ -4436,6 +5330,11 @@ def public_account_asset(a):
     item = dict(a or {})
     item.setdefault("platform", "douyin")
     item.setdefault("localAccountId", (item.get("id") or "").split(":", 1)[-1])
+    display_override = str(item.get("displayNameOverride") or "").strip()
+    if display_override:
+        item["name"] = display_override
+        item["nickname"] = display_override
+        item["displayName"] = display_override
     item.setdefault("name", "小红书账号" if item.get("platform") == "xhs" else "抖音账号")
     item.setdefault("status", "online" if item.get("online") else "offline")
     item["orgId"] = item_org_id(item)
@@ -4467,6 +5366,44 @@ def delete_account(org_id, account_id):
         persist()
         return {"ok": True, "deleted": account_id, "removed": removed}, 200
     return {"ok": False, "error": "account_not_found", "deleted": account_id}, 404
+
+
+def rename_account_display_name(org_id, account_id, name, user=None):
+    account_id = (account_id or "").strip()
+    name = re.sub(r"[\r\n\t]+", " ", str(name or "")).strip()
+    if not account_id:
+        return {"ok": False, "error": "missing_account_id"}, 400
+    if not name:
+        return {"ok": False, "error": "missing_name"}, 400
+    if len(name) > 40:
+        name = name[:40]
+    org_id = normalize_org_id(org_id) if org_id else None
+    updated = 0
+    renamed = None
+    with LOCK:
+        registry = STATE.setdefault("accountsRegistry", [])
+        for account in registry:
+            if not isinstance(account, dict):
+                continue
+            local_id = str(account.get("localAccountId") or "").strip()
+            if account.get("id") != account_id and local_id != account_id:
+                continue
+            if org_id and item_org_id(account) != org_id:
+                continue
+            if user is not None and not item_visible_to_user(account, user, org_id):
+                return {"ok": False, "error": "account_not_found", "id": account_id}, 404
+            account["name"] = name
+            account["nickname"] = name
+            account["displayName"] = name
+            account["displayNameOverride"] = name
+            account["renamedAt"] = now()
+            account["updatedAt"] = now()
+            renamed = dict(account)
+            updated += 1
+    if updated:
+        persist()
+        return {"ok": True, "id": account_id, "name": name, "updated": updated, "account": public_account_asset(renamed)}, 200
+    return {"ok": False, "error": "account_not_found", "id": account_id}, 404
 
 def find_account_asset(account_id, org_id=None):
     account_id = (account_id or "").strip()
@@ -4545,7 +5482,11 @@ def account_detail(account_id, org_id=None):
 
 def account_authorization_summary(org_id=None):
     org_id = normalize_org_id(org_id)
-    accounts = [public_account_asset(a) for a in aggregate_accounts(org_id)]
+    accounts = [
+        public_account_asset(a)
+        for a in aggregate_accounts(org_id)
+        if not (is_xhs_platform(a.get("platform")) and not xhs_enabled())
+    ]
     counts = {
         "total": len(accounts),
         "ready": 0,
@@ -6320,6 +7261,9 @@ def pick_node(task=None):
 
 
 def create_task(path, method="POST", body=None, wait_sec=None, preferred_node=None):
+    body = body or {}
+    if str(path or "").startswith("/api/xhs") or payload_uses_xhs(body):
+        return None, _xhs_disabled(route=path, stage="task_preflight"), 404
     recover_stale_tasks(normalize_org_id((body or {}).get("orgId")), dry_run=False, limit=50)
     tid = uuid.uuid4().hex
     if wait_sec is None:
@@ -7674,6 +8618,52 @@ def reset_enterprise_user_password(org_id, body=None):
         user["updatedAt"] = now()
         persist()
     return {"ok": True, "orgId": org_id, "user": public_user(user), "credential": {"identifier": user.get("phone") or user.get("email") or user.get("id"), "initialPassword": password, "generated": bool(generated_password)}}, 200
+
+
+def upsert_enterprise_user(body):
+    body = body if isinstance(body, dict) else {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "missing_name"}, 400
+    org_id = normalize_org_id((body.get("orgId") or "").strip())
+    explicit_user_id = (body.get("id") or body.get("userId") or "").strip()
+    user_id = explicit_user_id or ("user-" + uuid.uuid4().hex[:12])
+    password = (body.get("password") or body.get("initialPassword") or "").strip()
+    role = (body.get("role") or "member").strip().lower() or "member"
+    if role not in ("owner", "admin", "member", "auditor"):
+        role = "member"
+    with LOCK:
+        users = STATE.setdefault("users", [])
+        item = upsert_by_id(users, {
+            "id": user_id,
+            "name": name,
+            "phone": (body.get("phone") or "").strip(),
+            "email": (body.get("email") or "").strip(),
+            "status": body.get("status") or "active",
+        })
+        if password:
+            set_user_password(item, password)
+        if org_id:
+            memberships = STATE.setdefault("memberships", [])
+            upsert_by_id(memberships, {
+                "id": "m-%s-%s" % (org_id, item["id"]),
+                "orgId": org_id,
+                "userId": item["id"],
+                "role": role,
+                "status": "active",
+            })
+        persist()
+    identifier = item.get("phone") or item.get("email") or item.get("id")
+    return {
+        "ok": True,
+        "orgId": org_id,
+        "user": public_user(item),
+        "credential": {
+            "identifier": identifier,
+            "initialPassword": password,
+            "generated": False,
+        },
+    }, 200
 
 
 def update_enterprise_user_status(org_id, body=None):
@@ -9588,6 +10578,32 @@ def ratio(n, d):
         return 0.0
 
 
+def enterprise_task_trend_7d(tasks, ts=None):
+    ts = float(ts if ts is not None else now())
+    day_sec = 86400
+    today = time.localtime(ts)
+    today_midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
+    buckets = []
+    counts = {}
+    for offset in range(6, -1, -1):
+        day_ts = today_midnight - offset * day_sec
+        day = time.localtime(day_ts)
+        date = time.strftime("%Y-%m-%d", day)
+        buckets.append(date)
+        counts[date] = 0
+    for task in tasks or []:
+        try:
+            created = float((task or {}).get("createdAt") or 0)
+        except Exception:
+            created = 0
+        if created < today_midnight - 6 * day_sec or created >= today_midnight + day_sec:
+            continue
+        date = time.strftime("%Y-%m-%d", time.localtime(created))
+        if date in counts:
+            counts[date] += 1
+    return [{"date": date, "label": date[5:], "count": counts.get(date, 0)} for date in buckets]
+
+
 def enterprise_usage(org_id=None):
     org_id = normalize_org_id(org_id)
     ts = now()
@@ -9598,9 +10614,9 @@ def enterprise_usage(org_id=None):
             for t in (STATE.get("localBrowserTasks") or {}).values()
             if item_org_id(t) == org_id
         ])
-        nodes = [dict(n) for n in (STATE.get("nodes") or {}).values() if item_org_id(n) == org_id]
         library = [dict(m) for m in (STATE.get("library") or []) if item_org_id(m) == org_id]
         queue = [dict(q) for q in (STATE.get("queue") or []) if item_org_id(q) == org_id]
+    nodes = enterprise_execution_nodes(org_id)
     accounts = aggregate_accounts(org_id)
     tasks24 = [t for t in tasks if float(t.get("createdAt") or 0) >= ts - 86400]
     tasks7 = [t for t in tasks if float(t.get("createdAt") or 0) >= ts - 7 * 86400]
@@ -9623,7 +10639,7 @@ def enterprise_usage(org_id=None):
     terminal24 = done24 + failed24
     success_rate = ratio(done24, terminal24) if terminal24 else 1.0
     failure_rate = ratio(failed24, terminal24) if terminal24 else 0.0
-    online_nodes = len([n for n in nodes if ts - float(n.get("lastSeen") or 0) <= NODE_TIMEOUT_SEC])
+    online_nodes = len([n for n in nodes if n.get("online")])
     node_rate = ratio(online_nodes, len(nodes)) if nodes else 0.0
     usable_accounts = len([a for a in accounts if a.get("usable")])
     account_rate = ratio(usable_accounts, len(accounts)) if accounts else 0.0
@@ -9642,6 +10658,7 @@ def enterprise_usage(org_id=None):
         "window24hSec": 86400,
         "tasks24h": len(tasks24),
         "tasks7d": len(tasks7),
+        "taskTrend7d": enterprise_task_trend_7d(tasks, ts),
         "billableTasks24h": len(billable_tasks24),
         "billableTasks7d": len(billable_tasks7),
         "status24h": status24,
@@ -10039,6 +11056,7 @@ def enterprise_summary(user=None):
             accounts.extend(accounts_for_response(oid, user=user))
     else:
         accounts = aggregate_accounts()
+        allowed_orgs = {normalize_org_id(o.get("id")) for o in orgs}
     task_stats = {}
     for t in tasks:
         st = t.get("status") or "unknown"
@@ -10057,6 +11075,9 @@ def enterprise_summary(user=None):
         item["queueCount"] = len([q for q in queue if item_org_id(q) == oid])
         item["publishSettings"] = load_settings(oid)
         orgs_public.append(item)
+    visible_online_nodes = 0
+    if app_role != PRODUCT_ROLE_NORMAL_USER:
+        visible_online_nodes = len(enterprise_execution_nodes_for_orgs(allowed_orgs))
     return {
         "ok": True,
         "scope": scope,
@@ -10069,7 +11090,7 @@ def enterprise_summary(user=None):
             "organizations": len(orgs),
             "users": len(users),
             "memberships": len(memberships),
-            "nodesOnline": len(online_nodes()),
+            "nodesOnline": visible_online_nodes,
             "accounts": len(accounts),
             "usableAccounts": len([a for a in accounts if a.get("usable")]),
             "offlineAccounts": len([a for a in accounts if not a.get("online")]),
@@ -13323,10 +14344,38 @@ def publish_scheduler():
 
 LOCAL_BROWSER_STALE_SEC = float(os.getenv("CENTRAL_LOCAL_BROWSER_STALE_SEC", "45") or 45)
 LOCAL_BROWSER_TASK_TIMEOUT_SEC = float(os.getenv("CENTRAL_LOCAL_BROWSER_TASK_TIMEOUT_SEC", "300") or 300)
+LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC = float(os.getenv("CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC", "900") or 900)
+
+MINIMAX_ENABLED = os.getenv("MINIMAX_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+MINIMAX_CENTER_API_BASE = os.getenv(
+    "MINIMAX_CENTER_API_BASE",
+    "https://api.minimaxi.com",
+).strip().rstrip("/")
+MINIMAX_CENTER_API_KEY = os.getenv("MINIMAX_CENTER_API_KEY", "").strip()
+try:
+    MINIMAX_MAX_ACTIVE_TASKS = max(
+        1, int(os.getenv("MINIMAX_MAX_ACTIVE_TASKS", "2") or 2)
+    )
+except (TypeError, ValueError):
+    MINIMAX_MAX_ACTIVE_TASKS = 2
+try:
+    MINIMAX_TASK_TIMEOUT_SEC = max(
+        1, int(os.getenv("MINIMAX_TASK_TIMEOUT_SEC", "900") or 900)
+    )
+except (TypeError, ValueError):
+    MINIMAX_TASK_TIMEOUT_SEC = 900
+try:
+    MINIMAX_POLL_INTERVAL_SEC = max(
+        0, float(os.getenv("MINIMAX_POLL_INTERVAL_SEC", "5") or 5)
+    )
+except (TypeError, ValueError):
+    MINIMAX_POLL_INTERVAL_SEC = 5.0
 
 # Canonical local-browser task types -> node-local api_server paths.
 # The local client (agent_worker) forwards each task.type to this path on its
-# 127.0.0.1:9081 engine, so the FULL Douyin+XHS surface runs in the user's own
+# 127.0.0.1:9081 engine, so enabled platform surfaces run in the user's own
 # browser + residential IP instead of a cloud node. This is the single execution
 # channel after migration; the /api/node/* channel is legacy/transition-only.
 LOCAL_BROWSER_TASK_PATHS = {
@@ -13347,13 +14396,31 @@ LOCAL_BROWSER_TASK_PATHS = {
     "outreach.run": "/api/outreach/run",
     "publish.run": "/api/publish/run",
 }
+LOCAL_BROWSER_LONG_TASK_PATHS = {
+    "/api/finder/discover",
+    "/api/outreach/run",
+    "/api/publish/run",
+    "/api/douyin/download",
+    "/api/xhs/download",
+}
 # Login task types are handled by a dedicated client-side login handler (Phase 2),
 # not a plain api_server path.
 LOCAL_BROWSER_LOGIN_TYPES = ("douyin.login", "xhs.login")
-LOCAL_BROWSER_ALLOWED_TYPES = set(LOCAL_BROWSER_TASK_PATHS.keys()) | set(LOCAL_BROWSER_LOGIN_TYPES)
+LOCAL_BROWSER_ALLOWED_TYPES = set(filter_xhs_capabilities(
+    list(LOCAL_BROWSER_TASK_PATHS.keys()) + list(LOCAL_BROWSER_LOGIN_TYPES)
+))
 LOCAL_BROWSER_ALL_CAPS = sorted(LOCAL_BROWSER_ALLOWED_TYPES)
 # Legacy default advertised by the XHS-only browser extension.
-LOCAL_BROWSER_LEGACY_CAPS = ["xhs.search", "xhs.comments", "xhs.discover"]
+LOCAL_BROWSER_LEGACY_CAPS = filter_xhs_capabilities(
+    ["xhs.search", "xhs.comments", "xhs.discover"]
+)
+
+
+def sanitize_local_browser_capabilities(value):
+    capabilities = value if isinstance(value, list) else []
+    if not capabilities:
+        capabilities = list(LOCAL_BROWSER_LEGACY_CAPS)
+    return filter_xhs_capabilities(capabilities)
 
 
 def local_browser_housekeeping_locked():
@@ -13367,7 +14434,7 @@ def local_browser_housekeeping_locked():
             c["online"] = False
     changed = False
     for t in tasks.values():
-        if (t.get("status") == "running") and (ts - float(t.get("updatedAt") or t.get("startedAt") or 0) > LOCAL_BROWSER_TASK_TIMEOUT_SEC):
+        if (t.get("status") == "running") and (ts - float(t.get("updatedAt") or t.get("startedAt") or 0) > local_browser_task_timeout_sec(t)):
             t["status"] = "queued"
             t["clientId"] = ""
             t["error"] = "local_browser_task_requeued"
@@ -13378,6 +14445,14 @@ def local_browser_housekeeping_locked():
         STATE["localBrowserTasks"] = {x["id"]: x for x in keep if x.get("id")}
         changed = True
     return changed
+
+
+def local_browser_task_timeout_sec(task):
+    task = task if isinstance(task, dict) else {}
+    path = LOCAL_BROWSER_TASK_PATHS.get(task.get("type") or "", "")
+    if path in LOCAL_BROWSER_LONG_TASK_PATHS:
+        return LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC
+    return LOCAL_BROWSER_TASK_TIMEOUT_SEC
 
 
 def public_local_browser_client(c):
@@ -13392,13 +14467,73 @@ def public_local_browser_client(c):
         "version": c.get("version") or "",
         "browser": c.get("browser") or "",
         "platform": c.get("platform") or "",
-        "capabilities": c.get("capabilities") or [],
+        "capabilities": sanitize_local_browser_capabilities(c.get("capabilities")),
         "lastSeen": last,
         "online": bool(last and ts - last <= LOCAL_BROWSER_STALE_SEC),
         "currentUrl": c.get("currentUrl") or "",
         "lastStatus": c.get("lastStatus") or "",
         "lastError": c.get("lastError") or "",
     }
+
+
+def _execution_node_dedupe_key(value):
+    key = str(value or "").strip()
+    if key.startswith("lb-"):
+        key = key[3:]
+    return key or uuid.uuid4().hex
+
+
+def enterprise_execution_nodes(org_id=None):
+    org_id = normalize_org_id(org_id) if org_id else None
+    with LOCK:
+        local_browser_housekeeping_locked()
+        legacy_nodes = [
+            public_node(n)
+            for n in (STATE.get("nodes") or {}).values()
+            if not org_id or item_org_id(n) == org_id
+        ]
+        browser_clients = [
+            public_local_browser_client(c)
+            for c in (STATE.get("localBrowserClients") or {}).values()
+            if not org_id or item_org_id(c) == org_id
+        ]
+    rows = []
+    seen = set()
+    for client in browser_clients:
+        row = dict(client)
+        row["kind"] = "local_browser"
+        row["source"] = "local_browser"
+        key = _execution_node_dedupe_key(row.get("id") or row.get("clientId"))
+        seen.add(key)
+        rows.append(row)
+    for node in legacy_nodes:
+        row = dict(node)
+        row["kind"] = "legacy_node"
+        row["source"] = "node"
+        key = _execution_node_dedupe_key(row.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+    return rows
+
+
+def enterprise_execution_nodes_for_orgs(org_ids=None):
+    org_ids = {normalize_org_id(oid) for oid in (org_ids or []) if oid}
+    rows = []
+    seen = set()
+    for oid in sorted(org_ids):
+        for node in enterprise_execution_nodes(oid):
+            if not node.get("online"):
+                continue
+            key = "%s:%s" % (item_org_id(node), _execution_node_dedupe_key(node.get("id") or node.get("clientId")))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(node)
+    if org_ids:
+        return rows
+    return [n for n in enterprise_execution_nodes(None) if n.get("online")]
 
 
 def _local_browser_list(value):
@@ -13419,16 +14554,22 @@ def _local_browser_comments_for_storage(result, body=None):
     return []
 
 
-def public_local_browser_task(t):
+def public_local_browser_task(t, include_sensitive=False):
     t = dict(t or {})
     result = t.get("result") if isinstance(t.get("result"), dict) else {}
     comments = _local_browser_comments_for_storage(result, t)
+    task_type = t.get("type") or ""
+    payload = t.get("payload") or {}
+    public_result = strip_large_payloads(result)
+    if not include_sensitive and task_type in ("douyin.dm", "douyin.dm.inbox"):
+        payload = safe_local_browser_payload(task_type, payload)
+        public_result = safe_local_browser_result(task_type, result)
     out = {
         "ok": True,
         "id": t.get("id") or "",
         "taskId": t.get("id") or "",
         "orgId": item_org_id(t),
-        "type": t.get("type") or "",
+        "type": task_type,
         "status": t.get("status") or "queued",
         "clientId": t.get("clientId") or "",
         "createdAt": t.get("createdAt") or 0,
@@ -13436,8 +14577,8 @@ def public_local_browser_task(t):
         "startedAt": t.get("startedAt") or 0,
         "finishedAt": t.get("finishedAt") or 0,
         "error": t.get("error") or result.get("error") or "",
-        "payload": t.get("payload") or {},
-        "result": strip_large_payloads(result),
+        "payload": payload,
+        "result": public_result,
         "items": _local_browser_list(result.get("items")) or _local_browser_list(t.get("items")),
         "comments": comments,
         "leads": _local_browser_list(result.get("leads")) or _local_browser_list(t.get("leads")),
@@ -13553,9 +14694,7 @@ def local_browser_register(handler, body):
         return None, None
     user = current_user(handler) or {}
     client_id = (body.get("clientId") or body.get("id") or "").strip() or ("lb-" + uuid.uuid4().hex[:12])
-    caps = body.get("capabilities") if isinstance(body.get("capabilities"), list) else []
-    if not caps:
-        caps = list(LOCAL_BROWSER_LEGACY_CAPS)
+    caps = sanitize_local_browser_capabilities(body.get("capabilities"))
     ts = now()
     with LOCK:
         clients = STATE.setdefault("localBrowserClients", {})
@@ -13588,6 +14727,12 @@ def local_browser_create_task(handler, body):
         return None, None
     user = current_user(handler) or {}
     task_type = (body.get("type") or "xhs.discover").strip()
+    if task_type.lower().startswith("xhs.") or payload_uses_xhs(body):
+        return _xhs_disabled(
+            route="/api/local-browser/task",
+            task_type=task_type,
+            stage="task_preflight",
+        ), 404
     if task_type not in LOCAL_BROWSER_ALLOWED_TYPES:
         return {"ok": False, "error": "unsupported_local_browser_task", "type": task_type}, 400
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -13671,14 +14816,14 @@ def local_browser_poll(handler, body):
     client_id = (body.get("clientId") or body.get("id") or "").strip()
     if not client_id:
         return {"ok": False, "error": "missing_client_id"}, 400
-    caps = body.get("capabilities") if isinstance(body.get("capabilities"), list) else []
+    caps = sanitize_local_browser_capabilities(body.get("capabilities"))
     ts = now()
     selected = None
     with LOCK:
         clients = STATE.setdefault("localBrowserClients", {})
         c = clients.setdefault(client_id, {"id": client_id, "createdAt": ts})
         if not caps:
-            caps = c.get("capabilities") or list(LOCAL_BROWSER_LEGACY_CAPS)
+            caps = sanitize_local_browser_capabilities(c.get("capabilities"))
         c.update({"id": client_id, "orgId": org_id, "capabilities": caps, "lastSeen": ts, "updatedAt": ts, "online": True, "lastStatus": body.get("status") or "polling", "currentUrl": body.get("currentUrl") or c.get("currentUrl") or "", "lastError": body.get("error") or ""})
         local_browser_housekeeping_locked()
         queued = sorted([
@@ -13699,7 +14844,7 @@ def local_browser_poll(handler, body):
     if selected:
         persist()
         add_event("local_browser_task_started", {"taskId": selected.get("id"), "clientId": client_id, "orgId": org_id})
-        return {"ok": True, "task": public_local_browser_task(selected), "pollIntervalSec": 1}, 200
+        return {"ok": True, "task": public_local_browser_task(selected, include_sensitive=True), "pollIntervalSec": 1}, 200
     return {"ok": True, "task": None, "pollIntervalSec": 2}, 200
 
 
@@ -13708,6 +14853,8 @@ def local_browser_upsert_account(org_id, client_id, platform, info, cookie_count
     account is bound to the local client (executor=local); cookies stay on the
     user's machine — only identity + cookie STATUS is stored centrally."""
     org_id = normalize_org_id(org_id)
+    if is_xhs_platform(platform) and not xhs_enabled():
+        return ""
     client_id = client_id or "local"
     info = info or {}
     local_id = str(info.get("id") or info.get("handle") or info.get("name") or (platform + "-self"))
@@ -13723,6 +14870,7 @@ def local_browser_upsert_account(org_id, client_id, platform, info, cookie_count
         registry = STATE.setdefault("accountsRegistry", [])
         by_id = {a.get("id"): a for a in registry if a.get("id")}
         old = by_id.get(asset_id) or {"id": asset_id, "createdAt": ts}
+        display_override = str(old.get("displayNameOverride") or "").strip()
         for aid, other in list(by_id.items()):
             if aid == asset_id:
                 continue
@@ -13749,6 +14897,11 @@ def local_browser_upsert_account(org_id, client_id, platform, info, cookie_count
             "online": True, "status": "online",
             "authorizedAt": old.get("authorizedAt") or ts, "cookieUpdatedAt": ts, "lastSeen": ts, "updatedAt": ts,
         })
+        if display_override:
+            old["name"] = display_override
+            old["nickname"] = display_override
+            old["displayName"] = display_override
+            old["displayNameOverride"] = display_override
         old.pop("cookieLostAt", None)
         old.pop("offlineSince", None)
         by_id[asset_id] = old
@@ -14035,6 +15188,363 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return json_response(self, {"ok": False, "error": str(e)}, 500)
 
+    @staticmethod
+    def download_page_html():
+        title = "云灵星图 AI 爆款复刻平台 Windows 客户端下载"
+        company = "云灵星图数字科技有限公司"
+        html = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: rgba(17, 24, 39, 0.84);
+      --panel-strong: rgba(21, 29, 48, 0.94);
+      --line: rgba(148, 163, 184, 0.20);
+      --line-strong: rgba(129, 140, 248, 0.44);
+      --text: #f7f9ff;
+      --sub: #aab6ca;
+      --muted: #738096;
+      --accent: #6366f1;
+      --accent-2: #22d3ee;
+      --gold: #f5c451;
+    }
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", Arial, sans-serif;
+      background:
+        linear-gradient(90deg, rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+        radial-gradient(circle at 72% 14%, rgba(99, 102, 241, 0.28), transparent 34%),
+        radial-gradient(circle at 24% 4%, rgba(34, 211, 238, 0.14), transparent 30%),
+        #080b12;
+      background-size: 42px 42px, 42px 42px, auto, auto, auto;
+    }
+    .page {
+      width: min(1160px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 34px 0 52px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 54px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      color: #fff;
+      font-weight: 900;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 16px 42px rgba(34, 211, 238, 0.18);
+    }
+    .brand strong { display: block; font-size: 16px; line-height: 1.2; }
+    .brand span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .top-meta {
+      color: var(--sub);
+      font-size: 13px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.035);
+      white-space: nowrap;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.02fr) minmax(360px, 0.98fr);
+      gap: 38px;
+      align-items: center;
+      min-height: 560px;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      color: #c7ccff;
+      font-size: 13px;
+      font-weight: 800;
+      padding: 7px 11px;
+      border: 1px solid rgba(129, 140, 248, 0.38);
+      border-radius: 999px;
+      background: rgba(99, 102, 241, 0.11);
+    }
+    h1 {
+      max-width: 760px;
+      margin: 22px 0 18px;
+      font-size: 52px;
+      line-height: 1.08;
+      font-weight: 860;
+      letter-spacing: 0;
+    }
+    .lead {
+      max-width: 680px;
+      margin: 0 0 28px;
+      color: var(--sub);
+      font-size: 18px;
+      line-height: 1.75;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .download-disabled {
+      min-height: 48px;
+      padding: 0 22px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 8px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 15px;
+      font-weight: 800;
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.42), rgba(34, 211, 238, 0.24));
+      cursor: not-allowed;
+    }
+    .status-note {
+      max-width: 360px;
+      color: var(--sub);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 24px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .facts li {
+      color: #d7def0;
+      font-size: 13px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .console {
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--panel-strong), rgba(12, 17, 29, 0.94));
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+    }
+    .console-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .dots { display: flex; gap: 7px; }
+    .dots span { width: 9px; height: 9px; border-radius: 50%; background: #44516a; }
+    .dots span:nth-child(2) { background: var(--accent); }
+    .dots span:nth-child(3) { background: var(--accent-2); }
+    .console-state { color: #9fb0ca; font-size: 12px; }
+    .console-body { padding: 20px; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .metric, .flow {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 14px;
+    }
+    .metric b { display: block; margin-bottom: 5px; font-size: 23px; }
+    .metric span, .flow span { color: var(--muted); font-size: 12px; }
+    .flow strong { display: block; margin: 6px 0 12px; font-size: 16px; line-height: 1.45; }
+    .bar {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.15);
+    }
+    .bar i {
+      display: block;
+      width: 72%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    }
+    .section { padding: 42px 0 0; }
+    .section h2 { margin: 0 0 18px; font-size: 28px; letter-spacing: 0; }
+    .cards, .steps {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .card, .step, .support {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.035);
+      padding: 18px;
+    }
+    .card h3, .step h3 { margin: 0 0 9px; font-size: 16px; }
+    .card p, .step p, .support p {
+      margin: 0;
+      color: var(--sub);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .step-num {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 12px;
+      border-radius: 50%;
+      color: #cdd2ff;
+      font-size: 13px;
+      font-weight: 800;
+      background: rgba(99, 102, 241, 0.18);
+    }
+    .support {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px 20px;
+    }
+    .support strong { display: block; margin-bottom: 4px; color: var(--text); }
+    @media (prefers-reduced-motion: no-preference) {
+      .console { transition: transform 180ms ease, border-color 180ms ease; }
+      .console:hover { transform: translateY(-2px); border-color: rgba(34, 211, 238, 0.50); }
+    }
+    @media (max-width: 900px) {
+      .page { width: min(100% - 28px, 680px); padding-top: 22px; }
+      .topbar { align-items: flex-start; margin-bottom: 34px; }
+      .top-meta { white-space: normal; text-align: right; }
+      .hero { grid-template-columns: 1fr; min-height: auto; gap: 28px; }
+      h1 { font-size: 38px; }
+      .lead { font-size: 16px; }
+      .cards, .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .support { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .topbar { flex-direction: column; }
+      .top-meta { text-align: left; }
+      h1 { font-size: 31px; }
+      .download-disabled { width: 100%; }
+      .console { margin-inline: -2px; }
+      .metric-grid, .cards, .steps { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar" aria-label="页面顶部">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">星</div>
+        <div>
+          <strong>云灵星图</strong>
+          <span>__COMPANY__</span>
+        </div>
+      </div>
+      <div class="top-meta">Windows 10/11 · 最新版即将发布</div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow">AI 爆款复刻平台 · Windows 客户端</div>
+        <h1>__TITLE__</h1>
+        <p class="lead">面向短视频内容团队的本地执行客户端，支持爆款采集、视频拆解、同款生成、素材管理与账号矩阵协作。</p>
+        <div class="actions">
+          <button class="download-disabled" type="button" disabled aria-disabled="true">Windows 客户端即将开放下载</button>
+          <div class="status-note">正式安装包发布后，将由__COMPANY__提供下载。</div>
+        </div>
+        <ul class="facts" aria-label="下载页状态">
+          <li>适用于 Windows 10/11</li>
+          <li>企业账号登录</li>
+          <li>__COMPANY__出品</li>
+        </ul>
+      </div>
+
+      <aside class="console" aria-label="产品能力概览">
+        <div class="console-head">
+          <div class="dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="console-state">Client Preview</div>
+        </div>
+        <div class="console-body">
+          <div class="metric-grid">
+            <div class="metric"><b>采集</b><span>公开内容沉淀为参考素材</span></div>
+            <div class="metric"><b>拆解</b><span>口播、节奏、关键帧结构化</span></div>
+            <div class="metric"><b>复刻</b><span>生成可审核的新素材</span></div>
+            <div class="metric"><b>协作</b><span>账号矩阵与任务中心联动</span></div>
+          </div>
+          <div class="flow">
+            <span>内容生产链路</span>
+            <strong>采集参考 → 视频拆解 → 同款生成 → 素材入库</strong>
+            <div class="bar" aria-hidden="true"><i></i></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="section" aria-labelledby="capabilities-title">
+      <h2 id="capabilities-title">核心能力</h2>
+      <div class="cards">
+        <article class="card"><h3>爆款采集</h3><p>采集抖音、小红书公开内容，沉淀为参考素材。</p></article>
+        <article class="card"><h3>视频拆解</h3><p>提取结构、口播、画面节奏和关键帧。</p></article>
+        <article class="card"><h3>同款复刻</h3><p>基于产品、人物、场景生成可审核的新素材。</p></article>
+        <article class="card"><h3>账号矩阵协作</h3><p>支持多账号、任务中心、素材与发布协同。</p></article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="install-title">
+      <h2 id="install-title">安装步骤</h2>
+      <div class="steps">
+        <article class="step"><div class="step-num">1</div><h3>等待开放</h3><p>正式安装包开放后，页面会更新交付状态。</p></article>
+        <article class="step"><div class="step-num">2</div><h3>获取安装包</h3><p>按企业交付安排获取 Windows 客户端安装包。</p></article>
+        <article class="step"><div class="step-num">3</div><h3>登录账号</h3><p>运行安装程序后，使用企业账号登录客户端。</p></article>
+        <article class="step"><div class="step-num">4</div><h3>开始使用</h3><p>进入客户端完成采集、拆解、生成与素材管理。</p></article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="support-title">
+      <h2 id="support-title">安全与支持</h2>
+      <div class="support">
+        <p><strong>安装包来源</strong>__COMPANY__。</p>
+        <p><strong>下载状态</strong>Windows 客户端即将开放下载。</p>
+        <p><strong>更新机制</strong>客户端启动后会自动检查新版本。</p>
+        <p><strong>数据说明</strong>平台账号授权、素材、日志按项目配置保存，下载页不展示敏感信息。</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>"""
+        return html.replace("__TITLE__", title).replace("__COMPANY__", company)
+
+    def serve_download_page(self):
+        html = self.download_page_html().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(html)
+
     def serve_agent_installer(self):
         candidates = [
             os.path.abspath(os.path.expandvars(os.getenv("MATRIXSHIP_AGENT_INSTALLER", ""))),
@@ -14140,10 +15650,17 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if path == "/lk888" or path.startswith("/lk888/"):
             return lk888_proxy(self, "GET", parsed)
+        if path.startswith(MINIMAX_TASK_PATH_PREFIX):
+            task_id = unquote(path[len(MINIMAX_TASK_PATH_PREFIX):]).strip("/")
+            return minimax_task_status(self, task_id)
         if path.startswith("/manju-media/"):
             return manju_media_proxy(self, parsed)
+        if path == "/download":
+            return self.serve_download_page()
         if path == "/MatrixShipAgent-Setup.exe":
             return self.serve_agent_installer()
+        if path.startswith("/api/xhs"):
+            return json_response(self, _xhs_disabled(route=path), 404)
         if path == "/api/shared-assets":
             return shared_assets_list(self, parsed)
         if path == "/api/version":
@@ -14198,8 +15715,13 @@ class Handler(BaseHTTPRequestHandler):
             u = current_user(self)
             if not u:
                 return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
+            try:
+                balance = _billing_balance(u.get("id"))
+            except Exception as exc:
+                payload, status = _billing_api_error(u.get("id"), exc)
+                return json_response(self, payload, status)
             return json_response(self, {"ok": True, "userId": u.get("id"),
-                                        "phone": u.get("phone"), "balance": get_balance(u.get("id"))})
+                                        "phone": u.get("phone"), "balance": balance})
         if path == "/api/billing/analytics":
             u = current_user(self)
             if not u:
@@ -14739,6 +16261,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_multipart(path)
 
             body = read_body(self)
+            if path.startswith("/api/xhs") or payload_uses_xhs(body):
+                return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
+
+            if path == MINIMAX_GENERATE_PATH:
+                return minimax_generate(self, body)
 
             if path == "/api/enterprise/invites/verify":
                 payload, status = enterprise_invite_verify(body.get("token"))
@@ -15186,11 +16713,18 @@ class Handler(BaseHTTPRequestHandler):
                 u = current_user(self)
                 if not u:
                     return json_response(self, {"ok": False, "error": "not_authenticated"}, 401)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                for key in ("modelId", "model_id", "taskId", "task_id", "actualAmount", "billingScenario", "billingStage"):
+                    if body.get(key) not in (None, ""):
+                        meta[key] = body.get(key)
                 ok, bal, err = charge_capability_user(
                     u.get("id"),
                     body.get("capability") or body.get("reason") or "",
                     body.get("amount"),
                     body.get("ref") or "",
+                    reason=body.get("reason") or "",
+                    meta=meta,
+                    allow_arrears=bool(body.get("allowArrears")),
                 )
                 bal_out = None if bal == float("inf") else bal
                 return json_response(self, {"ok": ok, "balance": bal_out, "error": err}, 200 if ok else 402)
@@ -15310,6 +16844,17 @@ class Handler(BaseHTTPRequestHandler):
                 payload, status = delete_account(org_id, account_id)
                 add_audit(self, "account.remove", path, ok=bool(payload.get("ok")),
                           meta={"orgId": org_id, "accountId": account_id, "removed": payload.get("removed", 0)})
+                return json_response(self, payload, status)
+
+            if path in ("/api/accounts/rename", "/api/accounts/update-name"):
+                org_id = request_org_id(self, body)
+                if not require_role(self, org_id, "member"):
+                    return
+                account_id = (body.get("id") or body.get("accountId") or body.get("account") or "").strip()
+                name = (body.get("name") or body.get("nickname") or body.get("displayName") or "").strip()
+                payload, status = rename_account_display_name(org_id, account_id, name, user=current_user(self))
+                add_audit(self, "account.rename", path, ok=bool(payload.get("ok")),
+                          meta={"orgId": org_id, "accountId": account_id, "updated": payload.get("updated", 0)})
                 return json_response(self, payload, status)
 
             if path == "/api/cloud-login/resume" or (path == "/api/cloud-login/current" and not (body.get("sessionId") or "").strip()):
@@ -15950,35 +17495,21 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, payload, status)
 
             if path == "/api/enterprise/users/upsert":
-                name = (body.get("name") or "").strip()
-                if not name:
-                    return json_response(self, {"ok": False, "error": "missing_name"}, 400)
                 org_id = (body.get("orgId") or "").strip() or request_org_id(self, body)
                 if not require_role(self, org_id, "admin"):
                     return
-                with LOCK:
-                    users = STATE.setdefault("users", [])
-                    item = upsert_by_id(users, {
-                        "id": (body.get("id") or "").strip() or None,
-                        "name": name,
-                        "phone": (body.get("phone") or "").strip(),
-                        "email": (body.get("email") or "").strip(),
-                        "status": body.get("status") or "active",
-                    })
-                    if (body.get("password") or "").strip():
-                        set_user_password(item, (body.get("password") or "").strip())
-                    if org_id:
-                        memberships = STATE.setdefault("memberships", [])
-                        upsert_by_id(memberships, {
-                            "id": "m-%s-%s" % (org_id, item["id"]),
-                            "orgId": org_id,
-                            "userId": item["id"],
-                            "role": body.get("role") or "member",
-                            "status": "active",
-                        })
-                    persist()
-                add_audit(self, "enterprise.user.upsert", path, ok=True, meta={"userId": item["id"], "name": name, "orgId": (body.get("orgId") or "")})
-                return json_response(self, {"ok": True, "user": public_user(item)})
+                request_body = dict(body)
+                request_body["orgId"] = org_id
+                payload, status = upsert_enterprise_user(request_body)
+                user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+                add_audit(self, "enterprise.user.upsert", path, ok=bool(payload.get("ok")), meta={
+                    "userId": user.get("id") or body.get("id") or body.get("userId"),
+                    "name": body.get("name"),
+                    "orgId": org_id,
+                    "status": status,
+                    "error": payload.get("error"),
+                })
+                return json_response(self, payload, status)
             if path == "/api/enterprise/nodes/assign":
                 node_id = (body.get("nodeId") or "").strip()
                 org_id = normalize_org_id(body.get("orgId"))

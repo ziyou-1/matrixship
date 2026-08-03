@@ -1,5 +1,13 @@
 # 架构说明
 
+## MiniMax H3 Official Direct Boundary
+
+- The central server and remote AI Canvas comic generator use separate MiniMax service keys. The central server reads `MINIMAX_CENTER_API_KEY`; the remote comic generator reads `MINIMAX_COMIC_API_KEY`. Both are environment-only secrets and must never appear in responses, structured logs, source files, or documentation examples.
+- Both tiers call MiniMax official `POST /v2/video_generation` with provider model `MiniMax-H3`; status polling uses `/v2/query/video_generation/{task_id}`. The H3 path does not route through LK888 or APIMart.
+- H3 accepts `duration=4..15` and `resolution=768P|2K`. Reference/content URLs must be public HTTPS. Local files, localhost, private IPs, link-local, reserved addresses, and `data:` URLs are rejected before provider submission.
+- H3 pricing and currency are unresolved in this project. The center and remote comic generator record `awaiting_actual_cost` and do not precharge or estimate-charge. Final settlement must wait for confirmed official pricing and a stable idempotency ref.
+- Operational rollback has two layers: set `MINIMAX_ENABLED=0` to block new MiniMax submissions, or restore the previous remote `/root/AI-CanvasPro/server.py.bak.<timestamp>` and restart `ai-canvas.service`.
+
 ## 范围
 
 本文描述 Mac 本地客户端中“内容采集 -> 一键分解视频 -> 同款替换生成”的可靠性链路。涉及三个运行单元：
@@ -8,10 +16,31 @@
 - 本地执行引擎：`backend/api_server.py`，默认监听 `127.0.0.1:9081`，负责抖音鉴权下载和本地素材库。
 - 中心服：`backend/central_server.py`，默认监听 `127.0.0.1:9080`，负责用户会话、节点调度、中心素材镜像和 LK888 反代。
 
+## 当前平台边界
+
+当前运行面默认是抖音单平台。小红书/XHS 作为可恢复能力保留在代码中，但被统一功能开关 `MATRIX_XHS_ENABLED` 隔离：默认 `0` 时，本地客户端不展示小红书平台下拉、图文同款导航或小红书账号；本地执行器和中心服在路由、任务 payload、平台适配器入口处返回 `platform_disabled`，不会进入浏览器自动化或节点选择。
+
+恢复路径是配置级回滚：设置 `MATRIX_XHS_ENABLED=1`，重启本地客户端、本地执行器和中心服，再按小红书真实浏览器冒烟检查登录态、搜索/下载/评论/发布链路。若需要清理历史账号状态，使用 `scripts/disable_xhs_accounts.py`，该脚本只移除小红书 profile、授权/安全状态和 JSON 账号行，不触碰抖音账号目录。
+
+本地浏览器执行器注册和轮询中心服时，也通过同一开关过滤 `xhs.*` 能力。中心服对新上报、内存持久化、任务允许列表和公开状态响应再次过滤；历史状态文件中的 XHS 能力只在读取时隐藏，不做破坏性迁移。这样 `MATRIX_XHS_ENABLED=1` 并重启执行器和中心服后，原有 XHS 任务映射可以恢复。
+
+## 临时原生界面功能边界
+
+三个未完全开放的界面能力由独立环境变量控制，默认均为 `0`：
+
+| 开关 | 默认界面状态 | 设置为 `1` 后 |
+| --- | --- | --- |
+| `MATRIX_VIDEO_REPLACEMENT_ENABLED` | 左侧“同款替换”保留但禁用；分解视频、工作流助手和资产库的替换跳转按钮隐藏 | 恢复侧栏导航和三个次级入口 |
+| `MATRIX_PENDING_PUBLISH_UI_ENABLED` | 素材发布不创建“待发布队列”标签页和导航别名；队列数据、调度和后台处理保留 | 恢复队列标签页 |
+| `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` | 数字人口播隐藏 TTS 上传按钮和声音预览，继续使用音色选择器自动合成 | 恢复声音上传与预览 |
+
+开关只在控件构造和导航边界读取，切换后必须重启本地客户端。页面类、任务数据、生成函数和上传处理器均保留，因此恢复不需要数据库迁移或数据补写。
+
 ## 账户中心账单数据流
 
 ```mermaid
 flowchart LR
+    A --> I[GET /api/account/balance]
     A[AccountPage] --> B[GET /api/billing/analytics]
     A --> C[GET /api/billing/ledger with parameters]
     B --> D[billing_analytics]
@@ -22,12 +51,16 @@ flowchart LR
     E --> H[Draft 2020-12 response validation]
     F --> H
     G --> H
+    I --> J[strict owner-aware balance]
 ```
 
-- `AccountPage` 分别维护 analytics 与 ledger 的日期、筛选、分页和请求序列，迟到响应不能覆盖较新的成功结果。
+- `AccountPage` 分别维护 analytics 与 ledger 的日期、筛选、分页和请求序列；成功 analytics 的余额是页面权威值，迟到的旧余额刷新和较旧响应都不能覆盖它。
 - 中心服先校验查询参数，再按账户读取 `STATE` 流水、主库 `model_usage_logs` 和充值来源，交给 `billing_analytics` 归一化、去重、汇总并校验成功响应。
+- 主库默认启用；只有进程环境显式设置 `MAINDB_ENABLED=0` 才进入有意关闭模式。默认启用时，主库模块导入失败、配置缺失、健康检查失败、用量查询失败或严格余额查询失败都会返回脱敏的 `billing_data_source_failed`，不得降级为余额 0 或不完整统计。
+- `/api/account/balance`、analytics 与参数化 ledger 共用严格余额语义：主库账户使用 `get_balance_strict()`，`user-owner` 不查询主库并固定返回精确字符串 `"inf"`，客户端显示“∞ 运营方”。
+- 微信充值和兑换码来源分别规范为 `wxpay:<orderNo>` 与 `redeem:<code>` 后再与权威账本去重；账本只有稳定 `ref` 且 `taskId/requestId` 均为空时，将该引用放入 `requestId`，保证扣费与退款两行可以关联。
 - 正常账户查询最多覆盖 366 天；主库读取上限为 50,001 行，达到该上限即拒绝生成可能不完整的统计结果。
-- 运行时 JSON Schema 使用 `jsonschema==4.23.0`。本地与部署 requirements 保持同一精确版本锁定。
+- 运行时依赖精确锁定为 `jsonschema==4.23.0`、`PyMySQL==1.1.1` 和 `passlib[bcrypt]==1.7.4`；本地与部署 requirements 保持一致。
 - 该链路复用中心服现有会话、数据源和配置所有权，不新增密钥、连接串、端口、数据库表或 Docker 服务。健康检查仍为 `/api/health`。
 
 ## 登录与法律同意流
@@ -64,6 +97,14 @@ flowchart LR
 
 账号矩阵读取 `/api/accounts` 时会看到多个抖音账号。发布任务继续使用既有 `accountId` 字段；执行前本地引擎切换到对应账号的 `profileDir` 和 `auth_cookie.json`，结束后恢复调用前环境。旧队列和未显式选择账号的任务仍兼容 `douyin-self`。
 
+## 抖音评论风控链路
+
+抖音发表评论属于本地执行引擎动作。客户端或中心服提交 `douyin.comment.publish` / `/api/douyin/comment/publish` 时，本地执行器先读取 `risk_config.json.dailyComment/minInterval`，再读取 `comment_risk_state.json.accounts.<accountId>` 的当天评论计数、最近评论时间、风险冷却和风险暂停状态。命中每日上限、最小间隔冷却或风险暂停时直接返回 `ok=false`、`skipped=true`、后端机器 `error`、中文 `message/userMessage`、`status`、`cooldownLeft` 和 `safety`，不会打开浏览器，也不会调用抖音评论接口。`force=true` 与 `safeMode=false` 不绕过该硬门禁，只影响 DOM 预检或文案清洗。
+
+评论成功后，本地执行器按账号更新 `comment_risk_state.json` 的 `day/commentCount/lastCommentAt/lastAction`，同时保留全局兼容字段；平台预检或评论响应触发风险时写入同一账号级风险暂停，旧全局冷却字段只按 `lastRiskAccountId` 归属账号读取，避免串号拦截。风控中心读取同一文件，把抖音账号“今日评论”显示为当天真实计数，“冷却”显示评论间隔剩余时间与平台风险暂停的最大值。AI 触达遇到这些状态会停止本轮继续评论。该链路不新增中心数据库表，也不把 Cookie、Token 或平台私有 URL 写入日志；持久化的风险响应只保留安全字段和 URL/正文指纹。
+
+风控中心对抖音当前是部分生效：每日评论上限、评论最小间隔和评论风险暂停/冷却属于执行前硬门禁；每日发布上限只约束定时工作流单次生成数量，不是实际发布接口的统一硬门禁；单机并发上限尚未接入执行逻辑；搜索、下载和私信也不受这组通用风控参数限制。本次功能开关不改变上述行为。
+
 ## 数据流
 
 ```mermaid
@@ -81,7 +122,7 @@ flowchart TD
     I --> K
     J --> K
     K --> L["关键帧和 OCR"]
-    K --> M["60 秒 MP3 分片，最多 600 秒"]
+    K --> M["60 秒 MP3 分片，默认覆盖整条视频"]
     M --> N["中心服 LK888 Gemini 音频转写"]
     N --> O{"是否有失败分片"}
     O -->|是| P["保留成功片段，显示失败区间和重试按钮"]
@@ -127,7 +168,7 @@ flowchart TD
 
 - 页面预检失败后不执行抽帧、OCR、视觉模型或转写。
 - OCR 优先使用 Tesseract；不可用时自动回退 RapidOCR。
-- 转写顺序执行，默认每片 60 秒，最多 600 秒。失败区间可单独重试，不重复下载、抽帧或 OCR。
+- 转写顺序执行，默认每片 60 秒，默认覆盖源视频完整时长。只有显式设置 `VIDEO_TRANSCRIBE_MAX_SEC` 时才截断；失败区间可单独重试，不重复下载、抽帧或 OCR。
 - 页面只保留源视频路径、内存分析状态和报告文本；关键帧与音频分片在任务 `finally` 中删除，崩溃遗留目录默认 3600 秒后由下次启动清理。
 - 页面忙碌锁保证同一页面一次只运行一个分解或重试任务。
 
@@ -159,11 +200,12 @@ flowchart TD
     E --> F["按本地片段精确写入分镜"]
     F --> G["上传角色/场景/道具到空项目库"]
     G --> H["逐片写入口播稿和素材绑定"]
-    H --> I["生成首帧和尾帧"]
-    I --> J0["读取远程模型价格并按模型/时长本地预扣"]
+    H --> I["远程生成首帧和尾帧"]
+    I --> J0["按 LK888 最终费用和实际模型后付费"]
     J0 --> J["远程生成视频"]
-    J --> K["明确失败时退款并按 Vidu、万相、Kling Omni、PixVerse 降级"]
-    K --> L["保存远程完成结果和待恢复元数据"]
+    J --> K["明确失败时不扣费并按 Vidu、万相、Kling Omni、PixVerse 降级"]
+    K --> K0["成功后按 LK888 最终费用和实际模型后付费"]
+    K0 --> L["保存远程完成结果和待恢复元数据"]
     L --> M["使用漫剧 Bearer 凭证鉴权下载"]
     M --> N["视频流、音频流、时长和完整解码校验"]
     N -->|"失败"| O["download_failed，保留 pending 下载恢复点"]
@@ -209,10 +251,10 @@ flowchart TD
 ## 非功能指标
 
 - 并发：单客户端分解页并发 1。
-- 时长上限：单视频最多转写前 600 秒。
+- 时长策略：默认转写整条源视频；`VIDEO_TRANSCRIBE_MAX_SEC` 只作为显式运维上限。
 - 分片：默认 60 秒，顺序请求。
 - 远程超时：单分片默认 180 秒，失败后最多重试 2 次。
-- 本地探测：单次 ffmpeg 元数据探测超时 20 秒；全量解码预算按视频时长动态计算，范围 60-600 秒。
+- 本地探测：单次 ffmpeg 元数据探测超时 20 秒；全量解码预算按视频时长动态计算，默认不截断。
 - 容错：转写失败时保留关键帧、OCR 和视觉分析；单帧 OCR 失败不阻断其他帧。
 - 替换生成：单客户端并发 1；整片不设固定总时长上限；片段默认 8 秒且单段请求时长钳制在 1-15 秒；新任务不启用动作帧锚定、产品锚定帧或本地 FaceFusion；人工确认前不入资产库，失败片段可单独重试。
 - 关键帧参考图单图默认上限 20 MiB；同步图片中心代理超时 480 秒，客户端超时 540 秒。

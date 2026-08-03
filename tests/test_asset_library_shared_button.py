@@ -86,6 +86,19 @@ class AssetLibrarySharedButtonTest(unittest.TestCase):
         self.assertIn("open_asset_folder(a)", note_block)
         self.assertIn("delete_btn", note_block)
 
+    def test_asset_library_hides_note_template_filter_button(self):
+        source = CLIENT.read_text(encoding="utf-8-sig")
+        start = source.index("class AssetLibraryPage")
+        end = source.index("class ", start + 1)
+        block = source[start:end]
+        filter_start = block.index("# 本地过滤")
+        filter_end = block.index("self.scroll = QtWidgets.QScrollArea()", filter_start)
+        filter_block = block[filter_start:filter_end]
+
+        self.assertNotIn('"note_template"', filter_block)
+        self.assertNotIn("图文模板", filter_block)
+        self.assertIn('elif kind == "note_template":', block)
+
     def test_asset_library_groups_local_assets_by_date(self):
         source = CLIENT.read_text(encoding="utf-8-sig")
         start = source.index("class AssetLibraryPage")
@@ -189,7 +202,7 @@ class AssetLibrarySharedButtonTest(unittest.TestCase):
         self.assertIn('"文本"', card_block)
         self.assertIn("open_asset_text(a)", card_block)
 
-    def test_text_viewer_can_send_breakdown_to_video_generator(self):
+    def test_text_viewer_can_send_breakdown_to_video_replacement(self):
         source = CLIENT.read_text(encoding="utf-8-sig")
         start = source.index("class AssetLibraryPage")
         end = source.index("class ", start + 1)
@@ -197,9 +210,12 @@ class AssetLibrarySharedButtonTest(unittest.TestCase):
 
         self.assertIn("def open_asset_text(self, a):", block)
         method = block[block.index("def open_asset_text(self, a):"):block.index("def open_asset_folder(self, a):")]
-        self.assertIn('"用此文本生成视频"', method)
-        self.assertIn('BRIDGE.payload.emit("breakdown_to_product_video"', method)
-        self.assertIn('BRIDGE.payload.emit("goto_nav", "🛍️ Agent.模式")', method)
+        self.assertIn('"按此视频改造"', method)
+        self.assertIn("_reference_breakdown_to_replacement_payload", method)
+        self.assertIn('BRIDGE.payload.emit("video_replace_start"', method)
+        self.assertIn('BRIDGE.payload.emit("goto_nav", "🧬 同款替换")', method)
+        self.assertNotIn('BRIDGE.payload.emit("breakdown_to_product_video"', method)
+        self.assertNotIn('BRIDGE.payload.emit("goto_nav", "🛍️ Agent.模式")', method)
 
 
 if __name__ == "__main__":

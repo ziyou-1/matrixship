@@ -155,6 +155,10 @@ def normalize_billing_records(user_id, ledger_rows, model_usage_rows, recharge_o
     for row in ledger_rows:
         delta = _amount(row.get("delta"))
         ref = row.get("ref")
+        task_id = row.get("taskId") or row.get("task_id")
+        request_id = row.get("requestId") or row.get("request_id")
+        if ref and not task_id and not request_id:
+            request_id = str(ref)
         is_refund = _is_refund_ledger(row, delta)
         if ref:
             ledger_refs.add(str(ref))
@@ -165,7 +169,7 @@ def normalize_billing_records(user_id, ledger_rows, model_usage_rows, recharge_o
         row_type = "refund" if is_refund else ("recharge" if delta > 0 else _type_for(row))
         status = "refunded" if is_refund else ("recharged" if delta > 0 else "charged")
         records.append(_record(row.get("id", ref or len(records)), _timestamp(row.get("ts", row.get("createdAt"))), row_type, delta, status,
-            model_id=row.get("modelId"), task_id=row.get("taskId"), request_id=row.get("requestId"),
+            model_id=row.get("modelId") or row.get("model_id"), task_id=task_id, request_id=request_id,
             detail=row.get("reason") or row.get("detail") or TYPE_LABELS[row_type], balance_after=(_amount(row["balanceAfter"]) if row.get("balanceAfter") is not None else None)))
     for row in model_usage_rows or []:
         if str(row.get("user_id", user_id)) != str(user_id):
@@ -179,20 +183,33 @@ def normalize_billing_records(user_id, ledger_rows, model_usage_rows, recharge_o
         records.append(_record("usage-" + str(row.get("id", ref)), _timestamp(row.get("created_at") or row.get("createdAt")), row_type, -amount, "charged", **base))
         if str(row.get("status", "")).lower() == "refunded" and not (ref and str(ref) in refund_refs):
             records.append(_record("usage-refund-" + str(row.get("id", ref)), _timestamp(row.get("refunded_at") or row.get("created_at")), "refund", amount, "refunded", **base))
-    for source, used_status in ((recharge_orders or [], ("paid", "success", "completed")), (redeem_codes or [], ("used",))):
+    for source, source_kind, used_status in (
+        (recharge_orders or [], "wxpay", ("paid", "success", "completed")),
+        (redeem_codes or [], "redeem", ("used",)),
+    ):
         for row in source:
             if str(row.get("userId", row.get("user_id", user_id))) != str(user_id):
                 continue
-            ref = row.get("ref") or row.get("orderNo") or row.get("order_no") or row.get("code")
+            ref = row.get("ref")
+            if not ref and source_kind == "wxpay":
+                order_no = row.get("orderNo") or row.get("order_no")
+                ref = ("wxpay:" + str(order_no)) if order_no else None
+            if not ref and source_kind == "redeem":
+                code = row.get("code")
+                ref = ("redeem:" + str(code)) if code else None
             if ref and str(ref) in ledger_refs:
                 continue
             status_value = str(row.get("status", "")).lower()
-            failed = source is recharge_orders and status_value in ("payerror", "closed", "revoked")
+            failed = source_kind == "wxpay" and status_value in ("payerror", "closed", "revoked")
             if not failed and status_value not in used_status:
                 continue
-            timestamp = _timestamp(row.get("paid_at") or row.get("used_at") or row.get("created_at") or row.get("createdAt"))
+            timestamp = _timestamp(
+                row.get("paidAt") or row.get("paid_at") or
+                row.get("usedAt") or row.get("used_at") or
+                row.get("created_at") or row.get("createdAt")
+            )
             change = Decimal("0") if failed else abs(_amount(row.get("credit", row.get("yundou", row.get("amount")))))
-            records.append(_record(("failed-" if failed else "recharge-") + str(ref or row.get("id", len(records))), timestamp, "recharge", change, "failed" if failed else "recharged", detail="充值失败" if failed else "充值", balance_after=None))
+            records.append(_record(("failed-" if failed else "recharge-") + str(ref or row.get("id", len(records))), timestamp, "recharge", change, "failed" if failed else "recharged", request_id=ref, detail="充值失败" if failed else "充值", balance_after=None))
     return sorted(records, key=lambda item: (item["timestamp"], item["id"]), reverse=True)
 
 

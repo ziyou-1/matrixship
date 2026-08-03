@@ -155,12 +155,114 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn('set "APPDATA_DIR=%~dp0datas"', script)
         self.assertNotIn("%APPDATA%\\MatrixShipAgent\\data", script)
 
+    def test_task_center_table_uses_shared_style_without_grid_boxes(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class TaskCenterPage")
+        end = src.index("class LogPage", start)
+        block = src[start:end]
+
+        self.assertIn("style_table(self.table)", block)
+
+    def test_task_center_time_text_prefers_existing_text_fields(self):
+        module = load_client_module("matrix_native_client_task_center_time_text_test")
+
+        self.assertEqual("刚刚", module._task_center_time_text({
+            "updatedAtText": "刚刚",
+            "updatedAt": 1800000000,
+        }))
+        self.assertEqual("14:20", module._task_center_time_text({
+            "createdAtText": "14:20",
+            "createdAt": 1800000000,
+        }))
+
+    def test_task_center_time_text_formats_numeric_timestamp(self):
+        module = load_client_module("matrix_native_client_task_center_numeric_time_test")
+        stamp = module.time.mktime((2026, 7, 31, 15, 4, 0, 0, 0, -1))
+
+        self.assertEqual("07-31 15:04", module._task_center_time_text({
+            "updatedAt": stamp,
+        }))
+        self.assertEqual("07-31 15:04", module._task_center_time_text({
+            "createdAt": stamp,
+        }))
+
+    def test_enterprise_overview_task_trend_uses_real_usage_buckets(self):
+        module = load_client_module("matrix_native_client_enterprise_task_trend_test")
+
+        values, labels = module._enterprise_task_trend_series({
+            "taskTrend7d": [
+                {"date": "2026-07-25", "label": "07-25", "count": 0},
+                {"date": "2026-07-26", "label": "07-26", "count": 3},
+            ],
+        })
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class DashboardPage")
+        end = src.index("class EnterpriseMembersPage", start)
+        block = src[start:end]
+
+        self.assertEqual(values, [0, 3])
+        self.assertEqual(labels, ["07-25", "07-26"])
+        self.assertIn("_enterprise_task_trend_series(u)", block)
+        self.assertIn("taskTrend7d", src)
+        self.assertNotIn("or 280", block)
+        self.assertNotIn("0.72, 0.88, 1.05", block)
+
+    def test_enterprise_overview_uses_custom_hover_explanations(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class DashboardPage")
+        end = src.index("class EnterpriseMembersPage", start)
+        block = src[start:end]
+
+        self.assertIn("class HoverInfoPopup", src)
+        self.assertIn("def attach_hover_info(", src)
+        self.assertIn("ENTERPRISE_METRIC_HELP = {", src)
+        for label in ("客户企业", "企业用户", "团队成员", "在线节点", "授权账号", "可用账号",
+                      "离线账号", "调度任务", "素材", "发布队列", "任务趋势", "运行健康", "账号分布"):
+            self.assertIn('"%s"' % label, src)
+        self.assertIn("kpi_card(num, lbl, info=enterprise_kpi_info(lbl, num, s, u))", block)
+        self.assertIn('Panel("任务趋势", "近 7 天真实任务量", info=ENTERPRISE_METRIC_HELP.get("任务趋势"))', block)
+        self.assertIn('Panel("运行健康", "近 24 小时", info=ENTERPRISE_METRIC_HELP.get("运行健康"))', block)
+        self.assertIn('Panel("账号分布", "授权 / 可用 / 离线", info=ENTERPRISE_METRIC_HELP.get("账号分布"))', block)
+
     def test_agent_mode_image_timeout_and_default_aspect_are_stable(self):
         src = CLIENT.read_text(encoding="utf-8")
-        self.assertIn('os.getenv("LK888_IMAGE_TIMEOUT_SEC", "540")', src)
-        self.assertIn("timeout=image_timeout", src)
+        self.assertIn("def _agent_image_payload(", src)
+        self.assertIn('params["size"] = size', src)
+        self.assertIn("refs = refs[:_agent_image_reference_limit(model)]", src)
         self.assertIn("self.aspect_i = 1", src)
         self.assertIn('("方形 1:1", "1024x1024", "1:1")', src)
+
+    def test_enterprise_overview_kpis_are_fixed_to_confirmed_business_metrics(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class DashboardPage")
+        end = src.index("class EnterpriseMembersPage", start)
+        block = src[start:end]
+
+        self.assertIn("ENTERPRISE_OVERVIEW_KPI_LABELS = (", src)
+        for label in ("客户企业", "企业用户", "授权账号", "可用账号", "在线节点", "调度任务"):
+            self.assertIn('"%s"' % label, src)
+        self.assertIn("shown = [(cnt(lbl), lbl) for lbl in ENTERPRISE_OVERVIEW_KPI_LABELS]", block)
+        self.assertNotIn("shown = cards[:8]", block)
+
+    def test_enterprise_overview_kpi_hover_copy_and_grid_are_business_specific(self):
+        module = load_client_module("matrix_native_client_enterprise_kpi_info_test")
+        summary = {
+            "organizations": [{"id": "org-toyota", "name": "丰田汽车"}],
+            "counts": {"users": 3, "tasks": 7},
+        }
+
+        self.assertIn("丰田汽车", module.enterprise_kpi_info("客户企业", 1, summary, {}))
+        self.assertIn("已加入企业的用户数量：3 人", module.enterprise_kpi_info("企业用户", 3, summary, {}))
+        self.assertIn("超过约 45 秒未上报心跳", module.enterprise_kpi_info("在线节点", 1, summary, {}))
+        self.assertIn("任务总数：7 个", module.enterprise_kpi_info("调度任务", 7, summary, {}))
+
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class DashboardPage")
+        end = src.index("class EnterpriseMembersPage", start)
+        block = src[start:end]
+        self.assertIn("enterprise_kpi_info(lbl, num, s, u)", block)
+        self.assertIn("i // 3, i % 3", block)
+        self.assertIn("for c in range(3):", block)
 
     def test_agent_mode_prompt_optimization_confirms_chinese_before_generation(self):
         src = CLIENT.read_text(encoding="utf-8")
@@ -190,6 +292,13 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn("prompt = self.inp.toPlainText().strip()", src)
         self.assertIn("data.get(\"prompt\") or self.inp.toPlainText().strip()", src)
 
+    def test_agent_video_placeholder_does_not_show_lk888_output_hint(self):
+        src = CLIENT.read_text(encoding="utf-8")
+
+        self.assertIn('else "描述你想要的视频素材…")', src)
+        self.assertNotIn("按所选 LK888 视频模型出片", src)
+        self.assertNotIn("按所选 LK888视频模型出片", src)
+
     def test_agent_mode_supports_ordered_multi_image_references(self):
         src = CLIENT.read_text(encoding="utf-8")
 
@@ -203,8 +312,11 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn("def _remove_ref_at(self, idx):", src)
         self.assertIn("def _rebuild_ref_slots(self):", src)
         self.assertIn("QtWidgets.QFileDialog.getOpenFileNames", src)
-        self.assertIn('return "待修改图" if i == 0 else "参考图%d" % i', src)
-        self.assertIn('return "参考图%d" % (i + 1)', src)
+        module = load_client_module("matrix_native_client_agent_ref_labels_test")
+        self.assertEqual(module._prodgen_ref_label_for("image", "qwen-image", 0), "待修改图")
+        self.assertEqual(module._prodgen_ref_label_for("image", "qwen-image", 1), "参考图1")
+        self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 0), "参考图1")
+        self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 1), "参考图2")
         self.assertIn("\"refs\": list(self._refs)", src)
         self.assertIn("\"ref\": (self._refs[0] if self._refs else \"\")", src)
         self.assertIn("self._set_refs(entry.get(\"refs\") or ([entry.get(\"ref\")] if entry.get(\"ref\") else []))", src)
@@ -229,14 +341,15 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn("All images are visual references for video generation", desc_block)
         self.assertIn("No image is an edit target", desc_block)
         self.assertIn("_prodgen_refs_desc(refs, is_video=True)", video_block)
-        self.assertIn('if self._mode == "video":', label_block)
-        self.assertIn('return "参考图%d" % (i + 1)', label_block)
+        self.assertIn("_prodgen_ref_label_for(self._mode, self._current_model(), i)", label_block)
+        module = load_client_module("matrix_native_client_agent_video_ref_labels_test")
+        self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 0), "参考图1")
+        self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 1), "参考图2")
         self.assertIn('hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"', rebuild_block)
         self.assertIn('else "图片模式：第1张为待修改图，第2张起为参考图。")', rebuild_block)
         self.assertIn("self._style_ref_slot()", mode_block)
         self.assertIn('if e.get("mode") == "video":', card_block)
-        self.assertIn('ref_label = "参考图%d" % (i + 1)', card_block)
-        self.assertIn('ref_label = "待修改图" if i == 0 else "参考图%d" % i', card_block)
+        self.assertIn('ref_label = _prodgen_ref_label_for(e.get("mode"), e.get("model"), i)', card_block)
         self.assertIn("lab = QtWidgets.QLabel(ref_label)", card_block)
 
     def test_agent_mode_reference_slots_fill_horizontal_content_area(self):
@@ -262,11 +375,90 @@ class AgentModeDefaultsTest(unittest.TestCase):
 
         self.assertIn("def _prodgen_entry_refs(entry):", src)
         self.assertIn("refs = _prodgen_entry_refs(entry)", src)
-        self.assertIn("image_urls = [_file_to_data_url(p) for p in refs] if has_ref else None", src)
+        self.assertIn("image_urls = _prodgen_image_reference_urls(refs, display_prompt) if has_ref else None", src)
+        self.assertIn("def _agent_image_payload(", src)
+        self.assertIn("payload = _agent_image_payload(model, model_prompt, size=size, image_urls=image_urls)", src)
+        self.assertIn("url = lk888_media_task(model, payload, [\"png\", \"jpg\", \"jpeg\", \"webp\"], tries=150)", src)
         self.assertIn("ref_desc = _prodgen_refs_desc(refs, is_video=True) if has_ref else \"\"", src)
         self.assertIn("第1张为待修改图", src)
         self.assertIn("第2张起为参考图", src)
         self.assertIn("\"refs\"", src[src.index("def regen(self, entry):"):src.index("def remove(self, entry):")])
+
+    def test_agent_completed_video_can_be_added_to_douyin_pending_publish_once(self):
+        module = load_client_module("matrix_native_client_agent_pending_publish_test")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "agent-result.mp4"
+            video.write_bytes(b"video")
+            entry = {
+                "id": "pg-agent-1",
+                "mode": "video",
+                "status": "完成",
+                "prompt": "丰田汽车展示视频",
+                "files": [str(video)],
+            }
+            with mock.patch.object(module, "PENDING", []), \
+                    mock.patch.object(module, "save_pending"), \
+                    mock.patch.object(module, "save_prodgen"):
+                first = module.add_prodgen_video_to_pending(entry)
+                second = module.add_prodgen_video_to_pending(entry)
+                self.assertIsNotNone(first)
+                self.assertIs(first, second)
+                self.assertEqual(1, len(module.PENDING))
+                self.assertEqual("douyin", first["platform"])
+                self.assertEqual("Agent.模式", first["wfName"])
+                self.assertEqual(str(video), first["video"])
+                self.assertEqual("pg-agent-1", first["sourceProdgenId"])
+
+    def test_agent_completed_video_is_uploaded_to_publish_material_library_once(self):
+        module = load_client_module("matrix_native_client_agent_publish_material_test")
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "agent-result.mp4"
+            video.write_bytes(b"video")
+            entry = {
+                "id": "pg-agent-1",
+                "mode": "video",
+                "status": "完成",
+                "prompt": "丰田汽车展示视频",
+                "files": [str(video)],
+            }
+            with mock.patch.object(module, "upload_materials", return_value=(200, {
+                "ok": True,
+                "id": "mat-agent-1",
+            })) as upload, mock.patch.object(module, "save_prodgen"):
+                first = module.add_prodgen_video_to_publish_library(entry)
+                second = module.add_prodgen_video_to_publish_library(entry)
+
+                self.assertEqual("mat-agent-1", first)
+                self.assertEqual("mat-agent-1", second)
+                self.assertEqual("mat-agent-1", entry["publishMaterialId"])
+                upload.assert_called_once_with(
+                    [str(video)],
+                    "丰田汽车展示视频",
+                    mtype="video",
+                    metadata={"source": "agent_mode", "sourceProdgenId": "pg-agent-1"},
+                )
+
+    def test_agent_video_card_requires_publish_material_before_marking_joined(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        card_start = src.index("class GenCard")
+        card_end = src.index("class StyleDot", card_start)
+        card = src[card_start:card_end]
+
+        self.assertIn("prodgen_video_publish_material_id(e)", card)
+        self.assertNotIn("pending = prodgen_video_pending_entry(e)", card)
+
+    def test_agent_video_publish_button_is_only_available_after_generation(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        card_start = src.index("class GenCard")
+        card_end = src.index("class StyleDot", card_start)
+        card = src[card_start:card_end]
+
+        self.assertIn("def add_to_publish(self, entry):", src)
+        self.assertIn("add_prodgen_video_to_publish_library(entry)", src)
+        self.assertIn("add_prodgen_video_to_pending(entry", src)
+        self.assertIn('if e.get("mode") == "video" and st == "完成":', card)
+        self.assertIn('"加入发布"', card)
+        self.assertIn('"已加入"', card)
 
     def test_agent_mode_canonical_model_label_overrides_lk888_catalog_mismatch(self):
         module = load_client_module("matrix_native_client_agent_model_mapping_test")

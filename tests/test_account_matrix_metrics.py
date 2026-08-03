@@ -84,6 +84,40 @@ class AccountMatrixMetricsTest(unittest.TestCase):
         self.assertEqual(rows[0]["todayPublishDay"], self.server.today_key())
         self.assertGreater(self.persist_calls, 0)
 
+    def test_rename_account_display_name_survives_node_sync(self):
+        self.state["accountsRegistry"] = [
+            {
+                "id": "node-1:xhs-self",
+                "localAccountId": "xhs-self",
+                "orgId": "org-a",
+                "platform": "xhs",
+                "name": "小红书账号",
+                "online": True,
+                "cookieReady": True,
+            },
+        ]
+
+        payload, status = self.server.rename_account_display_name("org-a", "node-1:xhs-self", "品牌号")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(self.state["accountsRegistry"][0]["name"], "品牌号")
+        self.assertEqual(self.state["accountsRegistry"][0]["nickname"], "品牌号")
+
+        self.server.sync_node_accounts_locked({
+            "id": "node-1",
+            "name": "Local Node",
+            "orgId": "org-a",
+            "lastSeen": self.server.now(),
+            "accounts": [
+                {"id": "xhs-self", "platform": "xhs", "name": "小红书账号", "cookieReady": True}
+            ],
+        })
+
+        rows = self.server.accounts_for_response("org-a", user={"id": "user-owner"})
+        self.assertEqual(rows[0]["name"], "品牌号")
+        self.assertEqual(rows[0]["nickname"], "品牌号")
+
     def test_publish_runtime_is_loaded_from_state_after_restart(self):
         state = {
             "publishRuntime": {

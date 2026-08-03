@@ -33,7 +33,7 @@ class LoginCenteredLayoutTest(unittest.TestCase):
         self.assertIn("多平台矩阵", hero)
         self.assertIn("Agent.模式", hero)
         self.assertIn("混剪短视频", hero)
-        self.assertIn("自动化工作流", hero)
+        self.assertIn("工作流助手", hero)
         self.assertIn('title = QtWidgets.QLabel("登录 / 加入企业")', build_card)
         self.assertNotIn('brand_title = QtWidgets.QLabel("云灵星图")', build_card)
 

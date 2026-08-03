@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 import time
 import tracemalloc
 import unittest
@@ -61,6 +62,38 @@ class XhsLeadParsingTests(unittest.TestCase):
         self.assertIn("_xhs_search_page_matches_keyword(page.url, keyword)", src)
         self.assertIn('result["blocked"] = True', src)
         self.assertIn('result["message"] = "xhs_search_result_unverified"', src)
+
+    def test_xhs_account_search_tourist_feed_requires_relogin(self):
+        result = xhs._xhs_apply_search_login_state(
+            {"ok": True, "platform": "xhs", "count": 0, "items": [], "guestMode": False},
+            {
+                "url": "https://www.xiaohongshu.com/explore?source=tourist_search",
+                "title": "小红书 - 你的生活兴趣社区",
+                "bodyText": "发现 RED 发布 通知 登录 沪ICP备13030189号",
+            },
+            guest_mode=False,
+            search_verified=False,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["needLogin"])
+        self.assertEqual(result["error"], "xhs_login_required")
+        self.assertIn("tourist_search", result["message"])
+
+    def test_xhs_guest_search_tourist_feed_keeps_guest_block_contract(self):
+        result = xhs._xhs_apply_search_login_state(
+            {"ok": True, "platform": "xhs", "count": 0, "items": [], "guestMode": True},
+            {
+                "url": "https://www.xiaohongshu.com/explore?source=tourist_search",
+                "title": "小红书 - 你的生活兴趣社区",
+                "bodyText": "发现 RED 发布 通知 登录 沪ICP备13030189号",
+            },
+            guest_mode=True,
+            search_verified=False,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("needLogin", result)
 
     def test_strict_filter_flag_defaults_on_and_can_disable(self):
         self.assertTrue(xhs.xhs_strict_lead_filter_enabled({}))
@@ -635,6 +668,11 @@ class XhsLeadFilteringTests(unittest.TestCase):
 
 
 class XhsLeadIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.env_patch = mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
     def test_browser_collector_does_not_select_every_container_div(self):
         source = inspect.getsource(xhs.xhs_get_comments)
         self.assertNotIn(".comments-container div", source)

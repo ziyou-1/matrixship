@@ -70,6 +70,49 @@ class DigitalHumanNavigationTest(unittest.TestCase):
                 client.BRIDGE = previous_bridge
                 del app
 
+    def test_tts_upload_ui_is_hidden_by_default_and_restorable(self):
+        client = load_client_module()
+        previous_bridge = client.BRIDGE
+        disabled_page = None
+        enabled_page = None
+        with mock.patch.dict(
+            os.environ,
+            {"QT_QPA_PLATFORM": "offscreen"},
+            clear=False,
+        ):
+            app = client.QtWidgets.QApplication.instance()
+            if app is None:
+                app = client.QtWidgets.QApplication([])
+            client.BRIDGE = client.Bridge()
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {"MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED": "0"},
+                    clear=False,
+                ):
+                    disabled_page = client.DigitalHumanPage()
+                self.assertTrue(disabled_page.b_upload_sound.isHidden())
+                self.assertTrue(disabled_page.sound_frame.isHidden())
+                self.assertIn("自动合成", disabled_page.asset_status.text())
+                self.assertNotIn("TTS 声音可选", disabled_page.asset_status.text())
+
+                with mock.patch.dict(
+                    os.environ,
+                    {"MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED": "1"},
+                    clear=False,
+                ):
+                    enabled_page = client.DigitalHumanPage()
+                self.assertFalse(enabled_page.b_upload_sound.isHidden())
+                self.assertFalse(enabled_page.sound_frame.isHidden())
+                self.assertIn("TTS 声音可选", enabled_page.asset_status.text())
+            finally:
+                if disabled_page is not None:
+                    disabled_page.deleteLater()
+                if enabled_page is not None:
+                    enabled_page.deleteLater()
+                client.BRIDGE = previous_bridge
+                del app
+
     def test_digital_human_generation_prefers_public_avatar_url(self):
         client = load_client_module()
         previous_bridge = client.BRIDGE

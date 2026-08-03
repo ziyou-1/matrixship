@@ -74,9 +74,13 @@ class OpenApiContractTest(unittest.TestCase):
             "/api/billing/refund",
             "/api/local-browser/status",
             "/api/local-browser/task",
+            "/api/cloud-login/open-url",
             "/api/douyin/dm/inbox",
+            "/api/accounts/rename",
             "/api/central/nodes",
+            "/api/enterprise/usage",
             "/api/enterprise/task-center",
+            "/api/enterprise/users/upsert",
             "/api/enterprise/invites/create",
             "/api/enterprise/invites/verify",
             "/api/enterprise/invites/accept",
@@ -102,11 +106,19 @@ class OpenApiContractTest(unittest.TestCase):
             "BillingRefundResponse",
             "LocalBrowserStatus",
             "LocalBrowserTask",
+            "CloudLoginOpenUrlRequest",
+            "CloudLoginOpenUrlResponse",
             "DouyinDmInboxRequest",
             "DouyinDmInboxMessage",
             "DouyinDmInboxResponse",
+            "AccountRenameRequest",
+            "AccountRenameSuccess",
             "CentralNodes",
+            "EnterpriseUsage",
+            "EnterpriseTaskTrendBucket",
             "EnterpriseTaskCenter",
+            "EnterpriseUserUpsertRequest",
+            "EnterpriseUserUpsertResponse",
             "EnterpriseInviteCreateRequest",
             "EnterpriseInviteCreateResponse",
             "EnterpriseInviteVerifyRequest",
@@ -119,12 +131,49 @@ class OpenApiContractTest(unittest.TestCase):
 
     def test_douyin_dm_inbox_accepts_optional_account_id(self):
         text = OPENAPI.read_text(encoding="utf-8")
+        document = yaml.safe_load(text)
+        schema = document["components"]["schemas"]["DouyinDmInboxRequest"]
         start = text.index("    DouyinDmInboxRequest:")
         end = text.index("    DouyinDmInboxMessage:", start)
         block = text[start:end]
         self.assertIn("        accountId:", block)
         self.assertIn("Account matrix ID", block)
         self.assertNotIn("required: [target, accountId]", block)
+        accepted_targets = {
+            tuple(item.get("required") or [])
+            for item in schema.get("anyOf") or []
+        }
+        self.assertEqual(accepted_targets, {("target",), ("userUrl",), ("secUid",)})
+
+    def test_douyin_dm_inbox_documents_safe_cookie_injection_diagnostics(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        document = yaml.safe_load(text)
+        start = text.index("    DouyinDmInboxResponse:")
+        end = text.index("    XhsDownloadRequest:", start)
+        block = text[start:end]
+        self.assertIn("        accountId:", block)
+        self.assertIn("        dmCookieInjection:", block)
+        self.assertIn("attemptedCount", block)
+        self.assertIn("addedCount", block)
+        self.assertNotIn("cookieValue", block)
+        error_enum = document["components"]["schemas"]["DouyinDmInboxResponse"]["properties"]["error"]["enum"]
+        self.assertNotIn("dm_inbox_messages_not_found", error_enum)
+
+    def test_xhs_openapi_documents_default_platform_disabled_gate(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        document = yaml.safe_load(text)
+
+        self.assertIn("MATRIX_XHS_ENABLED=1", text)
+        self.assertIn("platform_disabled", text)
+        self.assertIn("deprecated: true", text[text.index("  /api/xhs/download:"):])
+        for path in ("/api/xhs/download", "/api/finder/discover", "/api/publish/run"):
+            with self.subTest(path=path):
+                operation = document["paths"][path]["post"]
+                self.assertIn("404", operation["responses"])
+                self.assertEqual(
+                    operation["responses"]["404"]["content"]["application/json"]["schema"],
+                    {"$ref": "#/components/schemas/ErrorResponse"},
+                )
 
     def test_billing_dashboard_openapi_matches_runtime_query_and_response_contracts(self):
         text = OPENAPI.read_text(encoding="utf-8")
@@ -268,6 +317,49 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertNotIn("phone:", request_schema)
         self.assertNotIn("email:", request_schema)
 
+    def test_auth_change_password_openapi_documents_self_service_contract(self):
+        document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+        path = document["paths"]["/api/auth/change-password"]["post"]
+
+        self.assertEqual(path["security"], [{"bearerAuth": []}])
+        self.assertEqual(
+            path["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/AuthChangePasswordRequest"},
+        )
+        self.assertEqual(
+            path["responses"]["200"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/AuthChangePasswordResponse"},
+        )
+        self.assertIn("400", path["responses"])
+        self.assertIn("401", path["responses"])
+        self.assertIn("403", path["responses"])
+
+        request_schema = document["components"]["schemas"]["AuthChangePasswordRequest"]
+        self.assertEqual(request_schema["required"], ["currentPassword", "newPassword"])
+        self.assertEqual(request_schema["properties"]["newPassword"]["minLength"], 8)
+        self.assertFalse(request_schema["additionalProperties"])
+
+    def test_enterprise_user_upsert_openapi_does_not_require_phone_or_email(self):
+        document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+        path = document["paths"]["/api/enterprise/users/upsert"]["post"]
+
+        self.assertEqual(path["security"], [{"bearerAuth": []}])
+        self.assertEqual(
+            path["requestBody"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/EnterpriseUserUpsertRequest"},
+        )
+        request_schema = document["components"]["schemas"]["EnterpriseUserUpsertRequest"]
+        self.assertEqual(request_schema["required"], ["orgId", "name"])
+        self.assertNotIn("phone", request_schema["required"])
+        self.assertNotIn("email", request_schema["required"])
+        self.assertEqual(request_schema["properties"]["password"]["minLength"], 0)
+        response_schema = document["components"]["schemas"]["EnterpriseUserUpsertResponse"]
+        self.assertIn("credential", response_schema["required"])
+        self.assertEqual(
+            response_schema["properties"]["credential"]["required"],
+            ["identifier", "initialPassword", "generated"],
+        )
+
     def test_comic_generate_image_openapi_limits_frame_index_to_start_or_end(self):
         text = OPENAPI.read_text(encoding="utf-8")
         path_start = text.index("  /api/v1/comic-drama/storyboards/{storyboard_id}/generate-image:")
@@ -305,6 +397,21 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertIn('$ref: "#/components/schemas/ComicStoryboardImageValidationError"', contract)
         self.assertIn("detail: {type: string}", error_schema)
         self.assertNotIn("const:", error_schema)
+
+    def test_account_balance_contract_supports_owner_and_source_failure(self):
+        document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+        operation = document["paths"]["/api/account/balance"]["get"]
+        balance = document["components"]["schemas"]["AccountBalance"]["properties"]["balance"]
+
+        self.assertEqual(
+            balance,
+            {"oneOf": [{"type": "number"}, {"const": "inf"}]},
+        )
+        self.assertIn("503", operation["responses"])
+        self.assertEqual(
+            operation["responses"]["503"]["content"]["application/json"]["schema"],
+            {"$ref": "#/components/schemas/ErrorResponse"},
+        )
 
 
 if __name__ == "__main__":

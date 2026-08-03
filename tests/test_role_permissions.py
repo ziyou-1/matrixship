@@ -69,6 +69,7 @@ class RolePermissionsTest(unittest.TestCase):
             ],
             "auditLogs": [],
             "nodes": {},
+            "localBrowserClients": {},
             "sessions": [],
         }
         self.state_patch = mock.patch.object(self.server, "STATE", self.state)
@@ -120,6 +121,18 @@ class RolePermissionsTest(unittest.TestCase):
         self.assertEqual(member_summary["scope"], "self")
         self.assertEqual([u["id"] for u in member_summary["users"]], ["u-member"])
 
+    def test_enterprise_summary_hides_online_nodes_from_normal_user(self):
+        ts = 1_800_000_000.0
+        self.state["localBrowserClients"] = {
+            "lb-org-a": {"id": "lb-org-a", "orgId": "org-a", "lastSeen": ts, "capabilities": ["douyin.search"]},
+        }
+        with mock.patch.object(self.server, "now", return_value=ts):
+            entrepreneur_summary = self.server.enterprise_summary({"id": "u-admin"})
+            member_summary = self.server.enterprise_summary({"id": "u-member"})
+
+        self.assertEqual(entrepreneur_summary["counts"]["nodesOnline"], 1)
+        self.assertEqual(member_summary["counts"]["nodesOnline"], 0)
+
     def test_client_contains_role_menu_and_billing_visibility_guards(self):
         src = CLIENT.read_text(encoding="utf-8")
         self.assertIn("def product_role():", src)
@@ -129,7 +142,8 @@ class RolePermissionsTest(unittest.TestCase):
         self.assertIn('role = "platform_admin"', src)
         self.assertIn("self.billing_box.setVisible(product_role() == \"platform_admin\")", src)
         self.assertIn("self.phone_bind_panel.setVisible(product_role() == \"platform_admin\")", src)
-        self.assertIn("if not nav_allowed(name):", src)
+        self.assertIn("not nav_allowed(self._nav_names[i])", src)
+        self.assertIn("not nav_feature_enabled(self._nav_names[i])", src)
 
     def test_client_exposes_enterprise_team_member_management(self):
         src = CLIENT.read_text(encoding="utf-8")
@@ -178,6 +192,49 @@ class RolePermissionsTest(unittest.TestCase):
         self.assertIn("self._org_label.setVisible(is_platform_admin)", block)
         self.assertIn("self._apply_role_visibility()", block[block.index("    def on_show(self):"):])
         self.assertIn("self._apply_role_visibility()", block[block.index("    def _on(self, tag, data):"):])
+
+    def test_platform_admin_add_member_does_not_require_phone_or_email(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("    def add_member(self):")
+        end = src.index("    def invite_member(self):", start)
+        block = src[start:end]
+
+        self.assertIn('dialog.setWindowTitle("添加企业成员")', block)
+        self.assertIn('form.addRow("姓名", name)', block)
+        self.assertIn('form.addRow("初始密码", password)', block)
+        self.assertIn('form.addRow("成员角色", role)', block)
+        self.assertNotIn("phone = QtWidgets.QLineEdit()", block)
+        self.assertNotIn("email = QtWidgets.QLineEdit()", block)
+        self.assertNotIn('form.addRow("手机号", phone)', block)
+        self.assertNotIn('form.addRow("邮箱", email)', block)
+        self.assertNotIn("请至少填写手机号或邮箱", block)
+        self.assertNotIn('"phone":', block)
+        self.assertNotIn('"email":', block)
+
+    def test_enterprise_user_upsert_generates_login_identifier_without_contact_fields(self):
+        payload, status = self.server.upsert_enterprise_user({
+            "orgId": "org-a",
+            "name": "No Contact Member",
+            "password": "member-password-1",
+            "role": "member",
+        })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        user = payload["user"]
+        self.assertTrue(user["id"].startswith("user-"))
+        self.assertEqual(user["name"], "No Contact Member")
+        self.assertEqual(user.get("phone") or "", "")
+        self.assertEqual(user.get("email") or "", "")
+        self.assertEqual(payload["credential"]["identifier"], user["id"])
+        self.assertEqual(payload["credential"]["initialPassword"], "member-password-1")
+        self.assertTrue(self.server.verify_user_password(
+            next(u for u in self.state["users"] if u["id"] == user["id"]),
+            "member-password-1",
+        ))
+        membership = next(m for m in self.state["memberships"] if m["userId"] == user["id"])
+        self.assertEqual(membership["orgId"], "org-a")
+        self.assertEqual(membership["role"], "member")
 
     def test_toyota_seed_moves_named_users_without_touching_phone_owner(self):
         seed = load_toyota_seed_module()
@@ -246,9 +303,12 @@ class RolePermissionsTest(unittest.TestCase):
     def test_client_team_member_and_sidebar_controls_have_stable_widths(self):
         src = CLIENT.read_text(encoding="utf-8")
         self.assertIn("self.table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.Fixed)", src)
-        self.assertIn("self.table.setColumnWidth(5, 174)", src)
-        self.assertIn("reset_btn.setFixedWidth(82)", src)
-        self.assertIn("status_btn.setFixedWidth(58)", src)
+        self.assertIn("self.table.setColumnWidth(5, 146)", src)
+        self.assertIn('reset_btn.setObjectName("teamAction")', src)
+        self.assertIn("reset_btn.setFixedWidth(72)", src)
+        self.assertIn('status_btn.setObjectName("teamAction")', src)
+        self.assertIn("status_btn.setFixedWidth(48)", src)
+        self.assertIn("QPushButton#teamAction", src)
         self.assertIn("foot = QtWidgets.QVBoxLayout()", src)
         self.assertIn("user_row = QtWidgets.QHBoxLayout()", src)
         self.assertIn("control_row = QtWidgets.QHBoxLayout()", src)
@@ -260,6 +320,21 @@ class RolePermissionsTest(unittest.TestCase):
         self.assertIn("self._theme_btn.setFixedSize(26, 26)", src)
         self.assertIn("self._logout_btn.setFixedSize(26, 26)", src)
         self.assertIn("control_row.addWidget(self._logout_btn)", src)
+
+    def test_client_sidebar_does_not_show_connection_isolation_status(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        shell = src[src.index("    def _build_shell(self):"):src.index("    def _goto_nav(self, tag, d):")]
+        warmup = src[src.index("    def _on_warmup(self, tag, d):"):src.index("    def _nav(self, i):")]
+        on_login = src[src.index("    def on_login(self, org):"):src.index("    def _start_balance_timer(self):")]
+
+        self.assertIn("self.conn_name = QtWidgets.QLabel", shell)
+        self.assertNotIn("self.conn = QtWidgets.QLabel", shell)
+        self.assertNotIn('setObjectName("conn")', shell)
+        self.assertNotIn("acol.addWidget(self.conn)", shell)
+        self.assertNotIn("self.conn.setText", warmup)
+        self.assertNotIn("self.conn.setToolTip", warmup)
+        self.assertNotIn("数据隔离", on_login)
+        self.assertNotIn("已连接 · 数据隔离", src)
 
 
     def test_client_refreshes_sidebar_balance_periodically_after_login(self):

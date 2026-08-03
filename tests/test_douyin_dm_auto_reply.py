@@ -1,10 +1,15 @@
 import importlib
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +38,74 @@ class DouyinDmAutoReplyContractsTest(unittest.TestCase):
             "/api/douyin/dm/inbox",
         )
         self.assertIn("douyin.dm.inbox", self.worker.CAPABILITIES)
+
+    def test_local_worker_refreshes_agent_token_before_login_forward(self):
+        cfg = {
+            "central": "http://central.test",
+            "token": "session-token",
+            "orgId": "org-a",
+            "localApi": "http://127.0.0.1:9081",
+            "clientId": "client-a",
+            "name": "client-a",
+        }
+        with mock.patch.dict(os.environ, {"MATRIX_AGENT_TOKEN": "old-agent-token"}):
+            worker = self.worker.LocalBrowserWorker(cfg)
+            os.environ["MATRIX_AGENT_TOKEN"] = "new-agent-token"
+            calls = []
+
+            def fake_post_json(url, payload, headers=None, timeout=60):
+                calls.append((url, dict(headers or {})))
+                return {"ok": True, "sessionId": "login-session"}
+
+            def fake_get_json(url, headers=None, timeout=20):
+                if url.endswith("/api/accounts"):
+                    return [{"id": "douyin-a", "platform": "douyin", "name": "账号A"}]
+                return {"status": "success", "loggedIn": True, "cookieCount": 3}
+
+            with mock.patch.object(self.worker, "post_json", side_effect=fake_post_json), \
+                    mock.patch.object(self.worker, "get_json", side_effect=fake_get_json), \
+                    mock.patch.object(self.worker.time, "sleep", return_value=None):
+                result = worker.run_login({"type": "douyin.login", "payload": {"timeoutSec": 60}})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][1].get("X-Matrix-Agent-Token"), "new-agent-token")
+        self.assertNotEqual(calls[0][1].get("X-Matrix-Agent-Token"), "old-agent-token")
+
+    def test_local_worker_refreshes_agent_token_file_before_login_forward(self):
+        cfg = {
+            "central": "http://central.test",
+            "token": "session-token",
+            "orgId": "org-a",
+            "localApi": "http://127.0.0.1:9081",
+            "clientId": "client-a",
+            "name": "client-a",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = Path(tmp) / "agent_token.txt"
+            token_path.write_text("old-file-token\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"MATRIX_AGENT_TOKEN": "", "LOCAL_AGENT_TOKEN": ""}), \
+                    mock.patch.object(self.worker, "appdata_data_dir", return_value=tmp):
+                worker = self.worker.LocalBrowserWorker(cfg)
+                token_path.write_text("new-file-token\n", encoding="utf-8")
+                calls = []
+
+                def fake_post_json(url, payload, headers=None, timeout=60):
+                    calls.append((url, dict(headers or {})))
+                    return {"ok": True, "sessionId": "login-session"}
+
+                def fake_get_json(url, headers=None, timeout=20):
+                    if url.endswith("/api/accounts"):
+                        return [{"id": "douyin-a", "platform": "douyin", "name": "账号A"}]
+                    return {"status": "success", "loggedIn": True, "cookieCount": 3}
+
+                with mock.patch.object(self.worker, "post_json", side_effect=fake_post_json), \
+                        mock.patch.object(self.worker, "get_json", side_effect=fake_get_json), \
+                        mock.patch.object(self.worker.time, "sleep", return_value=None):
+                    result = worker.run_login({"type": "douyin.login", "payload": {"timeoutSec": 60}})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][1].get("X-Matrix-Agent-Token"), "new-file-token")
+        self.assertNotEqual(calls[0][1].get("X-Matrix-Agent-Token"), "old-file-token")
 
 
 class DouyinDmInboxApiTest(unittest.TestCase):
@@ -150,6 +223,51 @@ class DouyinDmInboxApiTest(unittest.TestCase):
             "douyin-account-1",
         )
 
+    def test_dm_inbox_route_maps_auth_and_invalid_target_statuses(self):
+        cases = (
+            ({"ok": False, "error": "not_authenticated", "needLogin": True}, 401),
+            ({"ok": False, "error": "numeric_uid_unsupported_in_browser_dm"}, 400),
+        )
+        for result, expected_status in cases:
+            with self.subTest(error=result["error"]):
+                handler = self.make_handler({"target": "123456"})
+                with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                        mock.patch.object(self.api, "run_douyin_dm_inbox", return_value=result), \
+                        mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
+                    status, payload = handler.do_POST()
+                self.assertEqual(status, expected_status)
+                self.assertEqual(payload["error"], result["error"])
+
+    def test_dm_inbox_route_returns_safe_error_reference_without_trace(self):
+        handler = self.make_handler({"target": "https://www.douyin.com/user/private-target"})
+        with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "run_douyin_dm_inbox", side_effect=RuntimeError("private-target")), \
+                mock.patch.object(self.api, "json_log", return_value='{"errorId":"err-dm-inbox"}'), \
+                mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
+            status, payload = handler.do_POST()
+        self.assertEqual(status, 500)
+        self.assertEqual(payload.get("errorId"), "err-dm-inbox")
+        dumped = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("trace", payload)
+        self.assertNotIn("private-target", dumped)
+
+    def test_dm_error_log_keeps_stack_without_customer_url_path(self):
+        records = []
+        fake_logger = mock.Mock()
+        fake_logger.error.side_effect = records.append
+        try:
+            raise ValueError("failed at https://www.douyin.com/user/private-target?token=secret")
+        except ValueError as exc:
+            with mock.patch.object(self.api, "logger", fake_logger):
+                error_id = self.api._dm_error_id("douyin_dm_test_exception", exc=exc)
+        self.assertTrue(error_id.startswith("err-"))
+        self.assertEqual(len(records), 1)
+        payload = json.loads(records[0])
+        self.assertIn("stack", payload)
+        self.assertEqual(payload.get("exceptionType"), "ValueError")
+        self.assertNotIn("private-target", records[0])
+        self.assertNotIn("secret", records[0])
+
     def test_dm_inbox_wrapper_passes_account_id_to_browser_reader(self):
         result = {"ok": True, "messages": []}
         with mock.patch.object(self.api, "browser_read_dm_inbox", return_value=result) as browser_reader:
@@ -166,6 +284,29 @@ class DouyinDmInboxApiTest(unittest.TestCase):
             since_fingerprint="last-fingerprint",
             account_id="douyin-account-1",
         )
+
+    def test_dm_login_source_normalizes_central_account_id(self):
+        paths = {"profileDir": "C:/profile", "authCache": "C:/auth.json"}
+        with mock.patch.object(self.api, "douyin_account_paths", return_value=paths) as account_paths, \
+                mock.patch.object(self.api, "load_cookie_cache", return_value={"cookie": "sessionid=ready"}), \
+                mock.patch.object(self.api, "cookie_str_has_login", return_value=True), \
+                mock.patch.object(self.api.os.path, "isdir", return_value=True):
+            result = self.api._resolve_douyin_dm_login_source("node-a:local-account")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["accountId"], "local-account")
+        account_paths.assert_called_with("local-account")
+
+    def test_dm_inbox_profile_is_stable_and_isolated_per_account(self):
+        helper = getattr(self.api, "_douyin_dm_inbox_profile_dir", None)
+        self.assertIsNotNone(helper)
+        base = os.path.abspath("C:/dm-profile-test")
+        first = helper("node-a:account-one", base)
+        second = helper("node-a:account-two", base)
+        legacy = helper("", base)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.endswith(os.path.join("accounts", "account-one", "current")))
+        self.assertTrue(second.endswith(os.path.join("accounts", "account-two", "current")))
+        self.assertEqual(legacy, os.path.join(base, "current"))
 
 
 class DouyinDmInboxBrowserSourceTest(unittest.TestCase):
@@ -184,12 +325,13 @@ class DouyinDmInboxBrowserSourceTest(unittest.TestCase):
         source = (ROOT / "backend" / "api_server.py").read_text(encoding="utf-8")
         for code in (
             "dm_inbox_button_not_found",
-            "dm_inbox_messages_not_found",
             "not_authenticated",
             "numeric_uid_unsupported_in_browser_dm",
         ):
             with self.subTest(code=code):
                 self.assertIn(code, source)
+        self.assertIn('result["ok"] = True', self.inbox_block())
+        self.assertIn('result["empty"] = True', self.inbox_block())
 
     def test_browser_read_dm_inbox_resolves_and_seeds_selected_account(self):
         block = self.inbox_block()
@@ -205,6 +347,17 @@ class DouyinDmInboxBrowserSourceTest(unittest.TestCase):
         block = self.inbox_block()
         self.assertIn("DY_DM_INBOX_ACCOUNT_ID", block)
         self.assertIn("account_id=account_id", block)
+
+    def test_browser_read_dm_inbox_uses_safe_python_child_command(self):
+        block = self.inbox_block()
+        self.assertIn("child_cmd = _python_c_child_cmd()", block)
+        self.assertIn("child_cmd + [child_code]", block)
+        self.assertNotIn('[sys.executable, "-c", child_code]', block)
+
+    def test_browser_read_dm_inbox_serializes_profile_use(self):
+        block = self.inbox_block()
+        self.assertIn("_douyin_dm_inbox_account_lock", block)
+        self.assertIn("with profile_lock:", block)
 
     def test_browser_read_dm_inbox_injects_account_cookie_before_navigation(self):
         block = self.inbox_block()
@@ -222,30 +375,60 @@ class DouyinDmInboxBrowserSourceTest(unittest.TestCase):
         self.assertIn("addedCount", block)
         self.assertNotIn("'cookie':", block)
         self.assertNotIn('"cookie":', block)
+        self.assertNotIn('"stderr":', block)
+        self.assertNotIn('"stdout":', block)
+
+    def test_browser_read_dm_inbox_uses_panel_scoped_geometry_fallback(self):
+        block = self.inbox_block()
+        self.assertIn("dmPanelDiagnostics", block)
+        self.assertIn("panelOpened", block)
+        self.assertIn("textBubbleCount", block)
+        self.assertIn("panelCenterX", block)
+        self.assertIn("bubbleCenterX", block)
+        self.assertIn("editorCandidateCount", block)
+        self.assertIn("editorCandidates", block)
+        self.assertIn("messageActionLabels", block)
+        self.assertIn("'点赞'", block)
+        self.assertIn("if (!text && (html.includes('img') || html.includes('image'))) kind = 'image';", block)
+        self.assertIn("stripMessageActions", block)
+        self.assertIn("text = stripMessageActions", block)
+        self.assertIn("direction = bubbleCenterX < panelCenterX ? 'customer' : 'me'", block)
 
 
 class DouyinDmClientAutoReplySourceTest(unittest.TestCase):
-    def test_client_contains_merge_window_state_and_since_fingerprint(self):
+    def test_client_contains_per_poll_merge_state_and_since_fingerprint(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
         self.assertIn("_auto_pending_texts", source)
         self.assertIn("_auto_last_reply_at", source)
         self.assertIn("_auto_last_fingerprint", source)
         self.assertIn("sinceFingerprint", source)
         self.assertIn("DM_AUTO_REPLY_POLL_MS = 20000", source)
-        self.assertIn("DM_AUTO_REPLY_MERGE_WINDOW_SEC = 300", source)
+        self.assertNotIn("DM_AUTO_REPLY_MERGE_WINDOW_SEC", source)
         self.assertIn("_auto_baseline_pending", source)
 
     def test_client_manual_required_does_not_auto_send_non_text(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
         self.assertIn("manual_required", source)
-        self.assertIn("收到非文本私信，请人工查看该客户会话。", source)
+        self.assertIn("DM_AUTO_REPLY_HANDOFF_PATTERN", source)
+        self.assertIn("_auto_stop_for_manual_handoff", source)
+        self.assertIn("_show_auto_handoff_notification", source)
+        self.assertIn("需人工接管", source)
         self.assertIn("_auto_handle_inbox_messages", source)
 
     def test_client_auto_reply_uses_existing_send_path(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
-        self.assertIn("self.send_reply(reply)", source)
+        self.assertIn("self.send_reply(reply, session=d)", source)
         self.assertIn("douyin.dm.inbox", source)
         self.assertIn("_auto_flush_buffer", source)
+
+    def test_client_does_not_call_unknown_texts_no_new_customer_messages(self):
+        source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
+        start = source.index('if tag == "dm_inbox":')
+        end = source.index('\n        if tag == "dm":', start)
+        block = source[start:end]
+        self.assertIn("unknownDirectionCount", block)
+        self.assertIn("检测到", block)
+        self.assertIn("无法确认客户方向", block)
 
     def test_client_inbox_poll_uses_local_api_not_central_task_result(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
@@ -260,15 +443,457 @@ class DouyinDmClientAutoReplySourceTest(unittest.TestCase):
         start = source.index("class DMPage")
         end = source.index("class CopywritingPage", start)
         block = source[start:end]
-        self.assertIn('"accountId": self._dm_account_id', block)
+        self.assertIn('"accountId": session["accountId"]', block)
         send_start = block.index("def send_reply")
         send_end = block.index("\n    def toggle_auto", send_start)
         send_block = block[send_start:send_end]
-        self.assertIn('submit_local_task(', send_block)
-        self.assertIn('"douyin.dm"', send_block)
-        self.assertIn('{"target": t, "content": c, "accountId": self._dm_account_id}', send_block)
-        self.assertIn('self._dm_account_id = str((d or {}).get("accountId") or "").strip()', block)
+        self.assertIn('code, result = local_api(', send_block)
+        self.assertIn('"/api/douyin/dm"', send_block)
+        self.assertNotIn('submit_local_task(', send_block)
+        self.assertIn('"accountId": account_id', send_block)
+        self.assertIn('resolved_account_id = str(res.get("accountId") or "").strip()', block)
+        self.assertIn('self._dm_account_id = resolved_account_id', block)
 
+    def test_client_binds_async_events_to_target_session(self):
+        source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
+        start = source.index("class DMPage")
+        end = source.index("class CopywritingPage", start)
+        block = source[start:end]
+        self.assertIn("_dm_session_generation", block)
+        self.assertIn("_dm_session_snapshot", block)
+        self.assertIn("_dm_event_matches_session", block)
+        self.assertIn("_on_dm_target_edited", block)
+
+
+class DouyinDmClientSessionBehaviorTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.client = importlib.import_module("matrix_native_client")
+        from PySide6 import QtWidgets
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def setUp(self):
+        self.client.BRIDGE = self.client.Bridge()
+        with mock.patch.object(self.client, "load_dm_conv", return_value={}):
+            self.page = self.client.DMPage()
+        self.addCleanup(self.page._auto_timer.stop)
+        self.addCleanup(self.page.deleteLater)
+
+    def test_editing_target_stops_auto_and_discards_old_session_state(self):
+        self.page.target.setText("https://www.douyin.com/user/old")
+        self.page._dm_account_id = "account-old"
+        self.page._auto_pending_texts = [{"text": "old question", "fingerprint": "fp-old"}]
+        self.page._auto_flushing_texts = [{"text": "old question", "fingerprint": "fp-old"}]
+        self.page._seen = {"fp-old"}
+        self.page._auto_seen_fingerprints = ["fp-old"]
+        self.page._auto_busy = True
+        before_generation = int(getattr(self.page, "_dm_session_generation", 0))
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        self.page.target.setText("https://www.douyin.com/user/new")
+        self.page.target.textEdited.emit(self.page.target.text())
+
+        self.assertFalse(self.page.auto.isChecked())
+        self.assertFalse(self.page._auto_timer.isActive())
+        self.assertFalse(self.page._auto_busy)
+        self.assertEqual(self.page._dm_account_id, "")
+        self.assertEqual(self.page._auto_pending_texts, [])
+        self.assertEqual(self.page._auto_flushing_texts, [])
+        self.assertEqual(self.page._seen, set())
+        self.assertGreater(int(getattr(self.page, "_dm_session_generation", 0)), before_generation)
+
+    def test_stale_ai_reply_does_not_send_to_current_target(self):
+        self.page.target.setText("https://www.douyin.com/user/new")
+        self.page._dm_account_id = "account-new"
+        self.page._dm_session_generation = 2
+        with mock.patch.object(self.page, "send_reply") as send_reply:
+            self.page._on("sales_reply", {
+                "ok": True,
+                "auto": True,
+                "reply": "old reply",
+                "sessionGeneration": 1,
+                "target": "https://www.douyin.com/user/old",
+                "accountId": "account-old",
+            })
+        send_reply.assert_not_called()
+
+    def test_send_reply_calls_local_engine_without_central_task(self):
+        self.page.target.setText("https://www.douyin.com/user/customer")
+        self.page._dm_account_id = "node-a:account-one"
+        pending = []
+        emitted = []
+        self.client.BRIDGE.payload.connect(lambda tag, payload: emitted.append((tag, payload)))
+        with mock.patch.object(self.client, "save_dm_conv"), \
+                mock.patch.object(self.client, "run_bg", side_effect=lambda fn: pending.append(fn)), \
+                mock.patch.object(self.client, "local_api", return_value=(200, {"ok": True, "sent": "hello"})) as local_call, \
+                mock.patch.object(self.client, "submit_local_task", return_value={"ok": True}) as central_call:
+            self.page.send_reply("hello")
+            self.assertEqual(len(pending), 1)
+            pending[0]()
+        local_call.assert_called_once_with(
+            "POST",
+            "/api/douyin/dm",
+            {"target": "https://www.douyin.com/user/customer", "content": "hello", "accountId": "node-a:account-one"},
+            150,
+        )
+        central_call.assert_not_called()
+        dm_events = [payload for tag, payload in emitted if tag == "dm"]
+        self.assertEqual(len(dm_events), 1)
+        self.assertEqual(dm_events[0].get("error"), "")
+
+    def test_successful_inbox_poll_emits_empty_error(self):
+        self.page.target.setText("https://www.douyin.com/user/customer")
+        self.page._dm_account_id = "account-one"
+        pending = []
+        emitted = []
+        self.client.BRIDGE.payload.connect(lambda tag, payload: emitted.append((tag, payload)))
+        with mock.patch.object(self.client, "run_bg", side_effect=lambda fn: pending.append(fn)), \
+                mock.patch.object(self.client, "local_api", return_value=(200, {
+                    "ok": True,
+                    "accountId": "account-one",
+                    "messages": [],
+                })):
+            self.page._auto_poll()
+            self.assertEqual(len(pending), 1)
+            pending[0]()
+        inbox_events = [payload for tag, payload in emitted if tag == "dm_inbox"]
+        self.assertEqual(len(inbox_events), 1)
+        self.assertEqual(inbox_events[0].get("error"), "")
+
+    def test_successful_inbox_poll_locks_resolved_account(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_account_id = ""
+        self.page._dm_session_generation = 3
+        self.page._on("dm_inbox", {
+            "status": "done",
+            "sessionGeneration": 3,
+            "target": target,
+            "accountId": "",
+            "result": {"ok": True, "accountId": "resolved-account", "messages": []},
+        })
+        self.assertEqual(self.page._dm_account_id, "resolved-account")
+
+    def test_polled_customer_text_is_displayed_immediately(self):
+        self.page.target.setText("https://www.douyin.com/user/customer")
+
+        summary = self.page._auto_handle_inbox_messages([
+            {"direction": "customer", "kind": "text", "text": "price?", "fingerprint": "fp-price"}
+        ])
+
+        self.assertEqual(summary["buffered"], 1)
+        self.assertEqual(
+            self.page._hist(),
+            [{"role": "customer", "text": "price?", "fingerprint": "fp-price"}],
+        )
+        self.assertIn("price?", self.page.conv.toPlainText())
+
+    def test_multiple_texts_in_one_poll_reply_in_order_after_each_send(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 5
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+
+        with mock.patch.object(self.page, "gen_reply") as gen_reply:
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 5,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "hello", "fingerprint": "fp-1"},
+                        {"direction": "customer", "kind": "text", "text": "price?", "fingerprint": "fp-2"},
+                    ],
+                },
+            })
+            self.page._auto_sending = True
+            self.page._auto_sending_text = "reply to hello"
+            self.page._auto_sending_message_fingerprint = "fp-1"
+            self.page._on("dm", {
+                "status": "done",
+                "sessionGeneration": 5,
+                "target": target,
+                "accountId": "",
+                "result": {"ok": True, "sent": "reply to hello"},
+            })
+
+        self.assertEqual(
+            gen_reply.call_args_list,
+            [
+                mock.call("hello", auto=True, record_customer=False),
+                mock.call("price?", auto=True, record_customer=False),
+            ],
+        )
+        self.assertEqual([m["text"] for m in self.page._hist()], ["hello", "price?"])
+        self.assertEqual(self.page._auto_pending_texts, [])
+
+    def test_auto_gen_reply_does_not_duplicate_already_displayed_customer_batch(self):
+        self.page.target.setText("https://www.douyin.com/user/customer")
+        self.page._hist().append({"role": "customer", "text": "hello", "fingerprint": "fp-1"})
+
+        with mock.patch.object(self.client, "save_dm_conv"), \
+                mock.patch.object(self.client, "run_bg", side_effect=lambda fn: None), \
+                mock.patch.object(self.client, "ai_sales_reply"):
+            self.page.gen_reply("hello", auto=True, record_customer=False)
+
+        self.assertEqual([m["text"] for m in self.page._hist()], ["hello"])
+        self.assertEqual(self.page.conv.toPlainText().count("hello"), 0)
+
+    def test_first_activation_processes_only_trailing_unanswered_customer_texts(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 6
+        self.page._auto_baseline_pending = True
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+
+        with mock.patch.object(self.page, "gen_reply") as gen_reply:
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 6,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "old question", "fingerprint": "fp-old"},
+                        {"direction": "me", "kind": "text", "text": "handled", "fingerprint": "fp-me"},
+                        {"direction": "customer", "kind": "text", "text": "new one", "fingerprint": "fp-new-1"},
+                        {"direction": "customer", "kind": "text", "text": "new two", "fingerprint": "fp-new-2"},
+                    ],
+                },
+            })
+            self.page._auto_sending = True
+            self.page._auto_sending_text = "reply to new one"
+            self.page._auto_sending_message_fingerprint = "fp-new-1"
+            self.page._on("dm", {
+                "status": "done",
+                "sessionGeneration": 6,
+                "target": target,
+                "accountId": "",
+                "result": {"ok": True, "sent": "reply to new one"},
+            })
+
+        self.assertEqual(
+            gen_reply.call_args_list,
+            [
+                mock.call("new one", auto=True, record_customer=False),
+                mock.call("new two", auto=True, record_customer=False),
+            ],
+        )
+        self.assertEqual([m["text"] for m in self.page._hist()], ["new one", "new two"])
+        self.assertTrue(all(fp in self.page._seen for fp in ("fp-old", "fp-me", "fp-new-1", "fp-new-2")))
+
+    def test_mixed_text_and_non_text_batch_requires_manual_without_ai_reply(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 7
+
+        with mock.patch.object(self.page, "gen_reply") as gen_reply:
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 7,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "see this", "fingerprint": "fp-text"},
+                        {"direction": "customer", "kind": "image", "text": "", "fingerprint": "fp-image"},
+                    ],
+                },
+            })
+
+        gen_reply.assert_not_called()
+        self.assertTrue(self.page._auto_manual_required)
+        self.assertEqual(self.page._auto_pending_texts, [])
+        self.assertEqual([m["status"] for m in self.page._hist()], ["manual_required", "manual_required", "manual_required"])
+        self.assertEqual(self.page._hist()[-1]["role"], "system")
+
+    def test_handoff_request_disables_auto_send_but_keeps_polling_and_adds_notice(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 10
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        with mock.patch.object(self.page, "gen_reply") as gen_reply, \
+                mock.patch.object(self.page, "_show_auto_handoff_notification") as notify:
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 10,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "请转人工客服", "fingerprint": "fp-human"},
+                    ],
+                },
+            })
+
+        gen_reply.assert_not_called()
+        notify.assert_called_once_with("客户明确要求转人工")
+        self.assertFalse(self.page.auto.isChecked())
+        self.assertTrue(self.page._auto_timer.isActive())
+        self.assertTrue(self.page._auto_manual_required)
+        self.assertEqual(self.page._auto_pending_texts, [])
+        self.assertEqual(self.page._hist()[0]["status"], "manual_required")
+        self.assertEqual(self.page._hist()[1]["role"], "system")
+        self.assertIn("需人工接管", self.page._hist()[1]["text"])
+
+    def test_manual_handoff_keeps_polling_and_displays_later_text_without_ai_reply(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 11
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        with mock.patch.object(self.page, "gen_reply") as gen_reply, \
+                mock.patch.object(self.page, "_show_auto_handoff_notification"):
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 11,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "请转人工", "fingerprint": "fp-handoff-11"},
+                    ],
+                },
+            })
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 11,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "人工客服您好", "fingerprint": "fp-manual-11"},
+                    ],
+                },
+            })
+
+        self.assertTrue(self.page._auto_manual_required)
+        self.assertTrue(self.page._auto_timer.isActive())
+        gen_reply.assert_not_called()
+        self.assertIn("人工客服您好", self.page.conv.toPlainText())
+        self.assertEqual(self.page._hist()[-1]["status"], "manual_required")
+
+    def test_reenable_auto_after_manual_handoff_clears_manual_state_and_replies(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 12
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        with mock.patch.object(self.page, "_show_auto_handoff_notification"):
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 12,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "请转人工", "fingerprint": "fp-handoff-12"},
+                    ],
+                },
+            })
+
+        self.page._hist().append({"role": "me", "text": "好的，人工为您服务"})
+        with mock.patch.object(self.page, "gen_reply") as gen_reply:
+            self.page.auto.setChecked(True)
+            self.assertFalse(self.page._auto_manual_required)
+            self.assertTrue(self.page._auto_timer.isActive())
+            self.page._on("dm_inbox", {
+                "status": "done",
+                "sessionGeneration": 12,
+                "target": target,
+                "accountId": "",
+                "result": {
+                    "ok": True,
+                    "messages": [
+                        {"direction": "customer", "kind": "text", "text": "我想继续了解", "fingerprint": "fp-resume-12"},
+                    ],
+                },
+            })
+
+        gen_reply.assert_called_once_with("我想继续了解", auto=True, record_customer=False)
+
+    def test_auto_ai_failure_stops_auto_and_marks_batch_manual(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 8
+        self.page._auto_flushing_texts = [{"text": "need price", "fingerprint": "fp-price"}]
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        self.page._on("sales_reply", {
+            "ok": False,
+            "auto": True,
+            "error": "ai_down",
+            "sessionGeneration": 8,
+            "target": target,
+            "accountId": "",
+        })
+
+        self.assertFalse(self.page.auto.isChecked())
+        self.assertFalse(self.page._auto_timer.isActive())
+        self.assertTrue(self.page._auto_manual_required)
+        self.assertEqual(self.page._auto_pending_texts, [])
+        self.assertEqual(self.page._auto_flushing_texts, [])
+
+    def test_auto_send_failure_stops_auto_and_does_not_retry_batch(self):
+        target = "https://www.douyin.com/user/customer"
+        self.page.target.setText(target)
+        self.page._dm_session_generation = 9
+        self.page._auto_sending = True
+        self.page._auto_sending_text = "reply"
+        self.page._auto_sending_message_fingerprint = "fp-price"
+        self.page._auto_flushing_texts = [{"text": "need price", "fingerprint": "fp-price"}]
+        self.page._hist().append({"role": "me", "text": "reply"})
+        old_state = self.page.auto.blockSignals(True)
+        self.page.auto.setChecked(True)
+        self.page.auto.blockSignals(old_state)
+        self.page._auto_timer.start(60000)
+
+        self.page._on("dm", {
+            "status": "failed",
+            "error": "dm_input_not_found",
+            "sessionGeneration": 9,
+            "target": target,
+            "accountId": "",
+            "result": {"ok": False, "error": "dm_input_not_found"},
+        })
+
+        self.assertFalse(self.page.auto.isChecked())
+        self.assertFalse(self.page._auto_timer.isActive())
+        self.assertTrue(self.page._auto_manual_required)
+        self.assertEqual(self.page._auto_pending_texts, [])
+        self.assertEqual(self.page._auto_flushing_texts, [])
+        self.assertEqual(self.page._hist(), [])
+
+
+class DouyinDmClientAutoReplyAdditionalSourceTest(unittest.TestCase):
     def test_finder_followup_passes_selected_account_to_dm_page(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
         start = source.index("class FinderPage")
@@ -281,11 +906,11 @@ class DouyinDmClientAutoReplySourceTest(unittest.TestCase):
         self.assertIn('if direction != "customer":', source)
         self.assertIn("self._seen.discard(old_fp)", source)
 
-    def test_client_send_failure_restores_buffer_and_removes_unsent_history(self):
+    def test_client_send_failure_stops_auto_and_removes_unsent_history(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
         self.assertIn("_auto_sending_text", source)
         self.assertIn("hist.pop()", source)
-        self.assertIn('stage="send"', source)
+        self.assertIn('_auto_disable_for_batch_failure(\n                        "send"', source)
 
     def test_client_send_failure_status_surfaces_child_diagnostics(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
@@ -344,16 +969,16 @@ class DouyinDmClientAutoReplySourceTest(unittest.TestCase):
         self.assertIn('os.environ.setdefault("DY_SEARCH_ISOLATED", "0")', block)
         self.assertIn('os.environ.setdefault("DY_DM_ISOLATED", "0")', block)
 
-    def test_client_ai_failure_logs_message_fingerprint_before_restoring_buffer(self):
+    def test_client_ai_failure_stops_auto_without_restoring_buffer(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
-        start = source.index('stage="ai"')
+        start = source.index('_auto_disable_for_batch_failure("ai"')
         block_start = source.rfind('if d.get("auto")', 0, start)
-        block = source[block_start:start + 500]
+        block = source[block_start:start + 300]
         self.assertLess(
             block.index("failed_message_fp = self._auto_flushing_message_fingerprint()"),
-            block.index("self._auto_flushing_texts = []"),
+            block.index('_auto_disable_for_batch_failure("ai"'),
         )
-        self.assertIn("messageFingerprint=failed_message_fp", block)
+        self.assertNotIn("self._auto_pending_texts = list(self._auto_flushing_texts)", block)
 
     def test_client_stops_auto_reply_on_login_or_dm_permission_errors(self):
         source = (ROOT / "backend" / "matrix_native_client.py").read_text(encoding="utf-8")
@@ -372,7 +997,7 @@ class DouyinDmClientAutoReplySourceTest(unittest.TestCase):
         start = source.index("def browser_read_dm_inbox")
         end = source.index("\ndef list_download_files", start)
         block = source[start:end]
-        self.assertIn('os.path.join(profile_base, "current")', block)
+        self.assertIn("_douyin_dm_inbox_profile_dir", block)
         self.assertNotIn("tempfile.mkdtemp", block)
         self.assertNotIn("shutil.rmtree(profile_dir", block)
 
@@ -518,8 +1143,9 @@ class DouyinDmSendBrowserSourceTest(unittest.TestCase):
     def test_browser_send_dm_child_process_wraps_inner_exceptions(self):
         block = self.dm_send_block()
         self.assertIn("dm_child_inner_exception", block)
-        self.assertIn("traceback.format_exc", block)
-        self.assertIn("stackTail", block)
+        self.assertIn("errorId", block)
+        self.assertNotIn("traceback.format_exc", block)
+        self.assertNotIn("stackTail", block)
         self.assertIn("returncode", block)
 
     def test_browser_send_dm_skips_isolated_child_when_python_c_is_unavailable(self):
@@ -598,6 +1224,31 @@ class DouyinDmAutoReplyObservabilityTest(unittest.TestCase):
         self.assertEqual(safe["messages"][0]["text"], "")
         self.assertIn("targetFingerprint", safe)
         self.assertIn("textFingerprint", safe["messages"][0])
+
+    def test_central_persistence_scrubs_dm_send_payload_and_result(self):
+        central = importlib.import_module("central_server")
+        raw_state = {
+            "localBrowserTasks": {
+                "dm-1": {
+                    "id": "dm-1",
+                    "type": "douyin.dm",
+                    "payload": {
+                        "target": "https://www.douyin.com/user/private-target",
+                        "content": "private reply",
+                        "accountId": "account-one",
+                    },
+                    "result": {"ok": True, "sent": "private reply"},
+                }
+            }
+        }
+        persisted = central.compact_state_for_persist(raw_state)
+        dumped = json.dumps(persisted, ensure_ascii=False)
+        self.assertNotIn("private-target", dumped)
+        self.assertNotIn("private reply", dumped)
+        task = persisted["localBrowserTasks"]["dm-1"]
+        self.assertIn("targetFingerprint", task["payload"])
+        self.assertIn("contentFingerprint", task["payload"])
+        self.assertIn("sentFingerprint", task["result"])
 
     def test_client_dm_auto_reply_logs_include_fingerprints_and_safe_error_codes(self):
         for event in (

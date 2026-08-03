@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 from loguru import logger
 
 from builder.auth import DouyinAuth
+from dy_apis.douyin_api import DouyinDetailNetworkError
 from main import Data_Spider
 from utils.common_util import init
 from utils.data_util import MediaDownloadError, download_work, handle_work_info
@@ -52,10 +53,23 @@ from platform_adapters import (
     xhs_publish_material,
     xhs_search_notes,
 )
+from platform_features import (
+    is_xhs_platform,
+    log_platform_disabled,
+    payload_uses_xhs,
+    platform_disabled_result,
+    xhs_enabled,
+)
 
 
 APP_NAME = 'MatrixShipAgent'
 AGENT_VERSION = '1.0.0-local-agent'
+
+
+def _xhs_disabled(route="", task_type="", stage="route"):
+    result = platform_disabled_result("xhs", route=route, task_type=task_type, stage=stage)
+    log_platform_disabled(logger, "xhs", route=route, task_type=task_type, stage=stage)
+    return result
 
 
 def _default_agent_data_dir():
@@ -125,6 +139,8 @@ STATE = {
 STATE_LOCK = threading.RLock()
 CLOUD_LOGIN_SESSIONS = {}
 CLOUD_LOGIN_LOCK = threading.RLock()
+DM_INBOX_ACCOUNT_LOCKS = {}
+DM_INBOX_ACCOUNT_LOCKS_GUARD = threading.RLock()
 
 # ---- 自动化发布：素材库 / 设置 / 队列 持久化 ----
 DATA_DIR = _default_agent_data_dir()
@@ -408,6 +424,12 @@ def local_account_id(account_id):
     return account_id
 
 
+def _douyin_dm_inbox_account_lock(account_id):
+    key = local_account_id(account_id) or 'default'
+    with DM_INBOX_ACCOUNT_LOCKS_GUARD:
+        return DM_INBOX_ACCOUNT_LOCKS.setdefault(key, threading.RLock())
+
+
 def apply_account_display_meta(row):
     if not isinstance(row, dict):
         return row
@@ -582,13 +604,25 @@ def remove_xhs_account(account_id='xhs-self', delete_files=False):
     if account_id not in ('xhs-self', 'xiaohongshu-self', 'rednote-self'):
         return {'ok': False, 'error': 'unsupported_xhs_account'}
     profile_dir = os.path.abspath(os.getenv('XHS_PROFILE_DIR', os.path.join(DATA_DIR, 'xhs_profile')))
-    _save_json(os.path.join(DATA_DIR, 'xhs_auth_state.json'), {
-        'loggedIn': False,
-        'cookieCount': 0,
-        'disabled': True,
-        'removedAt': time.time(),
-        'profileDir': profile_dir,
-    })
+    auth_state_path = os.path.join(DATA_DIR, 'xhs_auth_state.json')
+    try:
+        if os.path.exists(auth_state_path):
+            os.remove(auth_state_path)
+    except Exception:
+        _save_json(auth_state_path, {
+            'loggedIn': False,
+            'cookieCount': 0,
+            'removedAt': time.time(),
+            'profileDir': profile_dir,
+        })
+    if os.path.isdir(profile_dir):
+        for root, _dirs, files in os.walk(profile_dir):
+            for name in files:
+                if name.startswith('Cookies'):
+                    try:
+                        os.remove(os.path.join(root, name))
+                    except Exception:
+                        pass
     if delete_files and os.path.isdir(profile_dir):
         shutil.rmtree(profile_dir, ignore_errors=True)
     return {'ok': True, 'removed': 1, 'id': 'xhs-self', 'platform': 'xhs'}
@@ -1061,7 +1095,7 @@ def current_accounts():
             auth = ensure_auth_from_cache()
             caps = douyin_capabilities(auth)
             douyin_cookie_ready = bool(caps.get('cookieReady'))
-        if not account_disabled('douyin-self'):
+        if douyin_cookie_ready and not account_disabled('douyin-self'):
             accounts.append(apply_account_display_meta({
                 'id': 'douyin-self',
                 'platform': 'douyin',
@@ -1078,7 +1112,7 @@ def current_accounts():
                 'capabilities': caps,
                 'profileDir': os.getenv('DY_PROFILE_DIR', os.path.join(DATA_DIR, 'dy_profile')),
             }))
-    if xhs_profile_ready(DATA_DIR):
+    if xhs_enabled() and xhs_profile_ready(DATA_DIR):
         xhs_caps = {
             'profileUnified': True,
             'ready': True,
@@ -1494,7 +1528,8 @@ def _seed_login_state_into_profile(dest, login_profile=None):
 
 
 def _resolve_douyin_dm_login_source(account_id=''):
-    requested = _safe_account_key(account_id or '') if '_safe_account_key' in globals() else str(account_id or '').strip()
+    requested = local_account_id(account_id)
+    requested = _safe_account_key(requested or '') if '_safe_account_key' in globals() else str(requested or '').strip()
     if requested and requested not in ('default', 'douyin-self'):
         candidates = [requested]
     else:
@@ -1503,6 +1538,7 @@ def _resolve_douyin_dm_login_source(account_id=''):
     seen = set()
     checks = []
     for candidate in candidates:
+        candidate = local_account_id(candidate)
         candidate = _safe_account_key(candidate or 'douyin-self') if '_safe_account_key' in globals() else (candidate or 'douyin-self')
         if candidate in seen:
             continue
@@ -1533,6 +1569,17 @@ def _resolve_douyin_dm_login_source(account_id=''):
         'needLogin': True,
         'checks': checks,
     }
+
+
+def _douyin_dm_inbox_profile_dir(account_id='', profile_base=None):
+    profile_base = os.path.abspath(
+        profile_base or os.getenv('DY_DM_PROFILE_DIR', os.path.join(DATA_DIR, 'dy_dm_profile'))
+    )
+    account_key = local_account_id(account_id)
+    account_key = _safe_account_key(account_key or '') if '_safe_account_key' in globals() else str(account_key or '').strip()
+    if not account_key or account_key in ('default', 'douyin-self'):
+        return os.path.abspath(os.getenv('DY_DM_PROFILE_CURRENT_DIR', os.path.join(profile_base, 'current')))
+    return os.path.abspath(os.path.join(profile_base, 'accounts', account_key, 'current'))
 
 
 def browser_search_videos(keyword, max_videos=5, cookie_dict=None):
@@ -1785,6 +1832,21 @@ def _douyin_dm_context_cookies(cookie_str):
     ]
 
 
+def _dm_error_id(event, exc=None, **context):
+    try:
+        safe_exc = None
+        if exc is not None:
+            try:
+                raise type(exc)(type(exc).__name__) from None
+            except Exception:
+                safe_exc = sys.exc_info()[1]
+        raw = json_log(logger, event, exc=safe_exc, **context)
+        parsed = json.loads(raw) if isinstance(raw, str) else (raw if isinstance(raw, dict) else {})
+        return str((parsed or {}).get('errorId') or '')
+    except Exception:
+        return ''
+
+
 def browser_send_dm(target, content, account_id=''):
     """用已登录浏览器给指定抖音用户发私信。
 
@@ -1830,7 +1892,7 @@ def browser_send_dm(target, content, account_id=''):
         child_env['DY_DM_CONTENT_B64'] = base64.b64encode(content.encode('utf-8')).decode('ascii')
         child_env['DY_DM_ACCOUNT_ID'] = str(login_source.get('accountId') or account_id or '')
         child_code = r"""
-import base64, json, os, sys, traceback
+import base64, json, os, sys
 try:
     os.chdir(r'__BACKEND_DIR__')
     sys.path.insert(0, r'__BACKEND_DIR__')
@@ -1840,12 +1902,20 @@ try:
     a = os.environ.get('DY_DM_ACCOUNT_ID', '')
     res = api_server.browser_send_dm(t, c, a)
 except Exception as e:
+    error_id = ''
+    try:
+        error_id = api_server._dm_error_id(
+            'douyin_dm_child_inner_exception',
+            exc=e,
+            accountId=a if 'a' in locals() else '',
+        )
+    except Exception:
+        pass
     res = {
         'ok': False,
         'error': 'dm_child_inner_exception',
         'exceptionType': type(e).__name__,
-        'message': str(e)[:300],
-        'stackTail': traceback.format_exc()[-1200:],
+        'errorId': error_id,
     }
 print('__MATRIX_DM_JSON__' + json.dumps(res, ensure_ascii=False))
 """.replace('__BACKEND_DIR__', os.path.dirname(os.path.abspath(__file__)).replace('\\', '\\\\'))
@@ -1860,14 +1930,27 @@ print('__MATRIX_DM_JSON__' + json.dumps(res, ensure_ascii=False))
             if marker in (proc.stdout or ''):
                 payload = (proc.stdout or '').rsplit(marker, 1)[1].strip().splitlines()[0]
                 return json.loads(payload)
+            error_id = _dm_error_id(
+                'douyin_dm_child_no_json_marker',
+                accountId=login_source.get('accountId') or account_id or '',
+                returncode=proc.returncode,
+                stdoutSize=len(proc.stdout or ''),
+                stderrSize=len(proc.stderr or ''),
+            )
             return {'ok': False, 'error': 'dm_child_no_json_marker',
                     'returncode': proc.returncode,
-                    'stderr': (proc.stderr or '')[-800:],
-                    'stdout': (proc.stdout or '')[-400:],
-                    'stderrTail': (proc.stderr or '')[-1600:],
-                    'stdoutTail': (proc.stdout or '')[-1200:]}
+                    'errorId': error_id}
         except Exception as e:
-            return {'ok': False, 'error': 'dm_child_exception:' + str(e)}
+            return {
+                'ok': False,
+                'error': 'dm_child_exception',
+                'exceptionType': type(e).__name__,
+                'errorId': _dm_error_id(
+                    'douyin_dm_child_exception',
+                    exc=e,
+                    accountId=login_source.get('accountId') or account_id or '',
+                ),
+            }
 
     edge_exe = os.getenv('DY_EDGE_PATH', r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
     profile_base = os.path.abspath(os.getenv('DY_DM_PROFILE_DIR', os.path.join(DATA_DIR, 'dy_dm_profile')))
@@ -2849,6 +2932,19 @@ def _normalize_dm_inbox_message(raw, index=0):
 
 
 def browser_read_dm_inbox(target, limit=10, since_fingerprint="", account_id=''):
+    login_source = _resolve_douyin_dm_login_source(account_id)
+    profile_lock = _douyin_dm_inbox_account_lock(login_source.get('accountId') or account_id or '')
+    with profile_lock:
+        return _browser_read_dm_inbox_locked(
+            target,
+            limit=limit,
+            since_fingerprint=since_fingerprint,
+            account_id=account_id,
+            login_source=login_source,
+        )
+
+
+def _browser_read_dm_inbox_locked(target, limit=10, since_fingerprint="", account_id='', login_source=None):
     target = (target or "").strip()
     if not target:
         return {"ok": False, "error": "missing_target"}
@@ -2862,7 +2958,7 @@ def browser_read_dm_inbox(target, limit=10, since_fingerprint="", account_id='')
         profile_url = "https://www.douyin.com/user/" + target
     else:
         return {"ok": False, "error": "numeric_uid_unsupported_in_browser_dm"}
-    login_source = _resolve_douyin_dm_login_source(account_id)
+    login_source = login_source if isinstance(login_source, dict) else _resolve_douyin_dm_login_source(account_id)
     target_fingerprint = _dm_text_fingerprint(profile_url)
     json_log(
         logger,
@@ -2885,6 +2981,9 @@ def browser_read_dm_inbox(target, limit=10, since_fingerprint="", account_id='')
             ok=bool(payload.get("ok")),
             messageCount=len(payload.get("messages") or []),
             nonTextCount=payload.get("nonTextCount") or 0,
+            panelOpened=bool((payload.get("dmPanelDiagnostics") or {}).get("panelOpened")),
+            textBubbleCount=(payload.get("dmPanelDiagnostics") or {}).get("textBubbleCount") or 0,
+            unknownDirectionCount=(payload.get("dmPanelDiagnostics") or {}).get("unknownDirectionCount") or 0,
             error=payload.get("error") or "",
         )
         return payload
@@ -2902,7 +3001,8 @@ def browser_read_dm_inbox(target, limit=10, since_fingerprint="", account_id='')
             'accountId': login_source.get('accountId') or account_id or '',
         })
 
-    if os.getenv("DY_DM_INBOX_CHILD", "").strip() != "1" and os.getenv("DY_DM_ISOLATED", "1").strip().lower() not in ("0", "false", "no", "off"):
+    child_cmd = _python_c_child_cmd()
+    if os.getenv("DY_DM_INBOX_CHILD", "").strip() != "1" and os.getenv("DY_DM_ISOLATED", "1").strip().lower() not in ("0", "false", "no", "off") and child_cmd is not None:
         child_env = os.environ.copy()
         child_env["DY_DM_INBOX_CHILD"] = "1"
         child_env.setdefault("MATRIX_AGENT_DATA_DIR", DATA_DIR)
@@ -2925,7 +3025,7 @@ print('__MATRIX_DM_INBOX_JSON__' + json.dumps(res, ensure_ascii=False))
 """.replace("__BACKEND_DIR__", os.path.dirname(os.path.abspath(__file__)).replace("\\", "\\\\"))
         try:
             proc = subprocess.run(
-                [sys.executable, "-c", child_code],
+                child_cmd + [child_code],
                 cwd=os.path.dirname(os.path.abspath(__file__)),
                 env=child_env,
                 capture_output=True,
@@ -2936,21 +3036,39 @@ print('__MATRIX_DM_INBOX_JSON__' + json.dumps(res, ensure_ascii=False))
             if marker in (proc.stdout or ""):
                 payload = (proc.stdout or "").rsplit(marker, 1)[1].strip().splitlines()[0]
                 return _finish(json.loads(payload))
+            error_id = _dm_error_id(
+                'douyin_dm_inbox_child_failed',
+                accountId=login_source.get('accountId') or account_id or '',
+                targetFingerprint=target_fingerprint,
+                returncode=proc.returncode,
+                stdoutSize=len(proc.stdout or ''),
+                stderrSize=len(proc.stderr or ''),
+            )
             return _finish({
                 "ok": False,
                 "error": "dm_inbox_child_failed",
-                "stderr": (proc.stderr or "")[-800:],
-                "stdout": (proc.stdout or "")[-400:],
+                "returncode": proc.returncode,
+                "errorId": error_id,
             })
         except Exception as exc:
-            return _finish({"ok": False, "error": "dm_inbox_child_exception", "detail": str(exc)})
+            return _finish({
+                "ok": False,
+                "error": "dm_inbox_child_exception",
+                "exceptionType": type(exc).__name__,
+                "errorId": _dm_error_id(
+                    'douyin_dm_inbox_child_exception',
+                    exc=exc,
+                    accountId=login_source.get('accountId') or account_id or '',
+                    targetFingerprint=target_fingerprint,
+                ),
+            })
 
     from playwright.sync_api import sync_playwright
 
     edge_exe = os.getenv("DY_EDGE_PATH", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
     profile_base = os.path.abspath(os.getenv("DY_DM_PROFILE_DIR", os.path.join(DATA_DIR, "dy_dm_profile")))
     os.makedirs(profile_base, exist_ok=True)
-    profile_dir = os.path.abspath(os.getenv("DY_DM_PROFILE_CURRENT_DIR", os.path.join(profile_base, "current")))
+    profile_dir = _douyin_dm_inbox_profile_dir(login_source.get('accountId') or account_id or '', profile_base)
     os.makedirs(profile_dir, exist_ok=True)
     seeded_login = _seed_login_state_into_profile(profile_dir, login_source.get('profileDir'))
     if not seeded_login:
@@ -3009,14 +3127,12 @@ print('__MATRIX_DM_INBOX_JSON__' + json.dumps(res, ensure_ascii=False))
                     result['dmCookieInjection']['addedCount'] = len(dm_context_cookies)
                 except Exception as exc:
                     result['dmCookieInjection']['error'] = type(exc).__name__
-                    json_log(
-                        logger,
+                    _dm_error_id(
                         'douyin_dm_inbox_cookie_injection_failed',
-                        level='warning',
+                        exc=exc,
                         accountId=login_source.get('accountId') or account_id or '',
                         attemptedCount=len(dm_context_cookies),
                         exceptionType=type(exc).__name__,
-                        message=str(exc)[:180],
                     )
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.goto(profile_url, wait_until="domcontentloaded", timeout=45000)
@@ -3038,15 +3154,99 @@ print('__MATRIX_DM_INBOX_JSON__' + json.dumps(res, ensure_ascii=False))
                 return _finish(result)
             btn.click()
             page.wait_for_timeout(4000)
-            raw_messages = page.evaluate("""(limit) => {
-                const nodes = Array.from(document.querySelectorAll('[class*="message"], [class*="Message"], [data-e2e*="message"], div[role="listitem"]')).slice(-Math.max(limit * 4, 20));
+            inbox_read = page.evaluate("""(limit) => {
+                const compact = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                const visible = el => {
+                    const r = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return r.width > 4 && r.height > 4 && r.bottom > 0 && r.right > 0 &&
+                        style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const labelOf = el => compact([
+                    el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.getAttribute('title'),
+                    el.innerText, el.textContent
+                ].join(' '));
+                const vw = window.innerWidth || 1280;
+                const vh = window.innerHeight || 900;
+                const editorCandidates = [];
+                for (const el of Array.from(document.querySelectorAll('textarea,input,[contenteditable],[role="textbox"],div,span'))) {
+                    if (!visible(el)) continue;
+                    const r = el.getBoundingClientRect();
+                    const text = labelOf(el);
+                    const tag = el.tagName;
+                    const editable = el.isContentEditable || el.getAttribute('contenteditable') === 'true' ||
+                        el.getAttribute('contenteditable') === 'plaintext-only' || tag === 'TEXTAREA' ||
+                        tag === 'INPUT' || el.getAttribute('role') === 'textbox';
+                    if (!editable && !/发送消息/.test(text)) continue;
+                    if (r.top < vh * 0.45 || r.left < vw * 0.35 || r.width < 120 || r.height < 16) continue;
+                    const className = String(el.className || '');
+                    let score = 0;
+                    if (/发送消息/.test(text)) score += 220;
+                    if (editable) score += 120;
+                    if (el.isContentEditable) score += 90;
+                    if (el.getAttribute('role') === 'textbox') score += 70;
+                    if (className.includes('DraftEditor') || className.includes('public-DraftEditor')) score += 60;
+                    if (r.top > vh * 0.65) score += 50;
+                    if (r.width > 180) score += 35;
+                    editorCandidates.push({el, score, tag, text:text.slice(0, 48), r});
+                }
+                editorCandidates.sort((a, b) => b.score - a.score);
+                const editor = editorCandidates.length ? editorCandidates[0].el : null;
+                const safeEditor = row => ({
+                    score: row.score,
+                    tag: row.tag,
+                    text: row.text,
+                    x: Math.round(row.r.left), y: Math.round(row.r.top),
+                    width: Math.round(row.r.width), height: Math.round(row.r.height),
+                });
+                const editorRect = editor ? editor.getBoundingClientRect() : null;
+                const panelRect = editorRect ? {
+                    left: Math.max(0, editorRect.left - 16),
+                    right: Math.min(window.innerWidth, editorRect.right + 16),
+                    top: 72,
+                    bottom: Math.min(window.innerHeight, editorRect.bottom + 16),
+                    width: editorRect.width + 32,
+                    height: Math.max(0, editorRect.bottom - 56),
+                } : null;
+                const diagnostics = {
+                    panelOpened: !!panelRect,
+                    textBubbleCount: 0,
+                    customerTextCount: 0,
+                    meTextCount: 0,
+                    unknownDirectionCount: 0,
+                    editorCandidateCount: editorCandidates.length,
+                    editorCandidates: editorCandidates.slice(0, 5).map(safeEditor),
+                };
+                if (!panelRect) return {messages: [], diagnostics};
+                const panelCenterX = panelRect.left + panelRect.width / 2;
+                diagnostics.panelCenterX = Math.round(panelCenterX);
+                const upperBound = editorRect ? editorRect.top - 8 : panelRect.bottom - 32;
+                const ignored = new Set(['发送消息', '收起会话', '搜索', '私信']);
+                const messageActionLabels = new Set(['点赞', '回复', '删除', '复制', '撤回', '转发', '举报']);
+                const stripMessageActions = value => {
+                    const parts = compact(value).split(' ').filter(Boolean);
+                    while (parts.length && messageActionLabels.has(parts[parts.length - 1])) parts.pop();
+                    return parts.join(' ');
+                };
+                // 抖音会把消息正文和底部编辑器放在同一会话列的兄弟节点；不能只扫描编辑器父节点。
+                const nodes = Array.from(document.querySelectorAll('div,span,p')).filter(el => {
+                    if (!visible(el)) return false;
+                    const text = compact(el.innerText || el.textContent);
+                    if (!text || text.length > 100 || ignored.has(text) || messageActionLabels.has(text)) return false;
+                    const hasSameTextChild = Array.from(el.children).some(child => compact(child.innerText || child.textContent) === text);
+                    if (hasSameTextChild) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.top >= panelRect.top + 55 && r.bottom <= upperBound &&
+                        r.left >= panelRect.left + 12 && r.right <= panelRect.right - 12 &&
+                        r.width <= Math.max(420, panelRect.width * 0.55) && r.height <= 180;
+                }).slice(-Math.max(limit * 8, 40));
                 const seen = new Map();
-                return nodes.map((node, index) => {
-                    const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                const messages = nodes.map((node, index) => {
+                    const text = stripMessageActions(node.innerText || node.textContent);
                     const html = (node.innerHTML || '').toLowerCase();
                     let kind = 'text';
                     if (!text) kind = 'unknown';
-                    if (html.includes('img') || html.includes('image')) kind = 'image';
+                    if (!text && (html.includes('img') || html.includes('image'))) kind = 'image';
                     if (html.includes('voice') || text.includes('[语音]')) kind = 'voice';
                     if (html.includes('video') || text.includes('[视频]')) kind = 'video';
                     if (html.includes('emoji') || text === '[表情]') kind = 'emoji';
@@ -3058,16 +3258,36 @@ print('__MATRIX_DM_INBOX_JSON__' + json.dumps(res, ensure_ascii=False))
                     } else if (cls.includes('left') || cls.includes('other') || cls.includes('customer') || cls.includes('friend')) {
                         direction = 'customer';
                     }
+                    const bubbleRect = node.getBoundingClientRect();
+                    const bubbleCenterX = bubbleRect.left + bubbleRect.width / 2;
+                    if (direction === 'unknown' && Math.abs(bubbleCenterX - panelCenterX) > 20) {
+                        direction = bubbleCenterX < panelCenterX ? 'customer' : 'me';
+                    }
+                    if (kind === 'text') {
+                        diagnostics.textBubbleCount += 1;
+                        if (direction === 'customer') diagnostics.customerTextCount += 1;
+                        else if (direction === 'me') diagnostics.meTextCount += 1;
+                        else diagnostics.unknownDirectionCount += 1;
+                    }
                     const duplicateKey = [direction, kind, text].join('|');
                     const ordinal = seen.get(duplicateKey) || 0;
                     seen.set(duplicateKey, ordinal + 1);
                     return { direction, kind, text, createdAtText: '', ordinal, index };
                 }).filter(x => x.text || x.kind !== 'text').slice(-limit);
+                return {messages, diagnostics};
             }""", limit)
+            inbox_read = inbox_read if isinstance(inbox_read, dict) else {}
+            result["dmPanelDiagnostics"] = inbox_read.get("diagnostics") if isinstance(inbox_read.get("diagnostics"), dict) else {}
+            if not result["dmPanelDiagnostics"].get("panelOpened"):
+                result["error"] = "dm_inbox_panel_not_open"
+                return _finish(result)
+            raw_messages = inbox_read.get("messages") or []
             messages = [_normalize_dm_inbox_message(x, i) for i, x in enumerate(raw_messages or [])]
             if not messages:
-                result["error"] = "dm_inbox_messages_not_found"
+                result["ok"] = True
+                result["messages"] = []
                 result["empty"] = True
+                result.pop("error", None)
                 return _finish(result)
             if since_fingerprint:
                 seen = False
@@ -3476,6 +3696,32 @@ def download_douyin_work_with_refresh(auth, url, save_choice='all'):
     raise MediaDownloadError('download_http_403')
 
 
+def _douyin_detail_error_log(account_id, exc):
+    aweme_fingerprint = hashlib.sha256(
+        str(getattr(exc, 'aweme_id', '') or '').encode('utf-8')
+    ).hexdigest()[:12]
+    try:
+        raise RuntimeError(
+            'douyin_detail_network_failed:' + str(getattr(exc, 'cause_type', 'network_error'))
+        ) from None
+    except RuntimeError as safe_exc:
+        raw_log = json_log(
+            logger,
+            'douyin_detail_network_failed',
+            exc=safe_exc,
+            accountId=account_id,
+            host='www.douyin.com',
+            awemeFingerprint=aweme_fingerprint,
+            attempt=int(getattr(exc, 'attempts', 0) or 0),
+            maxAttempts=4,
+            causeType=str(getattr(exc, 'cause_type', 'network_error')),
+            connectTimeoutSec=8,
+            readTimeoutSec=15,
+            retryDelaysSec=[1, 2, 4],
+        )
+    return str((json.loads(raw_log) or {}).get('errorId') or '')
+
+
 def discover_leads_by_keyword(auth, keyword, video_num=5, comment_mode='page'):
     """自动寻客：产品词 -> 搜索相关视频 -> 抓评论 -> 识别意向客户。"""
     keyword = (keyword or '').strip()
@@ -3605,6 +3851,8 @@ def discover_leads_by_keyword(auth, keyword, video_num=5, comment_mode='page'):
 
 def discover_leads_by_keyword_platform(platform, auth, keyword, video_num=5, comment_mode='page', guest_mode=True):
     platform = platform_code(platform)
+    if platform == 'xhs' and not xhs_enabled():
+        return _xhs_disabled(route="/api/finder/discover", task_type="xhs.discover", stage="service")
     if platform == 'xhs':
         return discover_xhs_leads_by_keyword(
             keyword,
@@ -3834,22 +4082,318 @@ def save_comment_risk_state(data):
     _save_json(COMMENT_RISK_JSON, data)
 
 
-def comment_risk_cooldown_left():
+DOUYIN_COMMENT_ERROR_MESSAGES = {
+    'douyin_daily_comment_limit': '今日评论已达上限，请明天再操作。',
+    'douyin_comment_cooldown': '评论太频繁，请等待冷却结束后再试。',
+    'douyin_comment_risk_cooldown': '抖音账号处于评论风险冷却中，请等待冷却结束后再试。',
+    'douyin_comment_risk_paused': '抖音账号处于评论风险暂停中，请先人工处理平台提示后再恢复。',
+    'comment_verification_required': '平台要求安全验证，请在打开的浏览器中完成验证后重试。',
+    'comment_login_required': '抖音账号登录态失效，请到账号矩阵重新登录后重试。',
+    'comment_input_not_ready': '未检测到可用的抖音评论输入框，请确认该账号可以评论后重试。',
+    'preflight_blocked': '抖音评论前检查未通过，请先处理平台提示后重试。',
+}
+
+
+def douyin_comment_error_message(error, safety=None):
+    error = str(error or '').strip()
+    safety = safety if isinstance(safety, dict) else {}
+    message = DOUYIN_COMMENT_ERROR_MESSAGES.get(error, '')
+    if error in ('douyin_comment_cooldown', 'douyin_comment_risk_cooldown'):
+        try:
+            left = int(safety.get('cooldownLeft') or safety.get('riskCooldownLeft') or 0)
+        except Exception:
+            left = 0
+        if left > 0:
+            return message.replace('冷却结束', '%d秒' % left)
+    return message
+
+
+def with_douyin_comment_user_message(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    msg = douyin_comment_error_message(payload.get('error'), payload.get('safety'))
+    if msg:
+        payload.setdefault('message', msg)
+        payload.setdefault('userMessage', msg)
+    return payload
+
+
+def _douyin_comment_day(now=None):
+    return time.strftime('%Y-%m-%d', time.localtime(time.time() if now is None else float(now)))
+
+
+def comment_risk_cooldown_left(account_id=''):
     st = load_comment_risk_state()
-    until = float(st.get('cooldownUntil') or 0)
-    left = int(max(0, until - time.time()))
+    snap = _douyin_comment_snapshot(account_id, state=st)
+    left = int(snap.get('riskCooldownLeft') or 0)
     return left, st
 
 
-def mark_comment_risk(reason, resp=None, cooldown_sec=None):
+def _douyin_comment_account_id(account_id=''):
+    raw = str(account_id or '').strip()
+    return raw or 'douyin-self'
+
+
+def _douyin_comment_account_state(state, account_id, create=False):
+    state = state if isinstance(state, dict) else {}
+    accounts = state.get('accounts')
+    if not isinstance(accounts, dict):
+        if not create:
+            return {}
+        accounts = {}
+        state['accounts'] = accounts
+    account_id = _douyin_comment_account_id(account_id)
+    usage = accounts.get(account_id)
+    if not isinstance(usage, dict):
+        if not create:
+            return {}
+        usage = {}
+        accounts[account_id] = usage
+    return usage
+
+
+def _douyin_comment_usage(state, account_id, now=None):
+    usage = _douyin_comment_account_state(state, account_id, create=True)
+    day = _douyin_comment_day(now)
+    if usage.get('day') != day:
+        keep = {
+            'lastCommentAt': usage.get('lastCommentAt') or 0,
+            'cooldownUntil': usage.get('cooldownUntil') or 0,
+            'pausedUntil': usage.get('pausedUntil') or 0,
+            'paused': bool(usage.get('paused')),
+            'pausedReason': usage.get('pausedReason') or '',
+            'pausedAt': usage.get('pausedAt') or 0,
+            'lastRiskReason': usage.get('lastRiskReason') or '',
+            'lastRiskAt': usage.get('lastRiskAt') or 0,
+        }
+        usage.clear()
+        usage.update({'day': day, 'commentCount': 0})
+        for key, value in keep.items():
+            if value:
+                usage[key] = value
+    usage.setdefault('day', day)
+    usage.setdefault('commentCount', 0)
+    usage.setdefault('lastCommentAt', 0)
+    usage.setdefault('lastActionAt', 0)
+    usage.setdefault('lastAction', '')
+    usage.setdefault('cooldownUntil', 0)
+    usage.setdefault('pausedUntil', 0)
+    usage.setdefault('paused', False)
+    usage.setdefault('pausedReason', '')
+    usage.setdefault('lastRiskReason', '')
+    return usage
+
+
+def _douyin_comment_last_at(state, account_id):
+    account_id = _douyin_comment_account_id(account_id)
+    usage = _douyin_comment_account_state(state, account_id)
+    value = usage.get('lastCommentAt')
+    if not value and _douyin_comment_account_id(state.get('lastCommentAccountId')) == account_id:
+        value = state.get('lastCommentAt')
+    try:
+        return float(value or 0)
+    except Exception:
+        return 0
+
+
+def _douyin_comment_float(value, default=0):
+    try:
+        return float(value or default)
+    except Exception:
+        return float(default)
+
+
+def _douyin_comment_global_risk_applies(state, account_id):
+    state = state if isinstance(state, dict) else {}
+    account_id = _douyin_comment_account_id(account_id)
+    risk_account = str(state.get('lastRiskAccountId') or '').strip()
+    if risk_account:
+        return _douyin_comment_account_id(risk_account) == account_id
+    return account_id == 'douyin-self'
+
+
+def _douyin_comment_snapshot(account_id, usage=None, cfg=None, state=None, now=None):
+    cfg = cfg or load_risk_config()
+    state = state if isinstance(state, dict) else load_comment_risk_state()
+    account_id = _douyin_comment_account_id(account_id)
+    usage = usage if isinstance(usage, dict) else _douyin_comment_usage(state, account_id, now=now)
+    current = time.time() if now is None else float(now)
+    last = _douyin_comment_last_at(state, account_id)
+    interval = int(cfg.get('minInterval') or 0)
+    action_left = max(0, int(interval - (current - last))) if last and interval else 0
+    global_risk_applies = _douyin_comment_global_risk_applies(state, account_id)
+    global_until = _douyin_comment_float(state.get('cooldownUntil')) if global_risk_applies else 0
+    account_until = max(
+        _douyin_comment_float(usage.get('cooldownUntil')),
+        _douyin_comment_float(usage.get('pausedUntil')),
+    )
+    risk_left = max(0, int(max(global_until, account_until) - current))
+    return {
+        'platform': 'douyin',
+        'accountId': account_id,
+        'day': usage.get('day') or _douyin_comment_day(now),
+        'dailyComment': int(cfg.get('dailyComment') or 0),
+        'commentCount': int(usage.get('commentCount') or 0),
+        'minInterval': interval,
+        'lastCommentAt': last,
+        'lastActionAt': _douyin_comment_float(usage.get('lastActionAt')),
+        'lastAction': usage.get('lastAction') or '',
+        'cooldownLeft': max(action_left, risk_left),
+        'minIntervalCooldownLeft': action_left,
+        'riskCooldownLeft': risk_left,
+        'cooldownUntil': max(global_until, account_until),
+        'paused': bool(usage.get('paused')) and risk_left > 0,
+        'pausedReason': str(usage.get('pausedReason') or ''),
+        'pausedUntil': _douyin_comment_float(usage.get('pausedUntil')),
+        'lastRiskReason': str(usage.get('lastRiskReason') or (state.get('lastReason') if global_risk_applies else '') or ''),
+        'lastRiskAt': _douyin_comment_float(usage.get('lastRiskAt') or (state.get('lastAt') if global_risk_applies else 0)),
+    }
+
+
+def _douyin_comment_block(error, status, snapshot, state):
+    state = state if isinstance(state, dict) else {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    account_id = _douyin_comment_account_id(snapshot.get('accountId') or '')
+    ts = time.time()
+    usage = _douyin_comment_usage(state, account_id, now=ts)
+    usage.update({
+        'lastBlockedAt': ts,
+        'lastBlockedReason': error,
+        'lastBlockedStatus': status,
+        'lastActionAt': ts,
+        'lastAction': status,
+    })
+    state['lastBlockedAt'] = ts
+    state['lastBlockedReason'] = error
+    state['lastBlockedAccountId'] = account_id
+    state['updatedAt'] = ts
+    try:
+        save_comment_risk_state(state)
+    except Exception:
+        pass
+    out = {
+        'ok': False,
+        'blocked': True,
+        'skipped': True,
+        'error': error,
+        'status': status,
+        'cooldownLeft': int(snapshot.get('cooldownLeft') or 0),
+        'riskState': state,
+        'safety': snapshot,
+    }
+    return with_douyin_comment_user_message(out)
+
+
+def douyin_comment_min_interval_left(account_id='', now=None):
+    state = load_comment_risk_state()
+    cfg = load_risk_config()
+    usage = _douyin_comment_usage(state, account_id, now=now)
+    snapshot = _douyin_comment_snapshot(account_id, usage=usage, cfg=cfg, state=state, now=now)
+    left = int(snapshot.get('minIntervalCooldownLeft') or 0)
+    return left, state, snapshot
+
+
+def douyin_comment_safety_preflight(account_id='', now=None, dry_run=False):
+    if dry_run:
+        return {'ok': True, 'safety': {'dryRun': True}}
+    cfg = load_risk_config()
+    state = load_comment_risk_state()
+    usage = _douyin_comment_usage(state, account_id, now=now)
+    snapshot = _douyin_comment_snapshot(account_id, usage=usage, cfg=cfg, state=state, now=now)
+    if snapshot.get('riskCooldownLeft', 0) > 0:
+        return _douyin_comment_block('douyin_comment_risk_cooldown', 'risk_cooldown', snapshot, state)
+    if usage.get('paused') and not snapshot.get('pausedUntil'):
+        return _douyin_comment_block('douyin_comment_risk_paused', 'risk_paused', snapshot, state)
+    if int(cfg.get('dailyComment') or 0) and int(usage.get('commentCount') or 0) >= int(cfg.get('dailyComment') or 0):
+        return _douyin_comment_block('douyin_daily_comment_limit', 'daily_limit', snapshot, state)
+    if snapshot.get('minIntervalCooldownLeft', 0) > 0:
+        return _douyin_comment_block('douyin_comment_cooldown', 'comment_cooldown', snapshot, state)
+    return {'ok': True, 'safety': snapshot}
+
+
+def douyin_comment_min_interval_preflight(account_id='', now=None, dry_run=False):
+    return douyin_comment_safety_preflight(account_id, now=now, dry_run=dry_run)
+
+
+def record_douyin_comment_success(account_id, result, now=None, dry_run=False):
+    if dry_run or not isinstance(result, dict):
+        return {'ok': True, 'safety': {'dryRun': bool(dry_run)}}
+    if not (result.get('ok') or comment_publish_ok(result)):
+        return {'ok': True, 'safety': {}}
+    account_id = _douyin_comment_account_id(account_id)
+    ts = time.time() if now is None else float(now)
+    state = load_comment_risk_state()
+    usage = _douyin_comment_usage(state, account_id, now=ts)
+    usage['lastCommentAt'] = ts
+    usage['lastActionAt'] = ts
+    usage['lastAction'] = 'comment'
+    usage['commentCount'] = int(usage.get('commentCount') or 0) + 1
+    state['lastCommentAt'] = ts
+    state['lastCommentAccountId'] = account_id
+    state['updatedAt'] = ts
+    try:
+        save_comment_risk_state(state)
+    except Exception:
+        pass
+    return {'ok': True, 'safety': _douyin_comment_snapshot(account_id, usage=usage, state=state, now=ts)}
+
+
+def _redact_douyin_comment_text(value):
+    text = compact_text(value, 180)
+    return re.sub(r'https?://\S+', lambda m: '[url:%s]' % _dm_text_fingerprint(m.group(0)), text)
+
+
+def redact_douyin_comment_response(resp):
+    if not isinstance(resp, dict):
+        return {
+            'type': type(resp).__name__,
+            'fingerprint': _dm_text_fingerprint(resp),
+        }
+    keep = {
+        'ok', 'reason', 'error', 'status', 'status_code', 'statusCode', 'code',
+        'status_msg', 'statusMsg', 'message', 'msg', 'channel', 'hasVerification',
+        'hasLoginHint', 'hasVisibleCommentInput', 'loginButtonCount', 'hasUser',
+        'usingCloudSession', 'createdSession',
+    }
+    url_keys = {'url', 'final_url', 'finalUrl', 'target', 'workUrl', 'href'}
+    text_keys = {'text', 'body', 'html', 'content'}
+    safe = {}
+    for key, value in resp.items():
+        key_text = str(key)
+        if key_text in keep:
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                safe[key_text] = _redact_douyin_comment_text(value) if isinstance(value, str) else value
+        elif key_text in url_keys and value:
+            safe[key_text + 'Fingerprint'] = _dm_text_fingerprint(value)
+        elif key_text in text_keys and value:
+            safe[key_text + 'Fingerprint'] = _dm_text_fingerprint(value)
+            safe[key_text + 'Length'] = len(str(value))
+    return safe
+
+
+def mark_comment_risk(reason, resp=None, cooldown_sec=None, account_id=''):
     if cooldown_sec is None:
         cooldown_sec = int(os.getenv('DY_COMMENT_RISK_COOLDOWN', '1800') or 1800)
+    ts = time.time()
+    cooldown_until = ts + max(60, cooldown_sec)
+    account_id = _douyin_comment_account_id(account_id)
     st = load_comment_risk_state()
+    usage = _douyin_comment_usage(st, account_id, now=ts)
+    paused_reason = '抖音评论风险暂停:%s' % str(reason or 'platform_risk')
+    usage.update({
+        'lastRiskReason': reason,
+        'lastRiskAt': ts,
+        'paused': True,
+        'pausedReason': paused_reason,
+        'pausedAt': ts,
+        'pausedUntil': cooldown_until,
+        'cooldownUntil': cooldown_until,
+    })
     st.update({
         'lastReason': reason,
-        'lastAt': time.time(),
-        'cooldownUntil': time.time() + max(60, cooldown_sec),
-        'lastResponse': resp or {},
+        'lastAt': ts,
+        'cooldownUntil': cooldown_until,
+        'lastResponse': redact_douyin_comment_response(resp),
+        'lastRiskAccountId': account_id,
     })
     try:
         save_comment_risk_state(st)
@@ -3867,7 +4411,7 @@ def is_comment_risk_response(resp):
     return str(code) in ('8', '9', '10000', '10001') or any(x in msg for x in ('\u98ce\u63a7', '\u9a8c\u8bc1', '\u767b\u5f55', '\u9891\u7e41'))
 
 
-def browser_comment_preflight(aweme_id, auth=None, timeout_sec=18):
+def browser_comment_preflight(aweme_id, auth=None, timeout_sec=18, account_id=''):
     """Use the persisted browser profile as a low-risk gate before writing comments.
 
     If the visible platform UI is not in an interactive-login state, direct publish is
@@ -3877,8 +4421,9 @@ def browser_comment_preflight(aweme_id, auth=None, timeout_sec=18):
     # Chromium profile. Do not launch a second persistent context for preflight;
     # that can block on "Opening in existing browser session". The actual cloud
     # UI fallback will still detect verification/login pages before sending.
+    account_id = _douyin_comment_account_id(account_id)
     try:
-        sid, sess = find_cloud_session_for_account('douyin-self')
+        sid, sess = find_cloud_session_for_account(account_id)
         if sess and not getattr(sess, 'closed', False):
             st = sess.status()
             if st.get('loggedIn'):
@@ -3981,20 +4526,21 @@ def should_edge_ui_fallback(resp=None, preflight=None):
 COMMENT_UI_LOCK = threading.RLock()
 
 
-def publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id='', payload=None, reason='cloud_ui'):
+def publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id='', payload=None, reason='cloud_ui', account_id=''):
     if os.getenv('DY_COMMENT_CLOUD_UI_FALLBACK', '1').strip().lower() in ('0', 'false', 'no', 'off'):
         return {'request': payload or {}, 'ok': False, 'status': 'cloud_ui_disabled', 'channel': 'cloud-ui'}
     aweme_id = extract_aweme_id(aweme_id)
     content = compact_text(content or '', 160)
     if not aweme_id or not content:
         return {'request': payload or {}, 'ok': False, 'status': 'invalid_target', 'channel': 'cloud-ui'}
+    account_id = _douyin_comment_account_id(account_id or ((payload or {}).get('accountId') if isinstance(payload, dict) else ''))
     with COMMENT_UI_LOCK:
-        sid, sess = find_cloud_session_for_account('douyin-self')
+        sid, sess = find_cloud_session_for_account(account_id)
         created = False
         if not sess:
             sid = uuid.uuid4().hex
-            release_chromium_profile_if_stale(_cloud_profile_dir('douyin-self'))
-            sess = CloudLoginSession(sid, account_id='douyin-self', login_url='https://www.douyin.com/video/' + str(aweme_id))
+            release_chromium_profile_if_stale(_cloud_profile_dir(account_id))
+            sess = CloudLoginSession(sid, account_id=account_id, login_url='https://www.douyin.com/video/' + str(aweme_id))
             with CLOUD_LOGIN_LOCK:
                 CLOUD_LOGIN_SESSIONS[sid] = sess
             try:
@@ -4031,7 +4577,7 @@ def publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id='', payload=N
         verify = {'ok': False, 'skipped': True, 'reason': 'ui_not_clicked'}
         if ui.get('ok') or ui.get('clicked'):
             try:
-                verify_auth = auth or ensure_auth_from_cache()
+                verify_auth = auth or ensure_auth_from_cache(account_id)
                 verify = verify_comment_visible(verify_auth, aweme_id, content, timeout_sec=int(os.getenv('DY_COMMENT_VERIFY_TIMEOUT', '14') or 14))
             except Exception as e:
                 verify = {'ok': False, 'reason': 'readback_exception', 'error': str(e)}
@@ -4043,6 +4589,7 @@ def publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id='', payload=N
             'ok': ok,
             'status': 'sent_verified' if ok else 'cloud_ui_failed',
             'channel': 'cloud-ui',
+            'accountId': account_id,
             'sessionId': sid,
             'createdSession': created,
             'verifiedBy': 'comment_readback' if verify.get('ok') else ('cloud_browser_dom' if ui.get('domVerified') else ''),
@@ -4050,8 +4597,8 @@ def publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id='', payload=N
         }
 
 
-def publish_comment_via_edge_ui(aweme_id, content, reply_id='', payload=None, reason='edge_ui', auth=None):
-    cloud = publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id=reply_id, payload=payload, reason=reason)
+def publish_comment_via_edge_ui(aweme_id, content, reply_id='', payload=None, reason='edge_ui', auth=None, account_id=''):
+    cloud = publish_comment_via_cloud_ui(auth, aweme_id, content, reply_id=reply_id, payload=payload, reason=reason, account_id=account_id)
     if cloud.get('ok') or os.getenv('DY_COMMENT_EDGE_UI_ONLY', '0').strip().lower() in ('1', 'true', 'yes'):
         return cloud
     # The legacy Edge/pyautogui fallback is Windows-desktop only.  On the Linux
@@ -4080,7 +4627,7 @@ def publish_comment_via_edge_ui(aweme_id, content, reply_id='', payload=None, re
     }
 
 
-def publish_comment_to_douyin(auth, aweme_id, content, reply_id='', dry_run=False, safe_mode=True, preflight=True, force=False, channel='auto'):
+def publish_comment_to_douyin(auth, aweme_id, content, reply_id='', dry_run=False, safe_mode=True, preflight=True, force=False, channel='auto', account_id=''):
     auth = ensure_auth_security_material(auth)
     aweme_id = extract_aweme_id(aweme_id)
     content = sanitize_comment_for_risk(content) if safe_mode else compact_text(content, 160)
@@ -4090,17 +4637,22 @@ def publish_comment_to_douyin(auth, aweme_id, content, reply_id='', dry_run=Fals
         raise RuntimeError('missing_aweme_id')
     if not content:
         raise RuntimeError('missing_content')
-    payload = {'awemeId': aweme_id, 'content': content, 'replyId': reply_id, 'safeMode': bool(safe_mode), 'channel': channel}
+    account_id = _douyin_comment_account_id(account_id)
+    payload = {'awemeId': aweme_id, 'content': content, 'replyId': reply_id, 'safeMode': bool(safe_mode), 'channel': channel, 'accountId': account_id}
     if dry_run:
         return {'dryRun': True, 'ok': True, **payload}
+    gate = douyin_comment_safety_preflight(account_id, dry_run=dry_run)
+    if not gate.get('ok'):
+        return {'ok': False, 'request': payload, **gate}
     if channel in ('edge-ui', 'edge_ui', 'ui', 'browser-ui', 'browser_ui', 'cloud-ui', 'cloud_ui'):
-        return publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload=payload, reason='forced_edge_ui', auth=auth)
+        ui_res = publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload=payload, reason='forced_edge_ui', auth=auth, account_id=account_id)
+        record = record_douyin_comment_success(account_id, ui_res, dry_run=dry_run)
+        if isinstance(ui_res, dict):
+            ui_res.setdefault('safety', record.get('safety'))
+        return ui_res
     if safe_mode and not force:
-        left, st = comment_risk_cooldown_left()
-        if left > 0:
-            return {'ok': False, 'skipped': True, 'status': 'risk_cooldown', 'cooldownLeft': left, 'riskState': st, 'request': payload}
         if preflight:
-            pf = browser_comment_preflight(aweme_id, auth=auth)
+            pf = browser_comment_preflight(aweme_id, auth=auth, account_id=account_id)
             if not pf.get('ok'):
                 reason = pf.get('reason') or 'preflight_blocked'
                 mark_douyin_capability(
@@ -4111,9 +4663,13 @@ def publish_comment_to_douyin(auth, aweme_id, content, reply_id='', dry_run=Fals
                     requires_reauth=reason in ('comment_login_required', 'comment_input_not_ready', 'comment_verification_required'),
                 )
                 if channel in ('auto', '') and comment_edge_ui_fallback_enabled() and should_edge_ui_fallback(preflight=pf):
-                    return publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload={**payload, 'preflight': pf}, reason=pf.get('reason') or 'preflight', auth=auth)
-                mark_comment_risk(reason, pf, cooldown_sec=900)
-                return {'ok': False, 'skipped': True, 'status': 'preflight_blocked', 'preflight': pf, 'request': payload}
+                    ui_res = publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload={**payload, 'preflight': pf}, reason=pf.get('reason') or 'preflight', auth=auth, account_id=account_id)
+                    record = record_douyin_comment_success(account_id, ui_res, dry_run=dry_run)
+                    if isinstance(ui_res, dict):
+                        ui_res.setdefault('safety', record.get('safety'))
+                    return ui_res
+                mark_comment_risk(reason, pf, cooldown_sec=900, account_id=account_id)
+                return with_douyin_comment_user_message({'ok': False, 'skipped': True, 'status': 'preflight_blocked', 'error': reason, 'preflight': pf, 'request': payload})
             payload['preflight'] = pf
             mark_douyin_capability('commentWrite', True, 'preflight_ok', pf)
     resp = SPIDER.douyin_apis.publish_comment(auth, aweme_id, content, reply_id=reply_id)
@@ -4126,21 +4682,30 @@ def publish_comment_to_douyin(auth, aweme_id, content, reply_id='', dry_run=Fals
             out['status'] = 'sent_verified'
             out['verifiedBy'] = 'comment_readback'
     if (not out['ok']) and channel in ('auto', '') and comment_edge_ui_fallback_enabled() and should_edge_ui_fallback(resp=resp):
-        ui_out = publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload={**payload, 'apiResponse': resp}, reason='api_status_%s' % (resp.get('status_code') if isinstance(resp, dict) else 'unknown'), auth=auth)
+        ui_out = publish_comment_via_edge_ui(aweme_id, content, reply_id=reply_id, payload={**payload, 'apiResponse': resp}, reason='api_status_%s' % (resp.get('status_code') if isinstance(resp, dict) else 'unknown'), auth=auth, account_id=account_id)
         if ui_out.get('ok'):
+            record = record_douyin_comment_success(account_id, ui_out, dry_run=dry_run)
+            if isinstance(ui_out, dict):
+                ui_out.setdefault('safety', record.get('safety'))
             return ui_out
         out['edgeUiFallback'] = ui_out
-    if safe_mode and is_comment_risk_response(resp):
+    if is_comment_risk_response(resp):
         out['status'] = 'risk_blocked'
-        out['riskState'] = mark_comment_risk('publish_status_code_%s' % (resp.get('status_code') if isinstance(resp, dict) else 'unknown'), resp)
+        out['error'] = 'douyin_comment_risk_cooldown'
+        out['riskState'] = mark_comment_risk('publish_status_code_%s' % (resp.get('status_code') if isinstance(resp, dict) else 'unknown'), resp, account_id=account_id)
+        with_douyin_comment_user_message(out)
+    record = record_douyin_comment_success(account_id, out, dry_run=dry_run)
+    out.setdefault('safety', record.get('safety'))
     return out
 
 
-def publish_comment_to_platform(platform, auth, target_id, content, reply_id='', dry_run=False, safe_mode=True, preflight=True, force=False, channel='auto', target_url=''):
+def publish_comment_to_platform(platform, auth, target_id, content, reply_id='', dry_run=False, safe_mode=True, preflight=True, force=False, channel='auto', target_url='', account_id=''):
     platform = platform_code(platform)
+    if platform == 'xhs' and not xhs_enabled():
+        return _xhs_disabled(route="/api/xhs/comment/publish", task_type="xhs.comment.publish", stage="service")
     if platform == 'xhs':
         note_url = target_url or target_id
-        account_id = _xhs_safety_account_id('')
+        account_id = _xhs_safety_account_id(account_id)
         gate = xhs_safety_preflight("comment", account_id, dry_run=dry_run)
         if not gate.get("ok"):
             return {'ok': False, **gate}
@@ -4149,7 +4714,7 @@ def publish_comment_to_platform(platform, auth, target_id, content, reply_id='',
         resp.setdefault('ok', bool(resp.get('clicked') or resp.get('dryRun')))
         resp.setdefault('safety', record.get('safety'))
         return resp
-    return publish_comment_to_douyin(auth, target_id, content, reply_id=reply_id, dry_run=dry_run, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel)
+    return publish_comment_to_douyin(auth, target_id, content, reply_id=reply_id, dry_run=dry_run, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, account_id=account_id)
 
 
 def find_video_for_lead(videos, lead):
@@ -4195,8 +4760,10 @@ def build_outreach_targets(discovery, limit=5, send_mode='reply'):
     return targets
 
 
-def run_ai_outreach(auth, keyword, template='', video_num=5, limit=5, dry_run=False, send_mode='reply', interval_sec=45, safe_mode=True, preflight=True, force=False, channel='auto', platform='douyin'):
+def run_ai_outreach(auth, keyword, template='', video_num=5, limit=5, dry_run=False, send_mode='reply', interval_sec=45, safe_mode=True, preflight=True, force=False, channel='auto', platform='douyin', account_id=''):
     platform = platform_code(platform)
+    if platform == 'xhs' and not xhs_enabled():
+        return _xhs_disabled(route="/api/outreach/run", task_type="xhs.outreach", stage="service")
     discovery = discover_leads_by_keyword_platform(platform, auth, keyword, video_num, 'page')
     targets = build_outreach_targets(discovery, limit=limit, send_mode=send_mode)
     results = []
@@ -4221,21 +4788,30 @@ def run_ai_outreach(auth, keyword, template='', video_num=5, limit=5, dry_run=Fa
         }
         try:
             target_url = item.get('videoUrl') or lead.get('sourceVideoUrl') or video.get('note_url') or ''
-            resp = publish_comment_to_platform(platform, auth, item['awemeId'], content, item['replyId'], dry_run=dry_run, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, target_url=target_url)
+            resp = publish_comment_to_platform(platform, auth, item['awemeId'], content, item['replyId'], dry_run=dry_run, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, target_url=target_url, account_id=account_id)
             item['ok'] = bool(resp.get('ok', comment_publish_ok(resp)))
             item['response'] = resp
             item['status'] = 'dry_run' if dry_run else (resp.get('status') or ('sent' if item['ok'] else 'failed'))
+            if not item['ok'] and isinstance(resp, dict):
+                item['error'] = resp.get('error') or item.get('status') or 'comment_failed'
+                if resp.get('userMessage') or resp.get('message'):
+                    item['message'] = resp.get('userMessage') or resp.get('message')
         except Exception as e:
             item['ok'] = False
             item['status'] = 'error'
             item['error'] = str(e)
             item['trace'] = traceback.format_exc()
         results.append(item)
-        if safe_mode and item.get('status') in ('risk_blocked', 'risk_cooldown', 'preflight_blocked'):
+        if item.get('status') in ('risk_blocked', 'risk_cooldown', 'risk_paused', 'daily_limit', 'comment_cooldown', 'preflight_blocked'):
             break
         if not dry_run and idx < len(targets) - 1 and interval_sec:
             time.sleep(max(0.0, min(float(interval_sec), 120.0)))
+    blocker = next((x for x in results if x.get('status') in (
+        'risk_blocked', 'risk_cooldown', 'risk_paused', 'daily_limit', 'comment_cooldown', 'preflight_blocked'
+    )), None)
+    blocker_resp = blocker.get('response') if isinstance(blocker, dict) and isinstance(blocker.get('response'), dict) else {}
     summary = {
+        'ok': blocker is None,
         'platform': platform,
         'keyword': keyword,
         'dryRun': bool(dry_run),
@@ -4251,6 +4827,11 @@ def run_ai_outreach(auth, keyword, template='', video_num=5, limit=5, dry_run=Fa
         'discovery': discovery,
         'errors': discovery.get('errors') or [],
     }
+    if blocker:
+        summary['status'] = blocker.get('status') or ''
+        summary['error'] = blocker.get('error') or blocker_resp.get('error') or 'outreach_blocked'
+        summary['message'] = blocker.get('message') or blocker_resp.get('userMessage') or blocker_resp.get('message') or douyin_comment_error_message(summary.get('error'), blocker_resp.get('safety'))
+        summary['userMessage'] = summary['message']
     try:
         _save_json(OUTREACH_LAST_JSON, summary)
     except Exception:
@@ -4282,6 +4863,20 @@ def run_douyin_dm_inbox(target, limit=10, since_fingerprint="", account_id=''):
         since_fingerprint=since_fingerprint,
         account_id=account_id,
     )
+
+
+def _douyin_dm_http_status(data):
+    data = data if isinstance(data, dict) else {}
+    if data.get('ok'):
+        return 200
+    error = str(data.get('error') or '').strip().lower()
+    if error in ('missing_target', 'missing_target_or_content', 'numeric_uid_unsupported_in_browser_dm'):
+        return 400
+    if data.get('needLogin') or error in ('not_authenticated', 'login_required'):
+        return 401
+    if error in ('dm_profile_busy', 'dm_inbox_profile_busy'):
+        return 409
+    return 500
 
 
 def bump_published(mid, n=1):
@@ -4539,6 +5134,16 @@ def run_publish(material, account_id, dry_run, title_override=None, platform=Non
     if not files:
         return {'ok': False, 'error': 'no_files'}
     publish_platform = platform_code(platform or material.get('platform') or ('xhs' if 'xhs' in str(account_id or '').lower() else 'douyin'))
+    if publish_platform == 'xhs' and not xhs_enabled():
+        return _xhs_disabled(route="/api/publish/run", task_type="xhs.publish", stage="service")
+    if publish_platform == 'douyin' and len(files) > 1:
+        return {
+            'ok': False,
+            'published': False,
+            'error': 'douyin_single_video_required',
+            'platform': 'douyin',
+            'fileCount': len(files),
+        }
     if publish_platform == 'xhs':
         gate = xhs_safety_preflight("publish", account_id, dry_run=dry_run)
         if not gate.get("ok"):
@@ -4942,6 +5547,12 @@ def run_login(job_id, fresh=False):
 def run_xhs_login(job_id, fresh=False):
     """Visible Xiaohongshu login into the persistent xhs_profile (local client).
     fresh=True 时先把旧 xhs_profile 挪走，用全新空浏览器登录另一个小红书账号。"""
+    if not xhs_enabled():
+        with STATE_LOCK:
+            STATE['cookie_jobs'][job_id] = _xhs_disabled(
+                route="/api/xhs/login", task_type="xhs.login", stage="service"
+            )
+        return
     if not PUBLISH_LOCK.acquire(timeout=10):
         with STATE_LOCK:
             STATE['cookie_jobs'][job_id] = {'status': 'error', 'error': 'publish_busy', 'platform': 'xhs'}
@@ -5230,6 +5841,7 @@ class CloudLoginSession:
                     persist=True,
                     web_protect=(storage or {}).get('web_protect', ''),
                     keys=(storage or {}).get('keys', ''),
+                    account_id=None if self.account_id in ('douyin-self', 'default') else self.account_id,
                 )
             elif self.platform == 'xhs':
                 try:
@@ -5691,6 +6303,26 @@ class CloudLoginSession:
     async def _key(self, key):
         await self.page.keyboard.press(str(key or 'Enter'))
         return await self._status()
+
+    async def _open_url(self, url):
+        url = str(url or '').strip()
+        if not url:
+            return {'ok': False, 'error': 'missing_url', 'accountId': self.account_id}
+        if not re.match(r'^https?://', url, re.I):
+            return {'ok': False, 'error': 'invalid_url', 'accountId': self.account_id}
+        try:
+            await self.page.goto(url, wait_until='domcontentloaded', timeout=45000)
+        except Exception as e:
+            # Douyin pages can keep long connections open; if navigation produced
+            # an interactive page, keep the session alive and surface the warning.
+            st = await self._status()
+            st.update({'ok': True, 'warning': 'navigation_timeout_or_partial_load', 'error': str(e)[:300]})
+            return st
+        await asyncio.sleep(0.6)
+        return await self._status()
+
+    def open_url(self, url):
+        return self._submit(self._open_url(url), timeout=60)
 
     async def _auto_sms(self):
         """Click the first SMS verification option in the cloud browser.
@@ -6427,7 +7059,8 @@ def cleanup_cloud_sessions(max_age=1800):
     stale = []
     with CLOUD_LOGIN_LOCK:
         for sid, sess in list(CLOUD_LOGIN_SESSIONS.items()):
-            if sess.closed or now - sess.last_seen > max_age:
+            last_seen = float(getattr(sess, 'last_seen', 0) or 0)
+            if getattr(sess, 'closed', False) or now - last_seen > max_age:
                 stale.append((sid, sess))
                 CLOUD_LOGIN_SESSIONS.pop(sid, None)
     for _sid, sess in stale:
@@ -6510,6 +7143,8 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if not ensure_agent_request(self, path):
             return
+        if (path.startswith('/api/xhs') or path.startswith('/api/xhs-note-replacement')) and not xhs_enabled():
+            return json_response(self, _xhs_disabled(route=path), 404)
         if path in ('/api/health', '/api/agent/status'):
             authorized = request_authorized(self)
             if not authorized:
@@ -6645,12 +7280,16 @@ class Handler(BaseHTTPRequestHandler):
         ctype = self.headers.get('Content-Type', '') or ''
         if not ensure_agent_request(self, path):
             return
+        if (path.startswith('/api/xhs') or path.startswith('/api/xhs-note-replacement')) and not xhs_enabled():
+            return json_response(self, _xhs_disabled(route=path), 404)
         if 'multipart/form-data' in ctype:
             try:
                 return self.handle_multipart(path)
             except Exception as e:
                 return json_response(self, {'ok': False, 'error': str(e), 'trace': traceback.format_exc()}, 500)
         body = read_body(self)
+        if payload_uses_xhs(body) and not xhs_enabled():
+            return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
         try:
             if path == '/api/xhs-note-replacement/template':
                 if not xhs_note_replacement.feature_enabled():
@@ -6893,6 +7532,46 @@ class Handler(BaseHTTPRequestHandler):
                 })
                 return json_response(self, st)
 
+            if path == '/api/cloud-login/open-url':
+                cleanup_cloud_sessions()
+                url = str(body.get('url') or body.get('target') or body.get('profileUrl') or '').strip()
+                if not url:
+                    return json_response(self, {'ok': False, 'error': 'missing_url'}, 400)
+                if not re.match(r'^https?://', url, re.I):
+                    return json_response(self, {'ok': False, 'error': 'invalid_url'}, 400)
+                account_id = body.get('accountId') or body.get('account') or 'douyin-self'
+                safe_account = _safe_account_key(account_id)
+                sid, sess = find_cloud_session_for_account(safe_account)
+                created = False
+                if not sess:
+                    sid = uuid.uuid4().hex
+                    release_chromium_profile_if_stale(_cloud_profile_dir(safe_account))
+                    sess = CloudLoginSession(sid, account_id=safe_account, login_url=url)
+                    with CLOUD_LOGIN_LOCK:
+                        CLOUD_LOGIN_SESSIONS[sid] = sess
+                    try:
+                        sess.start(timeout=45)
+                        created = True
+                    except Exception as e:
+                        with CLOUD_LOGIN_LOCK:
+                            CLOUD_LOGIN_SESSIONS.pop(sid, None)
+                        try:
+                            sess.close()
+                        except Exception:
+                            pass
+                        return json_response(self, {'ok': False, 'error': str(e), 'trace': traceback.format_exc(), 'accountId': safe_account}, 500)
+                st = sess.open_url(url)
+                st.update({
+                    'ok': st.get('ok') is not False,
+                    'hasSession': True,
+                    'sessionId': sid,
+                    'accountId': sess.account_id,
+                    'requestedUrl': url,
+                    'createdSession': created,
+                    'message': 'cloud_browser_url_opened',
+                })
+                return json_response(self, st, 200 if st.get('ok') is not False else 500)
+
             if path == '/api/cloud-login/screenshot':
                 sess = cloud_session(body.get('sessionId'))
                 return json_response(self, sess.screenshot())
@@ -7051,8 +7730,10 @@ class Handler(BaseHTTPRequestHandler):
                     channel = (body.get('channel') or body.get('commentChannel') or 'auto').strip()
                     if dry and not aweme_id:
                         return json_response(self, {'ok': True, 'dryRun': True, 'validTarget': False, 'error': 'missing_aweme_id', 'status': 'invalid_target', 'content': sanitize_comment_for_risk(content) if safe_mode else compact_text(content, 160), 'accountId': account_id})
-                    resp = publish_comment_to_douyin(auth, aweme_id, content, reply_id=reply_id, dry_run=dry, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel)
-                    return json_response(self, {'ok': bool(resp.get('ok', comment_publish_ok(resp))), 'accountId': account_id, **resp})
+                    resp = publish_comment_to_douyin(auth, aweme_id, content, reply_id=reply_id, dry_run=dry, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, account_id=account_id)
+                    payload = {'ok': bool(resp.get('ok', comment_publish_ok(resp))), 'accountId': account_id, **resp}
+                    status = 429 if (not payload.get('ok') and (payload.get('blocked') or payload.get('status') in ('risk_blocked', 'risk_cooldown', 'risk_paused', 'daily_limit', 'comment_cooldown'))) else 200
+                    return json_response(self, payload, status)
 
             if path == '/api/xhs/comment/publish':
                 note_id = (body.get('noteId') or body.get('note_id') or '').strip()
@@ -7088,9 +7769,9 @@ class Handler(BaseHTTPRequestHandler):
                 interval_sec = float(body.get('intervalSec', 45 if safe_mode else 0.8) or 0)
                 if platform == 'douyin':
                     with douyin_auth_for_request(account_id) as (auth, selected_account_id):
-                        data = run_ai_outreach(auth, keyword, template=template, video_num=video_num, limit=limit, dry_run=dry, send_mode=send_mode, interval_sec=interval_sec, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, platform=platform)
+                        data = run_ai_outreach(auth, keyword, template=template, video_num=video_num, limit=limit, dry_run=dry, send_mode=send_mode, interval_sec=interval_sec, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, platform=platform, account_id=selected_account_id)
                         return json_response(self, {'ok': True, 'accountId': selected_account_id, **data})
-                data = run_ai_outreach(None, keyword, template=template, video_num=video_num, limit=limit, dry_run=dry, send_mode=send_mode, interval_sec=interval_sec, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, platform=platform)
+                data = run_ai_outreach(None, keyword, template=template, video_num=video_num, limit=limit, dry_run=dry, send_mode=send_mode, interval_sec=interval_sec, safe_mode=safe_mode, preflight=preflight, force=force, channel=channel, platform=platform, account_id=account_id)
                 return json_response(self, {'ok': True, **data})
 
             if path == '/api/douyin/dm':
@@ -7100,11 +7781,24 @@ class Handler(BaseHTTPRequestHandler):
                         body.get('content') or body.get('text') or '',
                         body.get('accountId') or body.get('account') or '',
                     )
-                    return json_response(self, data, 200 if data.get('ok') else 500)
+                    return json_response(self, data, _douyin_dm_http_status(data))
                 except Exception as e:
                     need_login = is_douyin_auth_error(e)
                     code = 401 if need_login else 500
-                    return json_response(self, {'ok': False, 'needLogin': need_login, 'error': str(e), 'trace': traceback.format_exc()}, code)
+                    error_id = _dm_error_id(
+                        'douyin_dm_route_exception',
+                        exc=e,
+                        targetFingerprint=_dm_text_fingerprint(
+                            body.get('target') or body.get('userUrl') or body.get('toUserId') or body.get('secUid') or ''
+                        ),
+                        accountId=local_account_id(body.get('accountId') or body.get('account') or ''),
+                    )
+                    return json_response(self, {
+                        'ok': False,
+                        'needLogin': need_login,
+                        'error': 'not_authenticated' if need_login else 'douyin_dm_internal_error',
+                        'errorId': error_id,
+                    }, code)
 
             if path == '/api/douyin/dm/inbox':
                 try:
@@ -7114,12 +7808,24 @@ class Handler(BaseHTTPRequestHandler):
                         body.get('sinceFingerprint') or '',
                         body.get('accountId') or body.get('account') or '',
                     )
-                    status = 200 if data.get('ok') else (400 if data.get('error') == 'missing_target' else 500)
-                    return json_response(self, data, status)
+                    return json_response(self, data, _douyin_dm_http_status(data))
                 except Exception as e:
                     need_login = is_douyin_auth_error(e)
                     code = 401 if need_login else 500
-                    return json_response(self, {'ok': False, 'needLogin': need_login, 'error': str(e), 'trace': traceback.format_exc()}, code)
+                    error_id = _dm_error_id(
+                        'douyin_dm_inbox_route_exception',
+                        exc=e,
+                        targetFingerprint=_dm_text_fingerprint(
+                            body.get('target') or body.get('userUrl') or body.get('secUid') or ''
+                        ),
+                        accountId=local_account_id(body.get('accountId') or body.get('account') or ''),
+                    )
+                    return json_response(self, {
+                        'ok': False,
+                        'needLogin': need_login,
+                        'error': 'not_authenticated' if need_login else 'douyin_dm_inbox_internal_error',
+                        'errorId': error_id,
+                    }, code)
 
             if path == '/api/douyin/search':
                 with douyin_auth_for_request(body.get('accountId') or body.get('account') or '') as (auth, account_id):
@@ -7165,7 +7871,7 @@ class Handler(BaseHTTPRequestHandler):
                 query = body.get('query', '') or body.get('keyword', '')
                 require_num = int(body.get('num', 20) or 20)
                 account_id = _xhs_safety_account_id(body.get('accountId') or body.get('account') or '')
-                guest_mode = xhs_collection_guest_mode(body)
+                guest_mode = xhs_collection_guest_mode(body, default=False)
                 confirmed = xhs_account_collection_confirmed(body)
                 gate = xhs_collection_account_gate("search", account_id, guest_mode, confirmed)
                 if not gate.get("ok"):
@@ -7248,19 +7954,27 @@ class Handler(BaseHTTPRequestHandler):
                     dry = bool_arg(body.get('dryRun'), False)
                     if not url:
                         raise RuntimeError('missing_url')
-                    if dry:
-                        work = SPIDER.spider_work(auth, url)
-                        return json_response(self, {
-                            'ok': True,
-                            'accountId': account_id,
-                            'dryRun': True,
-                            'wouldDownload': True,
-                            'work': work,
-                            'saveChoice': save_choice,
-                            'files': [],
-                        })
                     try:
+                        if dry:
+                            work = SPIDER.spider_work(auth, url)
+                            return json_response(self, {
+                                'ok': True,
+                                'accountId': account_id,
+                                'dryRun': True,
+                                'wouldDownload': True,
+                                'work': work,
+                                'saveChoice': save_choice,
+                                'files': [],
+                            })
                         work, save_path = download_douyin_work_with_refresh(auth, url, save_choice)
+                    except DouyinDetailNetworkError as exc:
+                        return json_response(self, {
+                            'ok': False,
+                            'accountId': account_id,
+                            'error': 'douyin_detail_network_failed',
+                            'errorId': _douyin_detail_error_log(account_id, exc),
+                            'stage': 'detail',
+                        }, 502)
                     except MediaDownloadError as exc:
                         status = 403 if exc.code == 'download_http_403' else 502
                         return json_response(self, {
@@ -7316,7 +8030,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not url:
                     raise RuntimeError('missing_url')
                 account_id = _xhs_safety_account_id(body.get('accountId') or body.get('account') or '')
-                guest_mode = xhs_collection_guest_mode(body)
+                guest_mode = xhs_collection_guest_mode(body, default=False)
                 confirmed = xhs_account_collection_confirmed(body)
                 gate = xhs_collection_account_gate("download", account_id, guest_mode, confirmed)
                 if not gate.get("ok"):
@@ -7452,6 +8166,7 @@ class Handler(BaseHTTPRequestHandler):
                     'published': bool(res.get('published')), 'dryRun': bool(dry), 'error': res.get('error'),
                     'platform': publish_platform, 'finalUrl': res.get('final_url'),
                     'steps': res.get('steps'), 'shot': res.get('shot'), 'button': res.get('button'),
+                    'fileCount': res.get('fileCount'),
                 })
 
             return json_response(self, {'ok': False, 'error': 'not_found', 'path': path}, 404)

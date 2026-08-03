@@ -16,9 +16,9 @@ class NativeBillingRatesTest(unittest.TestCase):
     def test_native_client_local_prices_use_one_yundou_per_yuan(self):
         source = CLIENT.read_text(encoding="utf-8")
 
-        self.assertIn('"product_video": 3.08', source)
-        self.assertIn('"copywriting": 0.07', source)
-        self.assertIn('"digital_human": 25.2', source)
+        self.assertIn('"product_video": 5.57', source)
+        self.assertIn('"copywriting": 0.24', source)
+        self.assertIn('"digital_human": 9.81', source)
 
 
 if __name__ == "__main__":

@@ -41,10 +41,11 @@ def validate_service_url(value):
     return url
 
 
-def build_chunk_ranges(duration, chunk_sec=60, max_sec=600):
+def build_chunk_ranges(duration, chunk_sec=60, max_sec=None):
     duration = max(0.0, float(duration or 0))
     chunk_sec = max(1.0, float(chunk_sec or 60))
-    max_sec = max(chunk_sec, float(max_sec or 600))
+    configured_max = float(max_sec or 0)
+    max_sec = max(chunk_sec, configured_max) if configured_max > 0 else duration
     limit = min(duration, max_sec)
     ranges = []
     start = 0.0
@@ -55,7 +56,7 @@ def build_chunk_ranges(duration, chunk_sec=60, max_sec=600):
     return {"ranges": ranges, "truncated": duration > max_sec, "duration": duration, "limit": limit}
 
 
-def export_audio_chunks(video_path, out_dir, chunk_sec=60, max_sec=600,
+def export_audio_chunks(video_path, out_dir, chunk_sec=60, max_sec=None,
                         ffmpeg_exe=None, probe_fn=None, run_fn=None,
                         only_ranges=None, logger=None):
     logger = logger or _NoopLogger()
@@ -68,11 +69,13 @@ def export_audio_chunks(video_path, out_dir, chunk_sec=60, max_sec=600,
     if duration <= 0:
         return {"status": "failed", "code": "media_invalid_duration", "chunks": [],
                 "failedRanges": [], "errors": [], "truncated": False}
+    ranges = build_chunk_ranges(duration, chunk_sec=chunk_sec, max_sec=max_sec)
     if meta.get("hasAudio") is False:
         return {"status": "no_audio", "code": "media_missing_audio_stream", "chunks": [],
                 "failedRanges": [], "errors": [],
-                "duration": duration, "truncated": duration > float(max_sec or 600)}
-    ranges = build_chunk_ranges(duration, chunk_sec=chunk_sec, max_sec=max_sec)
+                "duration": duration,
+                "limit": ranges["limit"],
+                "truncated": bool(ranges["truncated"])}
     os.makedirs(out_dir, exist_ok=True)
     if ffmpeg_exe is None:
         import imageio_ffmpeg
@@ -137,6 +140,7 @@ def export_audio_chunks(video_path, out_dir, chunk_sec=60, max_sec=600,
         "failedRanges": failures,
         "errors": list(failures),
         "duration": duration,
+        "limit": ranges["limit"],
         "truncated": bool(ranges["truncated"]),
     }
 
@@ -175,10 +179,45 @@ def _format_timestamp(seconds):
     return "%02d:%02d.%03d" % (minutes, secs, millis)
 
 
+def _compact_overlap_text(value):
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def _drop_compact_prefix(value, compact_chars):
+    if compact_chars <= 0:
+        return str(value or "").strip()
+    seen = 0
+    text = str(value or "")
+    for index, char in enumerate(text):
+        if char.isspace():
+            continue
+        seen += 1
+        if seen >= compact_chars:
+            return text[index + 1:].strip()
+    return ""
+
+
+def remove_adjacent_text_overlap(previous, current, min_chars=8):
+    current_text = str(current or "").strip()
+    if not current_text:
+        return ""
+    previous_compact = _compact_overlap_text(previous)
+    current_compact = _compact_overlap_text(current_text)
+    if not previous_compact or not current_compact:
+        return current_text
+    limit = min(len(previous_compact), len(current_compact))
+    threshold = max(1, int(min_chars or 1))
+    for size in range(limit, threshold - 1, -1):
+        if previous_compact[-size:] == current_compact[:size]:
+            return _drop_compact_prefix(current_text, size)
+    return current_text
+
+
 def merge_transcription_segments(chunks):
     segments = []
     language = ""
     coarse = False
+    previous_text = ""
     for chunk in chunks or []:
         offset = float(chunk.get("start") or 0)
         language = language or str(chunk.get("language") or "")
@@ -188,7 +227,10 @@ def merge_transcription_segments(chunks):
             end = round(offset + float(segment.get("endSec") or 0), 3)
             text = str(segment.get("text") or "").strip()
             if text:
+                text = remove_adjacent_text_overlap(previous_text, text)
+            if text:
                 segments.append({"startSec": start, "endSec": end, "text": text})
+                previous_text = text
     segments.sort(key=lambda row: (row["startSec"], row["endSec"]))
     lines = [
         "[%s-%s] %s" % (_format_timestamp(row["startSec"]), _format_timestamp(row["endSec"]), row["text"])
@@ -234,6 +276,8 @@ def _parse_candidate(text, chunk_duration):
     if fallback_text and _looks_like_transcription_refusal(fallback_text):
         raise RuntimeError("transcription_refused")
     if fallback_text:
+        if not _looks_like_transcription_body(fallback_text):
+            raise RuntimeError("transcription_invalid_response")
         return {
             "language": "unknown",
             "segments": [{"startSec": 0.0, "endSec": float(chunk_duration), "text": fallback_text}],
@@ -260,6 +304,28 @@ def _looks_like_transcription_refusal(text):
     return any(re.search(pattern, value, re.I | re.S) for pattern in patterns)
 
 
+def _looks_like_transcription_body(text):
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", value):
+        return True
+    if re.search(r"\[\d{1,2}:\d{2}(?:\.\d+)?-\d{1,2}:\d{2}(?:\.\d+)?\]", value):
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\b", value):
+        return True
+    if re.search(r"\b(?:transcription|transcribe|json transcription|speech|subtitle|subtitles)\b", value, re.I):
+        return False
+    letters = len(re.findall(r"[A-Za-z]", value))
+    digits = len(re.findall(r"\d", value))
+    nonspace = len(re.sub(r"\s+", "", value))
+    if nonspace == 0:
+        return False
+    if letters and letters >= nonspace * 0.6 and not digits:
+        return False
+    return letters == 0 or letters < nonspace * 0.5
+
+
 def _range_selected(chunk, only_ranges):
     if not only_ranges:
         return True
@@ -271,9 +337,26 @@ def _range_selected(chunk, only_ranges):
     )
 
 
+def _billing_context_headers(context):
+    if not isinstance(context, dict):
+        return {}
+    mapping = {
+        "scenario": "X-Matrix-Billing-Scenario",
+        "stage": "X-Matrix-Billing-Stage",
+        "detail": "X-Matrix-Billing-Detail",
+    }
+    headers = {}
+    for key, header in mapping.items():
+        value = str(context.get(key) or "").strip()
+        if value:
+            headers[header] = value[:160]
+    return headers
+
+
 def transcribe_audio_chunks(chunks, base_url, api_key, model, timeout, retries,
                             proxies=None, only_ranges=None, progress=None,
-                            request_fn=None, sleep_fn=None, logger=None):
+                            request_fn=None, sleep_fn=None, logger=None,
+                            billing_context=None):
     request_fn = request_fn or requests.post
     sleep_fn = sleep_fn or time.sleep
     logger = logger or _NoopLogger()
@@ -305,9 +388,14 @@ def transcribe_audio_chunks(chunks, base_url, api_key, model, timeout, retries,
                     ]}],
                     "generationConfig": {"temperature": 0.1},
                 }
+                headers = {
+                    "Authorization": "Bearer " + str(api_key or ""),
+                    "Content-Type": "application/json",
+                }
+                headers.update(_billing_context_headers(billing_context))
                 response = request_fn(
                     endpoint,
-                    headers={"Authorization": "Bearer " + str(api_key or ""), "Content-Type": "application/json"},
+                    headers=headers,
                     json=body,
                     timeout=timeout,
                     verify=True,

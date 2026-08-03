@@ -434,6 +434,17 @@ COMIC_DEFAULT_AUDIO_MODEL = "indextts2_clone"
 COMIC_STORYBOARD_DIALOGUE_AUDIO_MODEL = "gemini-2.5-pro-preview-tts"
 COMIC_FRAME_IMAGE_MIN_REFERENCE_IMAGES = 4
 COMIC_MULTIFRAME_VIDEO_MIN_REFERENCE_IMAGES = 7
+MINIMAX_H3_COMIC_MODEL_ID = "minimax-h3"
+MINIMAX_H3_PROVIDER_MODEL = "MiniMax-H3"
+MINIMAX_H3_RESOLUTIONS = ("768P", "2K")
+MINIMAX_H3_DURATION_MIN = 4
+MINIMAX_H3_DURATION_MAX = 15
+MINIMAX_ENABLED = _get_bool_env("MINIMAX_ENABLED", True)
+MINIMAX_COMIC_API_BASE = (
+    os.environ.get("MINIMAX_COMIC_API_BASE", "https://api.minimaxi.com") or ""
+).strip().rstrip("/")
+MINIMAX_COMIC_API_KEY = str(os.environ.get("MINIMAX_COMIC_API_KEY", "") or "").strip()
+MINIMAX_TASK_TIMEOUT_SEC = _get_int_env("MINIMAX_TASK_TIMEOUT_SEC", 900, 1)
 
 
 def _comic_model(id, name=None, provider="api-gateway", description="", **extra):
@@ -1204,6 +1215,18 @@ COMIC_LOCAL_MODEL_CATALOG = {
             "MiniMax Hailuo 2.3 视频模型，适合文生、图生和高清短视频生成。 适合创意镜头、人物短片和 1080P 视频素材。",
             label="通用视频",
             max_reference_images=2,
+        ),
+        _comic_video_model(
+            MINIMAX_H3_COMIC_MODEL_ID,
+            "MiniMax H3",
+            "minimax-direct",
+            "MiniMax H3 official direct video generation. Uses the MiniMax /v2/video_generation API and never routes through LK888.",
+            label="MiniMax H3",
+            actual_model=MINIMAX_H3_PROVIDER_MODEL,
+            input_mode="prompt_or_reference_to_video",
+            max_reference_images=7,
+            supported_resolutions=list(MINIMAX_H3_RESOLUTIONS),
+            duration_range=[MINIMAX_H3_DURATION_MIN, MINIMAX_H3_DURATION_MAX],
         ),
     ],
 }
@@ -5875,6 +5898,16 @@ def _parse_platform_json(raw):
         return {"raw": text}
 
 
+def _is_file_descriptor_exhaustion_error(error):
+    text = repr(error)
+    lowered = text.lower()
+    return (
+        "too many open files" in lowered
+        or "oserror(24" in lowered
+        or "errno 24" in lowered
+    )
+
+
 def _platform_json_request(path, payload=None, method="POST", include_internal_secret=True, timeout=30):
     url = _platform_url(path)
     if not url:
@@ -5882,6 +5915,7 @@ def _platform_json_request(path, payload=None, method="POST", include_internal_s
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Yunling-AI-CanvasPro/1.0",
+        "Connection": "close",
     }
     if include_internal_secret and AICANVAS_INTERNAL_SECRET:
         headers["X-AICanvas-Internal-Secret"] = AICANVAS_INTERNAL_SECRET
@@ -5895,6 +5929,23 @@ def _platform_json_request(path, payload=None, method="POST", include_internal_s
     except urllib.error.HTTPError as e:
         return int(e.code), _parse_platform_json(e.read())
     except Exception as e:
+        if _is_file_descriptor_exhaustion_error(e):
+            _json_log(
+                "platform_json_request_fd_exhausted",
+                path=str(path or ""),
+                method=str(method or "POST").upper(),
+                timeout=timeout,
+            )
+            return 503, {
+                "code": "platform_fd_exhausted",
+                "detail": "远程平台连接资源耗尽，视频生成暂时不可用；请稍后重试，如连续出现需重启远程漫剧服务并检查句柄泄漏。",
+            }
+        _json_log(
+            "platform_json_request_failed",
+            path=str(path or ""),
+            method=str(method or "POST").upper(),
+            error=repr(e)[:300],
+        )
         return 502, {"detail": f"平台服务调用失败：{repr(e)}"}
 
 
@@ -9434,6 +9485,16 @@ def _ai_comic_max_reference_images(model):
 
 def _ai_comic_strengthen_reference_request(model, prompt, params):
     params = dict(params if isinstance(params, dict) else {})
+    frame_style_mode = str(
+        params.get("frame_style_mode")
+        or params.get("frameStyleMode")
+        or params.get("style_mode")
+        or params.get("styleMode")
+        or ""
+    ).strip().lower()
+    colored_pencil_mode = frame_style_mode in {
+        "colored_pencil", "colored-pencil", "coloredpencil", "彩铅", "彩铅手绘"
+    }
     refs = _dedupe_urls(params.get("reference_image_urls") or params.get("image_urls") or params.get("images") or [])
     limit = _ai_comic_max_reference_images(model)
     preserve_refs = bool(params.get("_preserve_reference_images") or params.get("_strict_storyboard_references"))
@@ -9443,6 +9504,14 @@ def _ai_comic_strengthen_reference_request(model, prompt, params):
         params["image_urls"] = refs
         params["images"] = refs
     prompt = str(prompt or "").strip()
+    if refs and colored_pencil_mode:
+        if "彩铅" not in prompt:
+            prompt = (
+                "首尾帧图片风格要求：将参考图和当前画面统一处理为彩铅手绘风格；"
+                "保留人物身份、五官、发型、服装、体型、产品外形、颜色、包装文字和 Logo，画面只改变绘制质感；"
+                + prompt
+            )
+        return prompt, params
     reference_usage = str(params.get("_reference_usage") or params.get("reference_usage") or params.get("usage") or "").lower()
     has_scene_refs = bool(_dedupe_urls(params.get("scene_reference_images") or params.get("scene_reference_image_urls") or []))
     has_background_intent = (
@@ -9804,12 +9873,29 @@ def _normalize_comic_storyboard_audio_mode(value):
     return normalized if normalized in {"auto", "tts"} else "legacy"
 
 
+def _is_matrix_video_replacement_project(project):
+    project = project if isinstance(project, dict) else {}
+    config = project.get("config") if isinstance(project.get("config"), dict) else {}
+    source_mode = str(
+        project.get("source_mode")
+        or project.get("sourceMode")
+        or project.get("project_source_mode")
+        or project.get("projectSourceMode")
+        or config.get("source_mode")
+        or config.get("sourceMode")
+        or ""
+    ).strip()
+    return source_mode == "matrix_video_replacement"
+
+
 def _comic_storyboard_video_params_with_dialogue_audio(params, project, storyboard, model, project_id, storyboard_id):
     params = dict(params if isinstance(params, dict) else {})
     audio_mode = _normalize_comic_storyboard_audio_mode(params.pop("audio_mode", None))
     auto_match_audio_duration = _comic_truthy(
         params.pop("auto_match_audio_duration", params.pop("autoMatchAudioDuration", False))
     )
+    if audio_mode == "auto" and _is_matrix_video_replacement_project(project):
+        audio_mode = "tts"
     if audio_mode == "auto":
         _json_log(
             "comic_storyboard_dialogue_audio_skipped",
@@ -11153,11 +11239,21 @@ def _comic_media_model_for_project(project, payload, model_kind):
     raise ValueError(f"当前项目没有可执行的{_comic_model_kind_label(kind)}模型，请先在项目配置中选择模型。")
 
 
+def _is_minimax_h3_comic_model(model_id):
+    return str(model_id or "").strip().lower() in {
+        MINIMAX_H3_COMIC_MODEL_ID,
+        MINIMAX_H3_PROVIDER_MODEL.lower(),
+        "minimax-h3",
+    }
+
+
 def _comic_adapter_for_model(model_kind, model_id):
     kind = _normalize_comic_model_kind(model_kind)
     if kind == "llm":
         return "chat-completion"
     if kind == "video":
+        if _is_minimax_h3_comic_model(model_id):
+            return "minimax-h3-video"
         return "ark-video" if _ark_should_route(model_id) else "media-generate-video"
     if kind == "image":
         return "media-generate-image"
@@ -12745,7 +12841,9 @@ def _refresh_ai_comic_task(task):
         AI_COMIC_TASK_REFRESH_IN_FLIGHT.add(refresh_key)
     try:
         try:
-            if str(remote_task_id).startswith(ARK_TASK_ID_PREFIX):
+            if str(task.get("provider") or "").strip().lower() == "minimax-direct":
+                status_payload = _minimax_h3_task_status_envelope(remote_task_id)
+            elif str(remote_task_id).startswith(ARK_TASK_ID_PREFIX):
                 status_payload = _ark_task_envelope_for_proxy(remote_task_id)
             else:
                 status_payload = AI_API_SERVICE.get_task_status(remote_task_id)
@@ -13159,11 +13257,20 @@ def _comic_remux_video_with_storyboard_tts(video_url, audio_url, project_id, sto
 def _finalize_ai_comic_fallback_video_audio(task):
     if not isinstance(task, dict):
         return task
-    if not task.get("fallback_applied"):
-        return task
     if str(task.get("task_type") or "").strip() not in {"generate_video", "batch_storyboard_videos"}:
         return task
     if str(task.get("target_type") or "").strip() != "storyboard":
+        return task
+    try:
+        project_id = int(task.get("project_id") or 0)
+    except Exception:
+        project_id = 0
+    project = LOCAL_COMIC_PROJECTS.get(project_id) if project_id else None
+    matrix_replacement = (
+        _is_matrix_video_replacement_project(project)
+        or _is_matrix_video_replacement_project(task)
+    )
+    if not task.get("fallback_applied") and not matrix_replacement:
         return task
     if str(task.get("audio_mix_status") or "").strip().lower() == "completed":
         return task
@@ -13177,6 +13284,8 @@ def _finalize_ai_comic_fallback_video_audio(task):
         if isinstance(source, dict) and "audio_mode" in source:
             audio_mode = str(source.get("audio_mode") or "").strip().lower()
             break
+    if audio_mode == "auto" and matrix_replacement and _comic_storyboard_tts_url_from_task(task):
+        audio_mode = "tts"
     if audio_mode == "auto":
         task["provider_result_url"] = provider_result_url
         task["providerResultUrl"] = provider_result_url
@@ -13303,6 +13412,7 @@ def _comic_video_fallback_params(model, original):
 
 
 def _advance_ai_comic_video_fallback(task, failure):
+    return None
     if not isinstance(task, dict):
         return None
     candidates = list(task.get("fallback_candidates") or [])
@@ -13413,10 +13523,27 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
     is_video_task = "video" in task_type_text
     is_image_task = "image" in task_type_text or "views" in task_type_text
     storyboard_audio_mode = ""
+    storyboard_project_source_mode = ""
     if is_video_task and str(target_type or "").strip() == "storyboard":
         storyboard_audio_mode = str(audio_mode or "").strip().lower()
         if storyboard_audio_mode not in {"auto", "tts"}:
             storyboard_audio_mode = "legacy"
+        try:
+            source_project_id = int(project_id or 0)
+        except Exception:
+            source_project_id = 0
+        source_project = LOCAL_COMIC_PROJECTS.get(source_project_id) if source_project_id else None
+        if not isinstance(source_project, dict) and source_project_id:
+            source_project = _local_comic_project_for_current_scope(source_project_id)
+        if isinstance(source_project, dict):
+            source_config = source_project.get("config") if isinstance(source_project.get("config"), dict) else {}
+            storyboard_project_source_mode = str(
+                source_project.get("source_mode")
+                or source_project.get("sourceMode")
+                or source_config.get("source_mode")
+                or source_config.get("sourceMode")
+                or ""
+            ).strip()
 
     def apply_storyboard_audio_mode(task):
         if not storyboard_audio_mode or not isinstance(task, dict):
@@ -13433,6 +13560,9 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
             return task
         task["audio_mode"] = storyboard_audio_mode
         task["audioMode"] = storyboard_audio_mode
+        if storyboard_project_source_mode:
+            task["project_source_mode"] = storyboard_project_source_mode
+            task["projectSourceMode"] = storyboard_project_source_mode
         _save_local_comic_state()
         return task
     if is_video_task:
@@ -13503,7 +13633,8 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
     billing_payload = dict(params or {})
     billing_payload["prompt"] = prompt
     billing_payload["count"] = count
-    billing_ctx = _charge_local_ai_model_call(
+    minimax_h3_direct = bool(is_video_task and _is_minimax_h3_comic_model(model))
+    billing_ctx = None if minimax_h3_direct else _charge_local_ai_model_call(
         model_type,
         model,
         billing_payload,
@@ -13511,7 +13642,9 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
         description=f"云灵AI漫剧{task_name}：{model}",
     )
     try:
-        if is_video_task and _ark_should_route(model):
+        if minimax_h3_direct:
+            result = _submit_minimax_h3_comic_video_task(prompt, params=params)
+        elif is_video_task and _ark_should_route(model):
             data = dict(params or {})
             action_refs, extra_refs, refs = _comic_collect_video_reference_urls(data)
             if len(refs) > 9:
@@ -13556,17 +13689,9 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
     except Exception as exc:
         sanitized_error = AiApiService.sanitize_error(str(exc or "视频任务提交失败"))
         _refund_canvas_model_call(billing_ctx, f"云灵AI漫剧{task_name}提交失败退款")
-        fallback_candidates = list(_comic_real_person_video_fallback_models())
         fallback_reason = _ark_storyboard_video_fallback_reason(exc)
-        should_fallback = (
-            is_video_task
-            and str(task_type or "") == "generate_video"
-            and str(target_type or "") == "storyboard"
-            and _ark_should_route(model)
-            and not fallback_chain_active
-            and bool(fallback_candidates)
-            and bool(fallback_reason)
-        )
+        fallback_candidates = []
+        should_fallback = False
         if should_fallback:
             _json_log(
                 "comic_storyboard_video_fallback_started",
@@ -13635,6 +13760,17 @@ def _submit_ai_comic_media_task(*, model, prompt, params=None, count=1, project_
         count=count,
         billing_ctx=billing_ctx,
     )
+    if minimax_h3_direct:
+        task["provider"] = "minimax-direct"
+        task["actual_model"] = str(result.get("actual_model") or MINIMAX_H3_PROVIDER_MODEL)
+        task["actualModel"] = task["actual_model"]
+        task["billing_status"] = str(result.get("billing_status") or "awaiting_actual_cost")
+        task["billingStatus"] = task["billing_status"]
+        task["billing_price_table_version"] = str(
+            result.get("billing_price_table_version") or "minimax-h3-price-unresolved"
+        )
+        task["billingPriceTableVersion"] = task["billing_price_table_version"]
+        _save_local_comic_state()
     if storyboard_audio_mode:
         apply_storyboard_audio_mode(task)
     return task
@@ -13988,6 +14124,325 @@ def _comic_gateway_is_offpeak_unsupported_error(error):
     return bool(re.search(r"(错峰|off[-_ ]?peak).*(不支持|unsupported)|全能版不支持错峰", text, re.IGNORECASE))
 
 
+def _minimax_h3_https_url(value, label="reference URL"):
+    text = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except Exception:
+        parsed = None
+    if not parsed or parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError(f"{label} must be a public HTTPS URL")
+    host = (parsed.hostname or "").strip().lower()
+    if not host or host in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError(f"{label} must be a public HTTPS URL")
+    try:
+        address = ipaddress.ip_address(host)
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+            raise ValueError(f"{label} must be a public HTTPS URL")
+    except ValueError as exc:
+        if "public HTTPS URL" in str(exc):
+            raise
+    return text
+
+
+def _minimax_h3_duration(params):
+    params = params if isinstance(params, dict) else {}
+    for key in ("duration", "video_duration", "videoDuration", "seconds"):
+        value = params.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            duration = int(float(value))
+        except Exception as exc:
+            raise ValueError("MiniMax H3 duration must be an integer") from exc
+        if MINIMAX_H3_DURATION_MIN <= duration <= MINIMAX_H3_DURATION_MAX:
+            return duration
+        raise ValueError("MiniMax H3 duration must be between 4 and 15 seconds")
+    return MINIMAX_H3_DURATION_MIN
+
+
+def _minimax_h3_resolution(params):
+    params = params if isinstance(params, dict) else {}
+    for key in ("resolution", "videoSize", "video_size", "size", "quality"):
+        raw = str(params.get(key) or "").strip()
+        if not raw:
+            continue
+        normalized = raw.upper()
+        if normalized in {"768", "768P", "720P", "720"}:
+            return "768P"
+        if normalized in {"2K", "1440P", "1440"}:
+            return "2K"
+        raise ValueError("MiniMax H3 resolution must be 768P or 2K")
+    return "768P"
+
+
+def _minimax_h3_content_from_params(params):
+    params = params if isinstance(params, dict) else {}
+    for key in (
+        "reference_image_urls",
+        "referenceImageUrls",
+        "image_urls",
+        "imageUrls",
+        "inputUrls",
+        "images",
+        "reference_images",
+        "referenceImages",
+        "subject_reference_images",
+        "additional_reference_images",
+        "character_reference_images",
+        "scene_reference_images",
+        "prop_reference_images",
+        "strict_reference_image_urls",
+        "storyboard_image",
+        "storyboardImage",
+        "end_frame_image",
+        "endFrameImage",
+        "first_frame",
+        "firstFrameUrl",
+        "last_frame",
+        "lastFrameUrl",
+        "image_url",
+        "imageUrl",
+        "url",
+        "urls",
+    ):
+        if key not in params:
+            continue
+        for candidate in _minimax_h3_reference_candidates(params.get(key)):
+            _minimax_h3_https_url(candidate, "content URL")
+    action_refs, extra_refs, refs = _comic_collect_video_reference_urls(params)
+    refs = _dedupe_urls([*action_refs, *extra_refs, *refs])[:7]
+    content = []
+    for ref in refs:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _minimax_h3_https_url(ref, "content URL")},
+            }
+        )
+    return content
+
+
+def _minimax_h3_reference_candidates(value):
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        items = []
+        for item in value:
+            items.extend(_minimax_h3_reference_candidates(item))
+        return items
+    if isinstance(value, dict):
+        items = []
+        for key in (
+            "url",
+            "src",
+            "image_url",
+            "imageUrl",
+            "media_url",
+            "mediaUrl",
+        ):
+            if key in value:
+                items.extend(_minimax_h3_reference_candidates(value.get(key)))
+        return items
+    return []
+
+
+def _minimax_h3_json_request(method, path, payload=None, timeout=60):
+    if not MINIMAX_ENABLED:
+        raise RuntimeError("MiniMax H3 is disabled")
+    if not MINIMAX_COMIC_API_KEY:
+        raise RuntimeError("MiniMax comic API key is not configured")
+    base = MINIMAX_COMIC_API_BASE.rstrip("/")
+    parsed_base = urllib.parse.urlparse(base)
+    if parsed_base.scheme.lower() != "https" or not parsed_base.netloc:
+        raise RuntimeError("MiniMax comic API base must be HTTPS")
+    body = None
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        base + path,
+        data=body,
+        headers={
+            "Authorization": "Bearer " + MINIMAX_COMIC_API_KEY,
+            "Content-Type": "application/json",
+            "User-Agent": "AI-CanvasPro-MiniMax-H3/1.0",
+        },
+        method=str(method or "GET").upper(),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:240]
+        except Exception:
+            detail = str(exc)
+        raise RuntimeError("MiniMax H3 HTTP %s: %s" % (exc.code, detail))
+    data = json.loads((raw or b"{}").decode("utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("MiniMax H3 returned invalid JSON")
+    base_resp = data.get("base_resp")
+    if isinstance(base_resp, dict):
+        status_code = base_resp.get("status_code")
+        if status_code not in (None, 0, "0"):
+            raise RuntimeError(str(base_resp.get("status_msg") or "MiniMax H3 rejected request"))
+    return data
+
+
+def _minimax_h3_provider_result_url(payload):
+    if not isinstance(payload, dict):
+        return ""
+    task = payload.get("task")
+    if isinstance(task, dict):
+        content = task.get("content")
+        if isinstance(content, dict):
+            url = str(content.get("url") or "").strip()
+            if url:
+                return _minimax_h3_https_url(url, "provider result URL")
+        found = _minimax_h3_provider_result_url(task)
+        if found:
+            return found
+    for key in (
+        "result_url",
+        "resultUrl",
+        "video_url",
+        "videoUrl",
+        "url",
+        "output",
+        "fileUrl",
+        "file_url",
+        "download_url",
+        "downloadUrl",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return _minimax_h3_https_url(value.strip(), "provider result URL")
+    for key in ("data", "result", "response", "payload"):
+        found = _minimax_h3_provider_result_url(payload.get(key))
+        if found:
+            return found
+    for key in ("results", "outputs", "files", "urls"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    return _minimax_h3_https_url(item.strip(), "provider result URL")
+                found = _minimax_h3_provider_result_url(item)
+                if found:
+                    return found
+    return ""
+
+
+def _minimax_h3_task_status_envelope(task_id):
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise RuntimeError("MiniMax H3 task_id is required")
+    payload = _minimax_h3_json_request(
+        "GET",
+        "/v2/query/video_generation/" + urllib.parse.quote(task_id, safe=""),
+        None,
+        min(MINIMAX_TASK_TIMEOUT_SEC, 120),
+    )
+    raw_status = str(payload.get("status") or payload.get("state") or "").strip().lower()
+    if raw_status in {"success", "succeeded", "complete", "completed"}:
+        result_url = _minimax_h3_provider_result_url(payload)
+        if not result_url:
+            raise RuntimeError("MiniMax H3 completed without result URL")
+        return {
+            "status": "COMPLETED",
+            "task_status": "COMPLETED",
+            "state": "success",
+            "is_final": True,
+            "progress": "100",
+            "result_url": result_url,
+            "url": result_url,
+            "video_url": result_url,
+            "videoUrl": result_url,
+            "task_id": task_id,
+            "provider": "minimax-direct",
+            "actual_model": MINIMAX_H3_PROVIDER_MODEL,
+            "billing_status": "awaiting_actual_cost",
+            "billing_price_table_version": "minimax-h3-price-unresolved",
+        }
+    if raw_status in {"pending", "processing", "queued", "running"}:
+        return {
+            "status": "RUNNING",
+            "task_status": "RUNNING",
+            "state": "running",
+            "is_final": False,
+            "progress": str(payload.get("progress") or ""),
+            "task_id": task_id,
+            "provider": "minimax-direct",
+            "actual_model": MINIMAX_H3_PROVIDER_MODEL,
+            "billing_status": "awaiting_actual_cost",
+            "billing_price_table_version": "minimax-h3-price-unresolved",
+        }
+    if raw_status in {"fail", "failed", "failure", "cancelled", "canceled"}:
+        message = (
+            payload.get("error")
+            or payload.get("message")
+            or payload.get("status_msg")
+            or "MiniMax H3 provider task failed"
+        )
+        return {
+            "status": "FAILED",
+            "task_status": "FAILED",
+            "state": "failed",
+            "is_final": True,
+            "progress": "100",
+            "error": AiApiService.sanitize_error(str(message)),
+            "task_id": task_id,
+            "provider": "minimax-direct",
+            "actual_model": MINIMAX_H3_PROVIDER_MODEL,
+            "billing_status": "awaiting_actual_cost",
+            "billing_price_table_version": "minimax-h3-price-unresolved",
+        }
+    raise RuntimeError("MiniMax H3 returned malformed task status")
+
+
+def _submit_minimax_h3_comic_video_task(prompt, params=None):
+    params = params if isinstance(params, dict) else {}
+    prompt = str(prompt or params.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("MiniMax H3 prompt is required")
+    provider_payload = {
+        "model": MINIMAX_H3_PROVIDER_MODEL,
+        "prompt": prompt,
+        "duration": _minimax_h3_duration(params),
+        "resolution": _minimax_h3_resolution(params),
+    }
+    content = _minimax_h3_content_from_params(params)
+    if content:
+        provider_payload["content"] = content
+    created = _minimax_h3_json_request(
+        "POST",
+        "/v2/video_generation",
+        provider_payload,
+        min(MINIMAX_TASK_TIMEOUT_SEC, 120),
+    )
+    task_id = _extract_comic_gateway_task_id(created)
+    if not task_id:
+        raise RuntimeError("MiniMax H3 did not return task_id")
+    _json_log(
+        "minimax_h3_comic_submitted",
+        provider="minimax-direct",
+        model=MINIMAX_H3_PROVIDER_MODEL,
+        task_id=task_id,
+        duration=provider_payload.get("duration"),
+        resolution=provider_payload.get("resolution"),
+        reference_count=len(content),
+    )
+    return {
+        "task_id": task_id,
+        "actual_model": MINIMAX_H3_PROVIDER_MODEL,
+        "provider": "minimax-direct",
+        "billing_status": "awaiting_actual_cost",
+        "billing_price_table_version": "minimax-h3-price-unresolved",
+    }
+
+
 def _submit_comic_gateway_video_task(model, prompt, params=None, count=1):
     cfg = _get_api_gateway_config()
     base = str(cfg.get("apiUrl") or "").strip().rstrip("/")
@@ -14079,6 +14534,17 @@ def _expand_comic_storyboard_image_submit_kwargs(base_kwargs, workflow_mode, pay
     prompts = _comic_storyboard_image_frame_prompts(workflow_mode, payload, frame_prompt_source)
     if not prompts:
         return [base_kwargs]
+    payload = payload if isinstance(payload, dict) else {}
+    frame_style_mode = str(
+        payload.get("frame_style_mode")
+        or payload.get("frameStyleMode")
+        or payload.get("style_mode")
+        or payload.get("styleMode")
+        or ""
+    ).strip().lower()
+    colored_pencil_mode = frame_style_mode in {
+        "colored_pencil", "colored-pencil", "coloredpencil", "彩铅", "彩铅手绘"
+    }
     requested_frame_index = _comic_storyboard_requested_image_frame_index(workflow_mode, payload)
     indexed_prompts = (
         [(requested_frame_index, prompts[requested_frame_index - 1])]
@@ -14091,7 +14557,7 @@ def _expand_comic_storyboard_image_submit_kwargs(base_kwargs, workflow_mode, pay
         kwargs = dict(base_kwargs)
         kwargs.pop("_frame_prompt_source", None)
         strict_ref_prompt = ""
-        if isinstance(strict_refs, dict) and strict_refs.get("all"):
+        if isinstance(strict_refs, dict) and strict_refs.get("all") and not colored_pencil_mode:
             strict_ref_prompt = (
                 "严格参考同一批已上传的人物、场景、道具参考图；七帧中的每一帧都必须保持角色脸型发型服装、"
                 "场景空间结构光线、道具形状材质一致，不能有某一帧忽略参考图。"

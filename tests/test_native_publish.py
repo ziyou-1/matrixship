@@ -128,7 +128,9 @@ class NativePublishTest(unittest.TestCase):
 
         self.assertIn("self.platform = QtWidgets.QComboBox()", init_src)
         self.assertIn('self.platform.addItem("抖音", "douyin")', init_src)
-        self.assertIn('self.platform.addItem("小红书", "xhs")', init_src)
+        self.assertIn("if xhs_enabled():", init_src)
+        self.assertIn("self.platform.addItem(XHS_PLATFORM_LABEL, XHS_PLATFORM_CODE)", init_src)
+        self.assertNotIn('self.platform.addItem("小红书", "xhs")', init_src)
         self.assertIn("load_account_matrix_rows()", load_src)
         self.assertIn("self._refresh_publish_accounts()", on_src)
         self.assertNotIn('clean_accounts(d.get("accounts") or [], platform="douyin", ready_only=True)', on_src)
@@ -166,6 +168,55 @@ class NativePublishTest(unittest.TestCase):
         ])
         self.assertEqual(douyin[0]["centralAccountId"], "lb-ch-202607151456:douyin-17fdbbef58f7d574")
         self.assertTrue(all(a.get("source") == "local-browser" for a in douyin))
+
+    def test_account_matrix_filters_offline_default_local_douyin_placeholder(self):
+        rows = self.client.merge_account_sources(
+            [],
+            [
+                {
+                    "id": "douyin-self",
+                    "platform": "douyin",
+                    "name": "抖音账号 n-self",
+                    "cookieReady": False,
+                    "online": False,
+                    "needLogin": True,
+                    "status": "offline",
+                },
+                {
+                    "id": "douyin-real123456",
+                    "platform": "douyin",
+                    "name": "抖音账号 123456",
+                    "cookieReady": False,
+                    "online": False,
+                    "needLogin": True,
+                    "status": "offline",
+                },
+            ],
+        )
+
+        douyin = self.client.clean_accounts(rows, platform="douyin")
+
+        self.assertEqual([a["id"] for a in douyin], ["douyin-real123456"])
+
+    def test_xhs_central_only_account_is_hidden_without_local_login(self):
+        rows = self.client.merge_account_sources(
+            [
+                {
+                    "id": "lb-ch-202607151456:xhs-self",
+                    "localAccountId": "xhs-self",
+                    "nodeId": "lb-ch-202607151456",
+                    "platform": "xhs",
+                    "name": "小红书账号",
+                    "cookieReady": True,
+                    "online": True,
+                },
+            ],
+            [],
+        )
+
+        xhs = self.client.clean_accounts(rows, platform="xhs")
+
+        self.assertEqual(xhs, [])
 
     def test_account_display_name_prefers_real_nickname_over_generated_id(self):
         self.assertEqual(self.client.account_display_name({
@@ -229,6 +280,19 @@ class NativePublishTest(unittest.TestCase):
         self.assertIn('centralAccountId', delete_src)
         self.assertIn('account_not_found', delete_src)
         self.assertNotIn('ok = isinstance(j, dict) and j.get("ok")', delete_src)
+
+    def test_account_matrix_rename_syncs_local_and_central_records(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class AccountsPage")
+        end = src.index("class TablePage", start)
+        block = src[start:end]
+        rename_start = block.index("    def rename(self, account_id")
+        rename_src = block[rename_start:block.index("    def _on(self, tag, d):", rename_start)]
+
+        self.assertIn('local_api("POST", "/api/accounts/rename"', rename_src)
+        self.assertIn('api("POST", "/api/accounts/rename"', rename_src)
+        self.assertIn("centralAccountId", rename_src)
+        self.assertIn('account_id if ":" in str(account_id or "") else ""', rename_src)
 
     def test_native_publish_button_label_follows_selected_platform(self):
         self.assertEqual(self.client._publish_platform_label("xhs"), "小红书")
@@ -555,6 +619,39 @@ class NativePublishTest(unittest.TestCase):
 
         self.assertIn("\u5b89\u5168\u9a8c\u8bc1", msg)
         self.assertIn("\u6d4f\u89c8\u5668", msg)
+
+    def test_douyin_multi_file_publish_result_explains_single_video_limit(self):
+        result = {
+            "status": "done",
+            "result": {
+                "ok": False,
+                "published": False,
+                "dryRun": False,
+                "error": "douyin_single_video_required",
+                "fileCount": 2,
+            },
+        }
+
+        msg = self.client._publish_result_message(result)
+
+        self.assertIn("\u6296\u97f3\u89c6\u9891\u53d1\u5e03\u53ea\u652f\u6301\u5355\u4e2a\u89c6\u9891\u6587\u4ef6", msg)
+        self.assertIn("2", msg)
+
+    def test_closed_browser_upload_publish_result_is_shown_in_chinese(self):
+        result = {
+            "status": "done",
+            "result": {
+                "ok": False,
+                "published": False,
+                "dryRun": False,
+                "error": "Locator.set_input_files: Target page, context or browser has been closed",
+            },
+        }
+
+        msg = self.client._publish_result_message(result)
+
+        self.assertIn("\u53d1\u5e03\u9875\u9762\u6216\u6d4f\u89c8\u5668\u5df2\u5173\u95ed", msg)
+        self.assertNotIn("Target page, context or browser has been closed", msg)
 
     def test_local_publish_api_response_preserves_dry_run_flag(self):
         src = API_SERVER.read_text(encoding="utf-8")

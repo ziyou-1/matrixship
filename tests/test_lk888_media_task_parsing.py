@@ -8,7 +8,7 @@ CLIENT = ROOT / "backend" / "matrix_native_client.py"
 
 
 def load_helper(name):
-    src = CLIENT.read_text(encoding="utf-8")
+    src = CLIENT.read_text(encoding="utf-8-sig")
     tree = ast.parse(src)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:

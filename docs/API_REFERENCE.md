@@ -2,12 +2,81 @@
 
 本文档覆盖登录/注册的版本化法律同意、下载入库、转写响应契约，以及“分解视频 -> 同款替换生成”的客户端内部事件。OpenAPI 3.1 契约见 `docs/openapi.yaml`。
 
+## GET /download
+
+公开客户下载页，返回 `text/html; charset=utf-8`。页面用于展示“云灵星图 AI 爆款复刻平台 Windows 客户端下载”的产品说明、适用系统、核心能力、安装步骤和安全支持信息。
+
+当前下载按钮为禁用状态，文案为“Windows 客户端即将开放下载”，页面不链接真实安装包，不暴露 `/MatrixShipAgent-Setup.exe`。
+
+该页面是中心服内置 HTML 页面，不新增 JSON API 契约，不需要写入 `docs/openapi.yaml`。回滚时删除中心服 `/download` 路由和页面渲染函数即可；现有 `/MatrixShipAgent-Setup.exe` 安装包直链不受影响。
+
 ## 鉴权
 
 - 本地执行引擎：当 `MATRIX_AGENT_TOKEN_AUTH=1` 时使用 `Authorization: Bearer <MATRIX_AGENT_TOKEN>`。
 - 中心服：使用登录后返回的会话 Token，格式同样为 Bearer Token。
 - LK888 Key 只存在于中心服环境变量 `LK888_API_KEY`，客户端请求和文档中不得出现真实 Key。
 - 中心服登录态返回 `appRole/productRole/roleScope`：`platform_admin` 表示平台管理员，`enterprise_admin` 表示企业家，`normal_user` 表示普通用户；数据范围分别为 `all/org/self`。
+
+## 平台启用范围
+
+当前生产默认只开放抖音。小红书/XHS 的本地客户端入口、本地执行器接口、中心服调度、平台适配器和任务类型默认禁用；命中后返回 HTTP 404 与稳定错误码 `platform_disabled`，响应不包含 Cookie、Token、Authorization 或完整私有 URL。需要恢复时，显式设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服。
+
+禁用范围包括 `/api/xhs/*`、`/api/xhs-note-replacement/*`、`xhs.*` 本地浏览器任务、`platform=xhs/xiaohongshu/rednote/小红书` 的任务 payload，以及账号矩阵中小红书账号的默认展示。历史小红书账号无需保留，可用 `scripts/disable_xhs_accounts.py --dry-run --data-dir <本地数据目录> --central-state <scheduler_state.json>` 预览清理，再去掉 `--dry-run` 执行。
+
+## MiniMax H3 直连视频
+
+中心服通过官方 MiniMax API 直连视频生成，不经过 LK888。功能开关和中心服专用密钥只从环境读取：
+
+- `MINIMAX_ENABLED=0/false/no/off` 时，提交返回 `503 minimax_disabled`。
+- `MINIMAX_CENTER_API_KEY` 缺失时，提交返回 `503 minimax_not_configured`。
+- `MINIMAX_MAX_ACTIVE_TASKS` 默认是 `2`，达到上限时返回 `429 minimax_concurrency_limit`。
+- `MINIMAX_TASK_TIMEOUT_SEC` 默认是 `900` 秒；`MINIMAX_POLL_INTERVAL_SEC` 只供后续状态轮询使用。
+- API Key 永远不会出现在响应、日志或客户端请求中，只由适配器放入 `Authorization` 请求头。
+
+### POST /api/v1/minimax/video/generate
+
+需要中心服登录会话。请求示例：
+
+```json
+{
+  "model": "MiniMax-H3",
+  "prompt": "walk through a station",
+  "duration": 4,
+  "resolution": "768P"
+}
+```
+
+请求遵循 MiniMax H3 官方视频生成契约：中心服会忽略客户端 `model` 标签并固定提交 provider model `MiniMax-H3`，`duration` 为 4-15 秒，`resolution` 为 `768P` 或 `2K`，可选 `content` 多模态数组。数组内的 URL 必须是公共 HTTPS URL；本地路径、localhost、私网 IP、link-local、保留地址和 `data:` URL 在提交 provider 前返回 `400 invalid_minimax_request`。中心服不接受旧的 Hailuo/模板 Agent 模式字段。
+
+成功返回 `202`，并保存 provider-specific pending 状态：
+
+```json
+{
+  "ok": true,
+  "businessTaskId": "minimax-business-id",
+  "providerTaskId": "provider-task-id",
+  "requestedModel": "MiniMax H3",
+  "actualModel": "MiniMax-H3",
+  "mode": "video_generation",
+  "duration": 4,
+  "resolution": "768P",
+  "billingRef": "minimax:center:minimax-business-id:provider-task-id",
+  "status": "pending",
+  "traceId": "trace-..."
+}
+```
+
+`businessTaskId`、`providerTaskId`、`billingRef`、`actualModel` 和 `traceId` 用于恢复和排查。错误响应统一包含 `ok=false`、脱敏 `error`、`stage`、`errorId` 和 `traceId`。
+
+### GET /api/v1/minimax/video/tasks/{task_id}
+
+该接口需要同一登录用户和组织范围。对 `pending/processing` 任务，中心服会调用 MiniMax 官方 `GET /v2/query/video_generation/{task_id}` 拉取状态；成功时提取 `task.content.url`，返回 `resultUrl/providerResultUrl`，并在价格币种和最终扣费规则确认前保持 `awaiting_actual_cost`。失败任务返回 `failed` 且不扣费；Task 3 不使用 `Decimal("0.28")` 或任何本地估算金额进行生产扣费。
+
+### Remote AI Canvas MiniMax H3
+
+远程漫剧生成器的可选视频模型 id 是 `minimax-h3`，展示为 `MiniMax H3`。该模型只调用 MiniMax 官方 `POST /v2/video_generation`，provider model 固定为 `MiniMax-H3`，不进入 LK888/APIMart gateway。远程服务读取独立密钥 `MINIMAX_COMIC_API_KEY` 和 `MINIMAX_COMIC_API_BASE=https://api.minimaxi.com`；该密钥不得与中心服 `MINIMAX_CENTER_API_KEY` 混用。
+
+`minimax-h3` 支持 `duration=4..15`、`resolution=768P|2K`，参考图只接受公共 HTTPS URL。本地路径、localhost、私网 IP、link-local、保留地址和 `data:` URL 会在 provider submit 前失败。远程刷新 `provider=minimax-direct` 任务时调用 MiniMax 官方 `GET /v2/query/video_generation/{task_id}` 并写入 `result_url`。由于 MiniMax H3 官方价格币种尚未在本项目确认，远程任务记录 `provider=minimax-direct`、`actual_model=MiniMax-H3`、`billing_status=awaiting_actual_cost`，不做本地预扣或估算扣费。
 
 ## POST /api/auth/login 与 /api/auth/register
 
@@ -31,7 +100,7 @@
 - `accepted` 必须为 `true`。
 - `termsVersion` 和 `privacyVersion` 必须与中心服当前版本完全一致。
 - `acceptedAt` 是客户端 UTC ISO-8601 时间；中心服另外记录不可由客户端修改的服务端接受时间。
-- 手机号登录继续要求短信验证码；用户名登录只需用户名、密码和法律同意。
+- 中心服接口仍兼容手机号验证码登录；本地客户端登录页仅提交用户名、密码和法律同意，不再提供手机号验证码登录入口。
 - 注册请求使用 `phone` / `password` / `code` / `legalConsent`。
 
 缺少同意时返回 HTTP 428：
@@ -47,6 +116,32 @@
 ```
 
 版本不一致时 `error` 为 `legal_consent_outdated`。同意成功后，中心服将最新状态写入 `legalConsents`，并生成 `legal.consent.accept` 审计记录。
+
+## POST /api/auth/change-password
+
+用途：当前已登录用户自助修改自己的密码，企业家和普通用户都可调用；该接口不允许替其他用户改密码，管理员重置成员密码继续使用团队成员管理里的重置接口。
+
+请求必须携带当前会话 token：
+
+```json
+{
+  "currentPassword": "old-password",
+  "newPassword": "new-password-1"
+}
+```
+
+- `currentPassword` 必填。
+- `newPassword` 至少 8 位。
+- 成功后保留当前会话，中心服会撤销该用户其它会话；本地客户端账号矩阵只提示“密码修改成功”。
+- 审计事件为 `auth.change_password`，只记录用户 ID、状态和错误码，不记录明文密码。
+
+常见错误：
+
+- `missing_current_password`：未输入当前密码。
+- `new_password_too_short`：新密码不足 8 位。
+- `current_password_invalid`：当前密码不正确。
+- `not_authenticated`：会话失效。
+- `session_login_required`：当前不是账号密码会话。
 
 成功响应会额外返回当前产品角色，供本地客户端隐藏菜单和资金入口：
 
@@ -96,6 +191,43 @@
 - 不再提交 `phone` / `email`，即使旧接口仍兼容历史字段。
 
 响应只在创建成功时返回一次明文 `inviteCode`；邀请列表和校验响应不得返回明文邀请码或 token hash。
+
+## POST /api/enterprise/users/upsert
+
+用途：平台管理员在“企业中心 -> 团队成员 -> 添加成员”里直接添加企业成员。新本地客户端不再要求手机号或邮箱，只填写姓名、初始密码和成员角色。
+
+请求：
+```json
+{
+  "orgId": "org-a",
+  "name": "张三",
+  "password": "optional-password",
+  "role": "member"
+}
+```
+
+- `orgId` 和 `name` 必填。
+- `password` 可留空；留空时成员加入企业但暂不可交付密码，管理员可再用“重置密码”生成临时密码。
+- `role` 可为 `member` 或 `admin`；客户端只对平台管理员显示直接添加入口。
+- `phone` / `email` 仅为历史兼容字段，新添加成员流程不提交这两个字段。
+- 没有手机号/邮箱时，中心服自动生成 `user-xxxxxxxxxxxx` 形式的用户 ID，并作为登录账号返回。
+
+成功响应包含一次性展示给管理员的登录信息：
+
+```json
+{
+  "ok": true,
+  "orgId": "org-a",
+  "user": {"id": "user-ab12cd34ef56", "name": "张三"},
+  "credential": {
+    "identifier": "user-ab12cd34ef56",
+    "initialPassword": "optional-password",
+    "generated": false
+  }
+}
+```
+
+审计事件为 `enterprise.user.upsert`，不得记录明文密码。
 
 ## POST /api/enterprise/invites/verify
 
@@ -160,8 +292,8 @@
 
 ## POST /api/accounts/rename
 
-运行单元：本地执行引擎 `127.0.0.1:9081`。
-用途：只修改本机账号矩阵里的显示昵称，不修改平台账号资料，不返回 Cookie。
+运行单元：本地执行引擎 `127.0.0.1:9081` 与中心服均支持。
+用途：只修改账号矩阵里的显示昵称，不修改平台账号资料，不返回 Cookie。
 
 请求：
 ```json
@@ -174,10 +306,43 @@
 ```
 
 字段约束：
-- `id` / `accountId`：账号矩阵里的本机账号 ID；如果传入中心端组合 ID，会自动取冒号后的本机账号 ID。
+- `id` / `accountId`：账号矩阵里的本机账号 ID 或中心端组合 ID，例如 `lb-ch-202607151456:xhs-self`。本地执行引擎会自动取冒号后的本机账号 ID；中心服会更新对应中心账号记录。
 - `name` / `nickname` / `displayName`：新的显示名，不能为空，最多保存 40 个字符。
 
-该接口会同步写入账号注册表和 `account_display_meta.json`。后续 `/api/accounts` 返回会优先使用该昵称，内容采集、寻找线索、AI 触达、素材发布和自动化工作流的账号下拉也使用同一显示名。
+本地执行引擎会写入本机账号注册表和 `account_display_meta.json`；中心服会写入 `accountsRegistry` 的 `displayNameOverride`，后续节点心跳不会覆盖人工昵称。后续 `/api/accounts` 返回会优先使用该昵称，内容采集、寻找线索、AI 触达、素材发布和自动化工作流的账号下拉也使用同一显示名。小红书只有中心旧记录、没有本机登录态时，客户端会显示为登录态失效，避免把中心记录误当作可操作账号。
+
+## POST /api/cloud-login/open-url
+
+运行单元：本地执行引擎 `127.0.0.1:9081`。
+
+用途：用账号矩阵中选中的本地账号 profile 打开平台页面，供获客中心“打开主页”、后续平台自动化入口复用。该接口不会调用 Windows 系统默认浏览器，避免登录时使用 Chrome/Chromium profile、打开主页却跑到 Edge 导致登录态不一致。
+
+请求：
+```json
+{
+  "accountId": "douyin-0123456789abcdef",
+  "url": "https://www.douyin.com/user/MS4wLjAB...",
+  "platform": "douyin"
+}
+```
+
+成功响应：
+```json
+{
+  "ok": true,
+  "hasSession": true,
+  "sessionId": "local-browser-session-id",
+  "accountId": "douyin-0123456789abcdef",
+  "requestedUrl": "https://www.douyin.com/user/MS4wLjAB...",
+  "createdSession": true,
+  "message": "cloud_browser_url_opened"
+}
+```
+
+字段约束：
+- `url`：必填 HTTP(S) URL。
+- `accountId` / `account`：账号矩阵里的本机账号 ID；未传时兼容默认 `douyin-self`，但正式 UI 应始终传入用户当前选择的账号。
+- 响应只返回 session、账号和导航诊断信息，不返回 Cookie、Token 或私信正文。
 
 ## POST /api/douyin/download
 
@@ -229,6 +394,19 @@
 }
 ```
 
+作品详情接口连续 4 次发生连接或读取超时后返回 HTTP 502。客户端不应展示上游异常，应根据稳定错误码提示用户重试：
+
+```json
+{
+  "ok": false,
+  "error": "douyin_detail_network_failed",
+  "stage": "detail",
+  "errorId": "err-0123456789abcdef"
+}
+```
+
+详情请求使用 8 秒连接超时和 15 秒读取超时；首次失败后按 1、2、4 秒间隔重试。只重试连接和超时异常，不重试 HTTP 业务响应或 JSON 解析错误。详细原因仅写入脱敏 JSON 日志。
+
 如果文件已下载但本地素材库入库失败，固定返回 HTTP 500，不暴露原始异常和堆栈：
 
 ```json
@@ -240,20 +418,20 @@
 }
 ```
 
-状态码：下载 403 返回 HTTP 403；其他下载或媒体校验错误返回 HTTP 502；入库失败返回 HTTP 500。中心服调度同一接口时也使用相同的入库失败契约。
+状态码：下载 403 返回 HTTP 403；详情连接持续失败、其他下载或媒体校验错误返回 HTTP 502；入库失败返回 HTTP 500。中心服调度同一接口时也使用相同的入库失败契约。
 
 ## 小红书采集通用请求字段
 
 适用于本地执行引擎的小红书搜索、笔记下载、读取评论和获客发现：`/api/xhs/search`、`/api/xhs/download`、`/api/xhs/comments`、`/api/finder/discover` 且 `platform=xhs`。
 
-默认模式按动作区分：搜索和笔记下载默认游客采集；读取评论和获客中心小红书寻客必须使用已登录账号，不再先走游客模式。
+默认模式：小红书搜索、笔记下载、读取评论和获客发现都默认使用已登录账号，不再先走游客模式。游客模式只作为显式兼容参数或临时回滚能力使用。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---:|---|
-| `guestMode` | boolean | 搜索/下载为 `true`；评论/寻客为 `false` | `true` 表示游客采集，不读取登录账号 profile、Cookie 或授权状态；`false` 表示本次请求使用已登录账号采集。 |
-| `accountCollectionConfirmed` | boolean | `false` | 仅当 `guestMode=false` 时有效。读取评论和获客中心小红书寻客必须为 `true`，否则返回 `xhs_account_collection_unconfirmed`。 |
+| `guestMode` | boolean | `false` | `true` 表示显式游客采集，不读取登录账号 profile、Cookie 或授权状态；`false` 表示本次请求使用已登录账号采集。 |
+| `accountCollectionConfirmed` | boolean | `false` | 仅当 `guestMode=false` 时有效。账号采集必须为 `true`，否则返回 `xhs_account_collection_unconfirmed`。 |
 
-游客采集不写入小红书安全模式计数；确认账号采集会执行风控预检和结果记录。搜索/下载公开访问受限时可能返回 `xhs_guest_login_required`、`xhs_guest_access_limited` 或 `xhs_ip_risk`，客户端会提示用户确认是否“使用账号采集一次”。评论和寻客属于账号动作，调用方应直接传 `guestMode=false`、`accountCollectionConfirmed=true`。
+游客采集不写入小红书安全模式计数；确认账号采集会执行登录态门禁、风控预检和结果记录。搜索/下载公开访问受限时可能返回 `xhs_guest_login_required`、`xhs_guest_access_limited` 或 `xhs_ip_risk`。账号采集时如实际页面落到游客推荐流或创作者中心未登录，会返回 `xhs_login_required` 或 `xhs_creator_login_required`，调用方应提示用户到账号矩阵或创作者中心重新登录。
 
 ## POST /api/xhs/download
 
@@ -338,6 +516,22 @@
 
 `publishTitle` 可选。存在时真实发布标题以该字段为准；不存在时回退素材库保存的 `title`。正式发布提交前，本地发布器将标题限制为前 30 个字符；素材库保存的原始标题可以更长。
 
+失败响应中可能返回：
+
+```json
+{
+  "ok": false,
+  "filled": false,
+  "published": false,
+  "dryRun": false,
+  "error": "douyin_single_video_required",
+  "platform": "douyin",
+  "fileCount": 2
+}
+```
+
+`douyin_single_video_required` 表示当前素材记录包含多个文件，抖音视频发布入口只允许单个视频文件。客户端应提示用户重新选择单个 `.mp4` / `.mov` 视频素材，不应继续打开浏览器上传。
+
 ## GET /api/public-media/{materialId}/{fileName}
 
 运行单元：中心服 `127.0.0.1:9080`，经 Cloudflare Tunnel 或正式 HTTPS 域名暴露给 LK888。
@@ -394,8 +588,8 @@
 - 片段 `script` 是漫剧分镜对白的唯一台词来源。
 - 客户端 `audioMode` 使用 `auto` 或 `tts`：`source/origin/original/source_audio` 兼容映射为 `auto`，`voice/ai_voice` 映射为 `tts`。显式 `auto` 保留生成视频自带声音，不生成 TTS；显式 `tts` 按口播稿生成 TTS。远程服务把缺失或未知值规范为兼容 `legacy`，继续历史 TTS 与备用视频重混行为。`uploaded/uploaded_audio/upload` 仍会被前置阻断，直到漫剧后端提供稳定的片段音频接口。
 - 片段失败不会抛整个任务；任务会进入 `partial`，`errorId` 保留在片段和任务 JSON 中。
-- 漫剧任务查询响应提供 snake_case 和 camelCase 双版本的 `requested_model`、`actual_model`、`fallback_model`、`fallback_reason`、`fallback_applied`、`fallback_candidates`、`fallback_index`、`fallback_history`。降级历史项只包含模型、状态、远程任务 ID 和脱敏错误，不返回密钥或 Authorization。
-- 默认视频链为 `doubao-seedance-2-0-260128 -> vidu/viduq3-mix_reference2video -> wan2.7-shouweizhen -> kling-v3-omni-shouweizhen -> pixverse-v6-shouweizhen`。Seedance 真人隐私拒绝或 R2V 明确返回 `InvalidParameter.AudioDurationExceeded` 时启动备用链；已受理任务明确失败才进入下一模型。查询超时、502、429 不触发新模型提交，分辨率和其他普通参数错误也不自动降级。
+- 漫剧任务查询响应仍提供 snake_case 和 camelCase 双版本的 `requested_model`、`actual_model`、`fallback_model`、`fallback_reason`、`fallback_applied`、`fallback_candidates`、`fallback_index`、`fallback_history`。其中 `fallback_candidates` 和 `fallback_history` 仅用于诊断历史或远端兼容行为，不代表本地客户端会自动继续提交备用模型。
+- 同款替换/Seedance 场景下，客户端只提交用户当前选择的模型；Seedance 真人隐私拒绝、素材审核拒绝或 `InvalidParameter.AudioDurationExceeded` 都直接返回中文失败提示，不自动进入 `vidu/viduq3-mix_reference2video`、`wan2.7-shouweizhen`、`kling-v3-omni-shouweizhen` 或 `pixverse-v6-shouweizhen`。查询超时、502、429 也不再触发新模型提交。
 - 初次视频生成和单段视频重生成在模型提交前调用漫剧 `GET /api/model-prices` 读取价格，并通过中心服既有 `/api/billing/charge` 从当前本地账户扣费。按秒模型金额为 `price_per_call * duration`，按次模型金额为 `price_per_call`；Vidu 请求标识 `vidu/viduq3-mix_reference2video` 可映射到计价标识 `viduq3-cankaosheng`。当前公开价格响应没有 `billing_method/price_tiers`，客户端在缺失时按描述、provider 和模型标识推断，不能覆盖远程未公开的档位系数。
 - 每次扣费使用唯一 `comic_video:<job>:project:<project>:seg:<segment>:<attempt>` 引用。提交或等待失败调用 `/api/billing/refund` 按同一引用退款；远程已经返回成功视频时视为模型成本已发生，本地下载失败不退款，后续 pending 下载恢复也不再次扣费。
 
@@ -605,25 +799,32 @@
 
 | 接口 | 方法 | 权限 | 用途 |
 |---|---|---|---|
-| `/api/account/balance` | GET | 已登录用户 | 查询当前用户余额。 |
+| `/api/account/balance` | GET | 已登录用户 | 查询当前用户余额；运营方返回精确字符串 `inf`，已配置主库不可用时返回脱敏 503，不回退为 0。 |
 | `/api/billing/analytics` | GET | 已登录用户 | 查询当前用户账单看板的消费指标、趋势和分类分布。 |
 | `/api/billing/ledger` | GET | 已登录用户 | 未提供已识别账单看板参数时兼容返回最近 100 条原始流水和余额；提供至少一个已识别参数时返回分页标准化流水。 |
-| `/api/billing/charge` | POST | 已登录用户 | 按中心服能力价格扣费；当前口径为 `1 云豆 = 1 元`，请求可带 `capability`、`reason`、`amount`、`ref`，已知能力以中心服价格为准，余额不足返回 402。`comic_keyframe_image` 用于同款替换首尾帧图片，单价与 LK888 图片生成一致。 |
+| `/api/billing/charge` | POST | 已登录用户 | 非模型能力默认按中心服能力价格扣费。LK888 最终实扣结算携带 `allowArrears=true`、`meta.actualAmount/modelId/taskId` 和稳定 `ref`，中心服使用实际金额而非本地能力价，允许本次扣成欠费并按 `ref` 幂等。 |
 | `/api/billing/refund` | POST | 已登录用户 | 按 `ref` 幂等退回真实发生过的扣费；找不到可退流水时返回成功且退款 0。 |
 | `/api/local-browser/status` | GET | 组织 member | 查询本地浏览器客户端在线状态和最近任务。 |
 | `/api/local-browser/task` | GET/POST | 组织 member | 查询或创建本地浏览器任务。 |
 | `/api/central/nodes` | GET | 组织 auditor | 查询在线节点和注册节点；root token 可通过 `all=1` 查看全量节点。 |
+| `/api/enterprise/usage` | GET | 组织 auditor | 查询企业用量、运行健康、配额使用和真实近 7 天任务趋势 `taskTrend7d`。 |
 | `/api/enterprise/task-center` | GET | 组织 auditor | 查询企业任务中心汇总、失败分组和最近任务；包含中心调度任务、发布队列任务和本地客户端浏览器任务。 |
 
 `GET /api/billing/analytics` 接受可选 `startDate`、`endDate`（`YYYY-MM-DD`）和 `groupBy=day|month`，默认以 `Asia/Shanghai` 的最近 30 个日历日按天聚合；包含首尾日在内的范围最多 366 天。指标只统计 `charged` 的视频、图片、配音和其他消费，充值不计入消费；模型用量退款会展开为独立的 `refunded/refund` 记录，也不计入消费。`dailyAverage` 以实际有消费的日期数为分母，零消费日期不稀释均值。余额可以是数值，也可以是精确字符串 `inf`。
 
 `GET /api/billing/ledger` 的严格筛选模式接受同样的日期范围，以及 `type=video|image|voice|other|recharge|refund`、`status=charged|refunded|recharged|failed`、`page`（最小 1）和 `pageSize=20|50|100`。只要提供 `startDate`、`endDate`、`type`、`status`、`page`、`pageSize` 中至少一个已识别账单看板参数，就使用该严格模式；`BillingLedgerRow.balanceAfter` 对不能可靠重建的历史流水为 `null`，并且必须返回 `pagination.page/pageSize/total/totalPages`。未提供任何这六个已识别参数时，接口继续返回兼容的原始最近 100 条流水，不要求旧流水具有标准化行字段；无关查询参数同样保留该历史响应。两条接口均只读取当前已认证用户的数据，不能通过参数扩大到账户、组织或管理员范围。
 
-无效日期、枚举或分页参数及超过 366 天的范围返回 400 `ErrorResponse`；未认证返回 401；服务端成功响应未通过内部账单 schema 校验时返回 500 `internal_billing_response_error`；配置完成但不可用的账单数据源返回 503 `billing_data_source_failed`。500/503 均提供可关联结构化日志的 `errorId`，不暴露数据源连接信息或凭据。
+无效日期、枚举或分页参数及超过 366 天的范围返回 400 `ErrorResponse`；未认证返回 401；服务端成功响应未通过内部账单 schema 校验时返回 500 `internal_billing_response_error`；`/api/account/balance`、analytics 和严格 ledger 在已配置账单数据源不可用时返回 503 `billing_data_source_failed`。500/503 均提供可关联结构化日志的 `errorId`，不暴露数据源连接信息或凭据。
+
+LK888 实际扣费规则：凡是通过中心服 `/lk888/*` 或同款替换漫剧服务调用 LK888 模型，最终扣费只以 LK888 响应、任务状态或消费明细里的实际消费金额为准，口径为 `1 云豆 = 1 元`。提交模型前不按本项目估算价预扣；真正同步完成的响应带 `billing.amount`、`cost`、`consume` 等最终费用字段时立即结算。聊天响应只有 `usage` token 信息时不估算、不立即扣费，而是写入 `lk888_pending_charges` 待对账；账户中心查询账单前会拉取 LK888 `/v1/skills/usage?detail=1`，按当前用户、模型、时间窗口和 LK888 `task_id/cost` 幂等补扣。`/v1/media/generate` 属于异步提交，无论提交响应是否携带 `billing.amount`、`cost` 或其他金额字段，都只按任务 ID 写入待结算状态；任务成功且任务终态或消费明细带最终费用才扣费。任务失败不扣费；任务成功但仍拿不到最终费用时保持 `awaiting_actual_cost`，不使用估算价硬扣。同款替换首帧、尾帧和视频分别使用远程任务返回的 `cost` 与 `actual_model` 结算；已知 Vidu Q3 远程别名规范为 `viduq3-cankaosheng`。未欠费用户允许本次调用后扣成负数并标记欠费；已经欠费的用户再次调用 LK888 模型返回 402 `account_in_arrears`。旧预扣入口和 `LK888_LEGACY_PRECHARGE_ENABLED` 开关已删除，历史 `gen_charges` 只保留失败退款兼容，不能创建新预扣记录。
 
 `/api/enterprise/task-center` 的最近任务列表会把 `localBrowserTasks` 归一化为普通任务行；内容采集、获客、工作流采集/下载、素材发布等通过本地客户端执行的任务会显示在同一个任务中心里。企业家看到本企业范围，普通用户只看到自己创建的任务。离线导致无法执行的本地任务也会记录为失败，便于排查“点击后没反应”的问题。
 
-这些接口的响应 Schema 分别为 `AccountBalance`、`BillingAnalytics`、`LegacyBillingLedgerResponse`、`BillingLedgerResponse`、`LocalBrowserStatus`、`LocalBrowserTask`、`CentralNodes` 和 `EnterpriseTaskCenter`。OpenAPI 的 Ledger 200 使用互斥 `oneOf`：仅历史分支保留顶层 `additionalProperties: true` 和任意原始行字段；严格参数化分支与运行时 Draft 2020-12 schema 一致，要求分页且禁止未声明字段。
+`/api/enterprise/usage` 的 `tasks24h/tasks7d` 和 `taskTrend7d` 统计同一类任务来源：中心服 `STATE["tasks"]` 与本地客户端 `STATE["localBrowserTasks"]`。`taskTrend7d` 返回 7 个自然日桶，按任务 `createdAt` 归属日期聚合，每项包含 `date`、`label` 和 `count`；企业中心“任务趋势”柱状图直接使用该真实序列。`/api/enterprise/summary` 的 `counts.tasks` 是当前权限范围内的任务总数，用于 KPI “调度任务”，不是 24 小时或 7 天趋势值。企业中心总览固定展示 6 个 KPI：客户企业、企业用户、授权账号、可用账号、在线节点、调度任务；其中“授权账号”表示账号矩阵里绑定的抖音/小红书等平台账号数，不是平台登录用户数；“在线节点”表示当前权限企业范围内仍有有效心跳的执行端，包含主执行通道 `localBrowserClients` 和兼容期旧 `nodes`，普通用户直接访问 summary 时该项返回 0。
+
+`/api/local-browser/task` 支持 `douyin.comment.publish` 任务类型，中心服会转发到本地执行器 `/api/douyin/comment/publish`。payload 可携带 `accountId`、`awemeId`/`targetId`、`content`、`replyId`、`safeMode`、`preflight`、`force` 和 `channel`。抖音评论会在任何 API/UI 通道前读取 `risk_config.json.dailyComment/minInterval` 与 `comment_risk_state.json` 的账号级状态；命中每日评论上限、最小间隔冷却或平台风险暂停时，任务结果返回 `ok=false`、`skipped=true`、后端机器 `error`（如 `douyin_daily_comment_limit`、`douyin_comment_cooldown`、`douyin_comment_risk_cooldown`）、`status`、`cooldownLeft`、`safety` 以及中文 `message/userMessage`。这类硬门禁不被 `force=true` 或 `safeMode=false` 绕过；`force` 只跳过浏览器 DOM 预检，`safeMode=false` 只关闭评论文案清洗与 DOM 预检。发布成功后按 `accountId` 更新当天 `commentCount/day`、最近评论时间和兼容全局字段，供风控中心“今日评论/冷却”列显示；风险暂停按账号隔离，持久化的风险响应只保留安全字段和 URL/正文指纹。
+
+这些接口的响应 Schema 分别为 `AccountBalance`、`BillingAnalytics`、`LegacyBillingLedgerResponse`、`BillingLedgerResponse`、`LocalBrowserStatus`、`LocalBrowserTask`、`CentralNodes`、`EnterpriseUsage` 和 `EnterpriseTaskCenter`。OpenAPI 的 Ledger 200 使用互斥 `oneOf`：仅历史分支保留顶层 `additionalProperties: true` 和任意原始行字段；严格参数化分支与运行时 Draft 2020-12 schema 一致，要求分页且禁止未声明字段。
 
 ## 小红书图文同款
 
@@ -669,9 +870,9 @@ V1 明确不支持真实发布图文笔记：`/api/publish/run` 遇到未补齐�
 
 ## POST /api/douyin/dm/inbox
 
-运行单元：本地执行引擎 `127.0.0.1:9081`，通常由中心服 `douyin.dm.inbox` 本地浏览器任务调度到用户自己的电脑执行。
+运行单元：本地执行引擎 `127.0.0.1:9081`。原生客户端的手动发送、全自动发送和收件轮询都直接调用本机接口，不经中心服任务转发私信正文；中心服 `douyin.dm` / `douyin.dm.inbox` 仅保留旧调用方的兼容调度能力。
 
-用途：MVP 只读取一个指定客户主页链接对应的抖音私信会话，用于“全自动回复”每 20 秒检查一次新消息。该接口只返回最近消息和脱敏指纹；纯文本消息可进入 5 分钟合并回复窗口，图片、语音、视频、卡片、表情等非文本消息只触发人工查看，不自动发送。
+用途：MVP 只读取一个指定客户主页链接对应的抖音私信会话，用于“全自动回复”每 20 秒检查一次新消息。该接口只返回最近消息和脱敏指纹；同一轮检查发现的多条纯文本会合并为一次 AI 回复并立即发送。图片、语音、视频、卡片、表情等非文本消息会让本轮整批转人工处理，不自动发送。
 
 请求：
 ```json
@@ -683,10 +884,12 @@ V1 明确不支持真实发布图文笔记：`/api/publish/run` 遇到未补齐�
 }
 ```
 
-- `target` 必填：客户抖音主页链接或 `sec_uid`；纯数字 uid 不支持自动打开私信入口。
+- `target`、`userUrl`、`secUid` 三者至少提供一个：值为客户抖音主页链接或 `sec_uid`；纯数字 uid 不支持自动打开私信入口。`userUrl` 和 `secUid` 是 `target` 的兼容别名。
 - `accountId` 可选：账号矩阵中的本地抖音账号 ID。从获客中心进入私信页时传当前所选账号；未传时，本地执行引擎选择最新的可用抖音账号。收信和自动回复必须使用同一个账号 ID。
 - `limit` 可选：1-20，默认 10。
 - `sinceFingerprint` 可选：上一条已处理消息指纹；如果页面还能看到该指纹，接口只返回它之后的新消息。
+
+登录态目录：非默认账号使用 `dy_dm_profile/accounts/<localAccountId>/current`，同一账号跨轮询复用，同机不同账号互相隔离；未指定账号或旧版默认账号继续兼容 `dy_dm_profile/current`。中心服复合账号 ID（例如 `node:local-account`）会先归一化成本机账号 ID，再解析账号矩阵 profile 和 Cookie 缓存。
 
 成功响应：
 ```json
@@ -715,6 +918,18 @@ V1 明确不支持真实发布图文笔记：`/api/publish/run` 遇到未补齐�
 }
 ```
 
+会话已打开但当前没有可提取消息时同样返回 HTTP 200：
+```json
+{
+  "ok": true,
+  "platform": "douyin",
+  "accountId": "douyin-account-id",
+  "messages": [],
+  "nonTextCount": 0,
+  "empty": true
+}
+```
+
 失败或需人工处理：
 ```json
 {
@@ -726,12 +941,14 @@ V1 明确不支持真实发布图文笔记：`/api/publish/run` 遇到未补齐�
 }
 ```
 
-常见错误：`missing_target`、`numeric_uid_unsupported_in_browser_dm`、`not_authenticated`、`dm_inbox_button_not_found`、`dm_inbox_messages_not_found`、`dm_inbox_child_failed`、`dm_inbox_child_exception`。
+HTTP 状态：成功或空会话为 200；目标缺失或纯数字 uid 为 400；账号登录态不可用为 401；本地浏览器或页面解析异常为 500。
+
+常见错误：`missing_target`、`numeric_uid_unsupported_in_browser_dm`、`not_authenticated`、`dm_inbox_button_not_found`、`dm_inbox_child_failed`、`dm_inbox_child_exception`。内部异常响应只返回安全错误码和 `errorId`，不返回堆栈、浏览器标准输出、客户链接或私信正文。
 
 审计与日志：本地收件日志可记录 `accountId`、`targetFingerprint`、`limit`、Cookie 尝试数/注入数和错误类型；客户端自动回复日志使用 `targetFingerprint`、`messageFingerprint` 和 `errorCode` 关联排障。不记录 Cookie 值、Token、Authorization、客户主页原文或私信正文。
 
 ### 隐私边界补充
 
-`/api/douyin/dm/inbox` 是本机执行引擎接口，私信正文只允许在用户本机客户端进程内用于 5 分钟合并和 AI 回复生成。原生客户端全自动收信直接调用 `127.0.0.1:9081`，不通过中心服任务结果传递正文。
+`/api/douyin/dm/inbox` 和 `/api/douyin/dm` 是本机执行引擎接口。私信正文只允许在用户本机客户端进程内用于本轮合并、AI 回复生成和发送；原生客户端收发均直接调用 `127.0.0.1:9081`，不通过中心服任务结果传递正文。
 
-如果外部仍通过中心服创建 `douyin.dm.inbox` 本地浏览器任务，中心服持久化的任务结果必须经过脱敏：不保存 `target` 原文，不保存 `messages[].text` 原文，只保存 `targetFingerprint`、`messageCount`、`messages[].fingerprint`、`messages[].textFingerprint`、`direction`、`kind`、`createdAtText`、`nonTextCount` 和错误码等排障字段。
+如果旧调用方仍通过中心服创建本地浏览器任务，中心服持久化内容必须经过脱敏：`douyin.dm` 只保存 `targetFingerprint`、`contentFingerprint`、`sentFingerprint`、`accountId`、状态和安全错误字段；`douyin.dm.inbox` 不保存 `target` 原文或 `messages[].text` 原文，只保存目标/文本指纹、消息数量、方向、类型、时间、非文本数量和错误码等排障字段。仅领取兼容任务的本地执行器可在内存中取得原始任务参数。

@@ -17,6 +17,18 @@ from builder.proto import ProtoBuilder
 from utils.dy_util import splice_url, generate_a_bogus, generate_msToken, trans_cookies
 
 
+DOUYIN_DETAIL_TIMEOUT = (8, 15)
+DOUYIN_DETAIL_RETRY_DELAYS = (1, 2, 4)
+
+
+class DouyinDetailNetworkError(RuntimeError):
+    def __init__(self, aweme_id, attempts, cause):
+        self.aweme_id = str(aweme_id or "")
+        self.attempts = int(attempts or 0)
+        self.cause_type = type(cause).__name__
+        super().__init__("douyin_detail_network_failed")
+
+
 
 class DouyinAPI:
     douyin_url = 'https://www.douyin.com'
@@ -153,8 +165,22 @@ class DouyinAPI:
         params.with_a_bogus()
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
-        resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+        request_kwargs = {
+            "headers": headers.get(),
+            "cookies": auth.cookie,
+            "params": params.get(),
+            "verify": False,
+            "timeout": DOUYIN_DETAIL_TIMEOUT,
+        }
+        max_attempts = len(DOUYIN_DETAIL_RETRY_DELAYS) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.get(f'{DouyinAPI.douyin_url}{api}', **request_kwargs)
+                break
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt >= max_attempts:
+                    raise DouyinDetailNetworkError(aweme_id, attempt, exc) from exc
+                time.sleep(DOUYIN_DETAIL_RETRY_DELAYS[attempt - 1])
         resp_json = json.loads(resp.text)
         return resp_json
 

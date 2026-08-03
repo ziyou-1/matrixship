@@ -14,3 +14,12 @@ COMMIT;
 -- Release: 2026-07-30 account-center billing dashboard verification and rollback gate.
 -- Database schema/data changes: none. This append-only release note is intentionally no-op.
 -- No DDL or DML is required for this release.
+-- Release: 2026-08-03 Xiaohongshu platform disable.
+-- Database schema/data changes: none. XHS local/central JSON state cleanup is
+-- performed explicitly by scripts/disable_xhs_accounts.py when approved.
+-- Runtime rollback switch: MATRIX_XHS_ENABLED=1.
+-- Release: 2026-08-03 MiniMax H3 official direct integration.
+-- Database schema/data changes: none. H3 task metadata is stored in existing
+-- central pending-task state and remote AI Canvas JSON task/project state.
+-- Runtime rollback restores the prior remote server.py backup and removes the
+-- local H3 adapter/routes if needed.

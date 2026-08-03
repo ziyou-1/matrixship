@@ -147,16 +147,20 @@ def _sanitize(value, key_hint=""):
 
 
 def json_log(logger, event, level="error", exc=None, **context):
-    error_id = str(context.pop("errorId", "") or ("err-" + uuid.uuid4().hex[:16]))
+    explicit_error_id = str(context.pop("errorId", "") or "")
+    level_name = str(level or "error").lower()
     payload = {
         "event": str(event or "unknown_event"),
-        "errorId": error_id,
     }
+    if explicit_error_id:
+        payload["errorId"] = explicit_error_id
+    elif exc is not None or level_name in ("error", "warning", "critical", "exception"):
+        payload["errorId"] = "err-" + uuid.uuid4().hex[:16]
     payload.update(_sanitize(context))
     if exc is not None:
         payload["exceptionType"] = type(exc).__name__
         payload["stack"] = _redact_text("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    writer = getattr(logger, str(level or "error").lower(), None) or getattr(logger, "error")
+    writer = getattr(logger, level_name, None) or getattr(logger, "error")
     writer(raw)
     return raw
