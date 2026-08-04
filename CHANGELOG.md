@@ -2050,3 +2050,9 @@
 ### Verification And Operations
 - RED/GREEN 覆盖 `tests.test_web_surface_removed.WebSurfaceRemovedTest`，锁定页面标题、公司名称、禁用按钮、HTML 响应头、公开路由位置和不暴露 `/MatrixShipAgent-Setup.exe`。
 - 本次只影响中心服公开 HTML 页面、测试和文档；不改变安装包直链、OpenAPI JSON 契约、数据库、Docker、环境变量或 `migration.sql`。中心服重启后生效；回滚 `backend/central_server.py`、`tests/test_web_surface_removed.py`、`CHANGELOG.md`、`docs/API_REFERENCE.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可移除页面。
+## 2026-08-04 统一漫剧账号体系与同款替换 SSO
+- AI爆款复刻普通用户登录源收敛到漫剧主库 `ai_education.users`；`MAINDB_ENABLED=1` 时主库不可用会返回 503 `maindb_required` / `maindb_unavailable`，不再降级读取本地 JSON 普通用户。
+- 同款替换漫剧 SSO 默认按当前主库用户映射，`comicAccountMode=mapped` 且 `comicUserId` 等于当前 `ai_education.users.id`；固定账号 `003` 仅保留为 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 的显式回滚。
+- 企业邀请、企业中心新增成员和管理员重置密码在主库模式下写入 `maindb`；新增/邀请缺少手机号时返回 `main_db_phone_required`，不会自动创建本地普通用户。
+- OpenAPI、部署文档、API 手册、排障文档、`.env.example` 和 no-op `migration.sql` 已同步。上线需要中心服与漫剧生成器配置同一个短票据 secret，密钥只放服务器私有环境。
+- 回滚：临时打开 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 可恢复固定账号 `003` SSO；完整代码回滚恢复 `backend/central_server.py`、`docs/openapi.yaml`、配置/文档和相关测试。

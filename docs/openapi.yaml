@@ -39,6 +39,20 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/LegalConsentError"}
+        "503":
+          description: Comic main database is required for ordinary user login but is unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, error]
+                properties:
+                  ok: {const: false}
+                  error:
+                    type: string
+                    enum: [maindb_required, maindb_unavailable]
+                  errorId: {type: string}
+                additionalProperties: true
   /api/auth/register:
     post:
       summary: Register a phone account and accept current legal documents
@@ -119,6 +133,33 @@ paths:
               schema: {$ref: "#/components/schemas/ErrorResponse"}
         "403":
           description: Current password is invalid or the login type cannot change passwords
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+  /api/comic/auth/ticket:
+    post:
+      summary: Issue a short-lived Matrix SSO ticket for AI CanvasPro comic projects
+      description: Production mode maps the ticket to the current ai_education.users.id. Fixed account mode is rollback-only through MATRIX_COMIC_FIXED_SSO_ENABLED=1. A non-main-db ordinary user is rejected with comic_sso_user_not_mapped.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Matrix SSO ticket issued for the current mapped comic account
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ComicSsoTicketResponse"}
+        "401":
+          description: Session is missing or invalid
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "403":
+          description: Current user cannot be mapped to a comic main-db account, including comic_sso_user_not_mapped
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorResponse"}
+        "503":
+          description: Comic SSO is disabled, the secret is missing, or rollback fixed-account config is invalid
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorResponse"}
@@ -1678,6 +1719,31 @@ components:
           type: string
           enum: [all, org, self]
         balance: {type: number}
+      additionalProperties: true
+    ComicSsoTicketResponse:
+      type: object
+      required: [ok, ticket, expiresAt, exchangePath, audience, userId, comicUserId, comicUsername, comicAccountMode, matrixUserId, orgId]
+      properties:
+        ok: {const: true}
+        ticket: {type: string, minLength: 1}
+        expiresAt: {type: integer}
+        exchangePath: {type: string}
+        audience: {type: string}
+        userId:
+          type: integer
+          description: AI CanvasPro user id used by the SSO ticket.
+        comicUserId:
+          type: integer
+          description: Same value as userId; production mode uses the current ai_education.users.id.
+        comicUsername: {type: string}
+        comicAccountMode:
+          type: string
+          enum: [mapped, fixed]
+          description: mapped is the production mode; fixed is rollback-only.
+        matrixUserId:
+          type: string
+          description: MatrixShip session user id before SSO mapping.
+        orgId: {type: string}
       additionalProperties: true
     AuthChangePasswordRequest:
       type: object

@@ -271,3 +271,9 @@ Windows 源码部署的本地客户端数据根目录由 `backend/runtime_paths.
 数据流：采集素材或 `sourceNote` 生成模板；用户确认标题、所在地、目标客户和可编辑卖点；替换图按原笔记图片数量显示为一张图一个框，用户可多选本地图片按顺序填充，缺图必须手动选择替换图片；预览阶段生成 3 组标题、正文、标签方案并记录用户选择；保存阶段要求所有槽位都有可读取图片，之后生成 `image_note` 草稿并写入素材库。发布链路在本地和中心服预检处都调用同一个 blocker，避免误把多图图文走成视频或单图发布。
 
 可观测性：下载入库失败通过 `download_library_import_failed` 输出结构化日志；保存异常通过 `xhs_note_save_failed` 输出 `errorId`；空图保存会直接返回 `xhs_note_replacement_missing_images`。任务和素材都携带 `replacementJobId`、`sourceTemplateId` 与 `importedFromXhsNoteReplacement`，便于回溯来源。回滚时关闭 `XHS_NOTE_REPLACEMENT_ENABLED=0` 即可让接口快速失效，代码级回滚只需恢复本次涉及文件。
+## 2026-08-04 统一漫剧账号体系
+
+- 普通用户身份源统一为漫剧主库 `ai_education.users`。中心服只保留产品 session、组织 membership、调度任务、本地浏览器任务和审计 JSON 状态；`MAINDB_ENABLED=1` 时不得把本地 JSON users 当作普通用户登录兜底。
+- 同款替换进入漫剧生成器时，中心服 `/api/comic/auth/ticket` 默认签发 mapped ticket：`comicUserId == 当前 ai_education.users.id`。固定账号 `003` 只作为 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 的回滚模式。
+- 企业邀请和企业中心新增成员在主库模式下通过手机号创建或认领 `ai_education.users`，再在中心服 JSON 中写组织 membership。管理员重置成员密码时直接写 `maindb.set_password()`，不要求主库用户存在于本地 users 数组。
+- 主库不可用是生产阻断错误：普通登录返回 503 `maindb_required` / `maindb_unavailable`，避免两个平台账号密码再次分叉。`user-owner`、root token 和中心服管理员密码仍保留为运维应急入口。

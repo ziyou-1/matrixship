@@ -23,3 +23,9 @@ COMMIT;
 -- central pending-task state and remote AI Canvas JSON task/project state.
 -- Runtime rollback restores the prior remote server.py backup and removes the
 -- local H3 adapter/routes if needed.
+-- Release: 2026-08-04 unified comic account SSO.
+-- Database schema/data changes: none. MatrixShip ordinary auth now uses the
+-- existing ai_education.users table, and center JSON keeps only session,
+-- organization membership, task, and audit state.
+-- Runtime rollback switch: MATRIX_COMIC_FIXED_SSO_ENABLED=1 for fixed account
+-- comic SSO, or deploy the previous center release.

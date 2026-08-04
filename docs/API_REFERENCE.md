@@ -102,6 +102,16 @@
 - `acceptedAt` 是客户端 UTC ISO-8601 时间；中心服另外记录不可由客户端修改的服务端接受时间。
 - 中心服接口仍兼容手机号验证码登录；本地客户端登录页仅提交用户名、密码和法律同意，不再提供手机号验证码登录入口。
 - 注册请求使用 `phone` / `password` / `code` / `legalConsent`。
+- 生产环境普通用户登录源是漫剧主库 `ai_education.users`；`MAINDB_ENABLED=1` 但主库不可用时返回 HTTP 503，`error` 为 `maindb_required` 或 `maindb_unavailable`，不会降级读取本地 JSON 普通用户。`user-owner` / 管理员应急入口仍是独立运维路径。
+
+## POST /api/comic/auth/ticket
+
+同款替换漫剧项目使用该接口换取短期 Matrix SSO ticket。生产默认是 mapped 模式：`comicUserId` 等于当前登录用户在 `ai_education.users.id` 中的数值 ID，漫剧生成器据此进入同一个账号体系。`comicAccountMode=fixed` 只允许作为显式回滚模式，通过 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 打开。
+
+常见错误：
+- `401`：中心服会话失效。
+- `403 comic_sso_user_not_mapped`：当前会话不是主库用户，不能进入漫剧账号体系。
+- `503 comic_sso_secret_missing` 或 `comic_fixed_user_invalid`：SSO 密钥/回滚固定账号配置缺失或无效。
 
 缺少同意时返回 HTTP 428：
 

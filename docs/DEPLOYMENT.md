@@ -330,11 +330,14 @@ tesseract --list-langs
 | `VIDEO_REPLACE_STRICT_VISUAL_QC` | `0` | 同款替换视觉不一致默认只提醒人工审核；设为 `1` 时 `face/product/scene_mismatch` 阻断片段 |
 | `VIDEO_REPLACE_DIGITAL_HUMAN_FACEFUSION` | `0` | 历史兼容变量；当前同款替换新任务不通过页面启用本地 FaceFusion |
 | `MATRIX_COMIC_BASE_URL` | `http://120.26.194.174` | 漫剧生成器基址；也可用 `COMIC_TOOL_URL` 覆盖 |
-| `MATRIX_COMIC_FIXED_USER_ID` | `44` | 同款替换漫剧项目固定写入的 AI CanvasPro 用户 ID；当前对应账号 `003` |
-| `MATRIX_COMIC_FIXED_USERNAME` | `003` | 固定漫剧账号用户名，仅用于 ticket 响应和日志追踪，不是密码 |
+| `MATRIX_COMIC_SSO_ENABLED` | `1` | 同款替换漫剧项目启用 Matrix SSO 短票据 |
+| `MATRIX_COMIC_SSO_SECRET` | 空 | 中心服与漫剧生成器共享的随机密钥；生产必须配置，禁止提交到仓库 |
+| `MATRIX_COMIC_FIXED_SSO_ENABLED` | `0` | 固定账号模式仅作回滚，正常生产必须关闭 |
+| `MATRIX_COMIC_FIXED_USER_ID` | 空 | 回滚固定账号用户 ID；只有 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 时才读取 |
+| `MATRIX_COMIC_FIXED_USERNAME` | 空 | 回滚固定账号用户名；正常 mapped 模式不读取 |
 | `COMIC_REAL_PERSON_VIDEO_FALLBACK_MODELS` | `vidu/viduq3-mix_reference2video,wan2.7-shouweizhen,kling-v3-omni-shouweizhen,pixverse-v6-shouweizhen` | 远程 AI Canvas 视频降级顺序；显式空值禁用，修改后只重启 8777 |
 | `COMIC_REAL_PERSON_VIDEO_FALLBACK_MODEL` | 无 | 旧单模型配置兼容项；仅在未配置复数变量时读取 |
-| `MATRIX_COMIC_FIXED_DISPLAY_NAME` | `003` | 固定漫剧账号显示名，写入 Matrix SSO ticket 的 `name` claim |
+| `MATRIX_COMIC_FIXED_DISPLAY_NAME` | 空 | 回滚固定账号显示名；正常 mapped 模式不读取 |
 | `LK888_IMAGE_TIMEOUT_SEC` | `540` | 客户端同步图片生成超时 |
 | `LK888_SYNC_IMAGE_TIMEOUT_SEC` | `480` | 中心服同步图片上游超时，应小于客户端超时 |
 | `FACEFUSION_BIN` | 无 | 独立 FaceFusion 商用环境可执行文件绝对路径 |
@@ -382,7 +385,7 @@ test -n "$FACEFUSION_LICENSE_REF"
 
 旧 LK888 主角模式仍默认调用 `happyhorse-video-edit` 源视频编辑；页面“同款替换模型”下拉框可把任务级 `model` 切换为其他适合的 LK888 视频参考模型。客户端只展示白名单和 LK888 目录中识别到的“SD 2.0 全能参考”等适合模型，不展示纯文生视频或图片模型。原片段和 1-3 张人物参考图必须先变成公网 HTTPS URL，请求同时保留 `video`、`images`、`video_url`、`video_urls`、`reference_video` 和 `params` 内源视频字段；失败记录实际 `model`、`remoteErrorId` 和 `principal_video_edit_failed`。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 后，新任务回到参考图视频候选链。源片段公网 URL 仍会写入任务 JSON 供追踪和音频回填；如无公网素材基址，会在远程下单前返回 `video_replace_remote_media_required`。`tts/uploaded` 声音模式会把口播稿写入主角替换视频 prompt；远程生成完成后，本地用 AI 音色 TTS 或上传完整配音裁切片段替换音轨，不再要求配置 `VIDEO_REPLACE_LIPSYNC_MODEL`。
 
-新任务默认走漫剧项目模式。`MATRIX_COMIC_BASE_URL` / `COMIC_TOOL_URL` 指向漫剧生成器根地址，默认 `http://120.26.194.174`。本地客户端会先用中心服换 ticket，再与漫剧生成器交换 token；中心服默认把 ticket 固定签给漫剧账号 `MATRIX_COMIC_FIXED_USER_ID=44` / `MATRIX_COMIC_FIXED_USERNAME=003`，不再按当前 Matrix 用户做一对一映射。之后按角色/场景/道具写入项目库并生成分镜、首尾帧和视频。`audioMode` 当前允许 `auto` 和 `tts`：`auto` 使用生成视频自带声音，`tts` 使用 AI 音色按口播稿生成声音；上传完整配音的稳定片段接口还没有接通，`uploaded` 仍会被前置阻断。如果暂时不想让新任务进入漫剧模式，把 `VIDEO_REPLACE_DEFAULT_MODE` 改成 `legacy` 并手动重启本地客户端即可。临时开发测试可使用 Cloudflare Tunnel：
+新任务默认走漫剧项目模式。`MATRIX_COMIC_BASE_URL` / `COMIC_TOOL_URL` 指向漫剧生成器根地址，默认 `http://120.26.194.174`。本地客户端会先用中心服换 ticket，再与漫剧生成器交换 token；中心服默认按当前登录的 `ai_education.users.id` 签发 mapped ticket，ticket 响应中的 `comicUserId` 应等于当前主库用户 ID。固定账号 `003` 只允许通过 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 显式回滚。之后按角色/场景/道具写入项目库并生成分镜、首尾帧和视频。`audioMode` 当前允许 `auto` 和 `tts`：`auto` 使用生成视频自带声音，`tts` 使用 AI 音色按口播稿生成声音；上传完整配音的稳定片段接口还没有接通，`uploaded` 仍会被前置阻断。如果暂时不想让新任务进入漫剧模式，把 `VIDEO_REPLACE_DEFAULT_MODE` 改成 `legacy` 并手动重启本地客户端即可。临时开发测试可使用 Cloudflare Tunnel：
 
 `SD 2.0 全能参考` 的 LK888 生成模型标识是 `kwvideo-v2-quannengcankao`，云灵页面卡片 ID `76` 只用于上游页面展示/选择。客户端已把该标识作为同款替换内置备选；如果上游实际接口不支持源视频 + 参考图输入，应从任务级模型切回 `happyhorse-video-edit` 后重生失败片段。
 
@@ -635,3 +638,10 @@ DY_PROFILE_DIR=backend\datas\dy_profile
 | `backend/datas/comment_risk_state.json` | 抖音评论写入 `accounts.<accountId>.day/commentCount/lastCommentAt`、账号级冷却状态、平台评论风险暂停和脱敏后的风险响应摘要；风控中心抖音“今日评论 / 冷却”列读取该文件。 |
 
 发布与回滚：本功能不新增数据库表，不需要 `migration.sql`；不新增接口路径，因此不需要 OpenAPI 路径变更。上线后如果游客模式误判，可先设置 `XHS_GUEST_COLLECTION_DEFAULT=0` 临时恢复账号采集默认值；如果小红书安全模式误拦截，优先在风控中心调整上限/间隔，或临时设置 `XHS_SAFETY_MODE=0` 后重启本地客户端和本地执行引擎；如果抖音评论误拦截，优先在风控中心调高每日评论上限或缩短最小间隔，确认 `comment_risk_state.json` 没有残留风险暂停，再重启本地执行器和本地客户端。代码级回滚恢复 `backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_comment_cooldown.py` 和本次文档即可。
+## 2026-08-04 统一漫剧账号 SSO 部署要求
+
+- 生产普通用户账号密码来源统一为漫剧主库 `ai_education.users`。中心服必须设置 `MAINDB_ENABLED=1`；主库不可用时普通登录返回 503，不允许回退到本地 JSON users。
+- 中心服和漫剧生成器必须配置同一个随机短票据密钥：`MATRIX_COMIC_SSO_SECRET` 与 `AICANVAS_MATRIX_SSO_SECRET` 值一致，至少 32 bytes，只放在服务器私有环境中，不写入仓库、日志或截图。
+- 正常生产设置：`MATRIX_COMIC_SSO_ENABLED=1`、`MATRIX_COMIC_FIXED_SSO_ENABLED=0`，同款替换 ticket 的 `comicUserId` 等于当前 `ai_education.users.id`。
+- 固定账号 `003` 仅用于显式回滚：出现 mapped SSO 生产阻断时，临时设置 `MATRIX_COMIC_FIXED_SSO_ENABLED=1`、`MATRIX_COMIC_FIXED_USER_ID=44`、`MATRIX_COMIC_FIXED_USERNAME=003`、`MATRIX_COMIC_FIXED_DISPLAY_NAME=003` 并重启中心服；恢复后必须改回 mapped 模式。
+- 企业邀请/新增成员在主库模式下需要手机号来创建或认领 `ai_education.users`；缺少手机号会返回 `main_db_phone_required`，不会自动创建本地普通用户。

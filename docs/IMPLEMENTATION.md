@@ -2634,3 +2634,11 @@
 - `tests/test_enterprise_invites.py#L143-L263`：RED/GREEN 覆盖邀请接受和企业中心新增成员都使用主库用户，且不向本地 users 数组写普通用户。
 - `tests/test_unified_comic_account_sso.py#L174-L216`：RED/GREEN 覆盖管理员重置主库成员密码时调用 `maindb.set_password()`。
 - 验证与影响：`tests.test_comic_sso tests.test_enterprise_invites tests.test_unified_comic_account_sso` 共 19 项通过；`py_compile` 和 `git diff --check` 通过。本次影响中心服账号/企业成员链路，不改变数据库结构，不提交密钥；OpenAPI、部署文档、`CHANGELOG.md` 和 `migration.sql` 将在统一账号 SSO 文档任务中继续补齐。回滚 `backend/central_server.py`、相关测试和本条文档即可恢复 Task 4 前行为；生产环境也可临时关闭 `MAINDB_ENABLED` 退回本地测试路径，但普通用户统一账号目标会失效。
+## 2026-08-04 统一漫剧账号 SSO 文档与 OpenAPI
+- `docs/openapi.yaml#L12-L53`：`/api/auth/login` 文档新增主库不可用 503 响应，错误码限定为 `maindb_required` / `maindb_unavailable`。
+- `docs/openapi.yaml#L139-L171`、`docs/openapi.yaml#L1723-L1752`：新增 `/api/comic/auth/ticket` OpenAPI 路径和 `ComicSsoTicketResponse` schema，明确 `comicAccountMode=mapped|fixed`，其中 `mapped` 为生产模式、`fixed` 仅回滚。
+- `tests/test_openapi_contract.py#L342-L360`：RED/GREEN 覆盖登录主库错误和漫画 SSO mapped/fixed 契约。
+- `backend/.env.example#L8-L18`：示例配置启用 `MATRIX_COMIC_SSO_ENABLED=1`，固定账号回滚开关默认 `0`，不包含真实密钥或固定账号值。
+- `docs/API_REFERENCE.md#L105-L114`、`docs/ARCHITECTURE.md#L274-L280`、`docs/DEPLOYMENT.md#L641-L647`、`docs/TROUBLESHOOTING.md#L844-L849`、`docs/TROUBLESHOOTING.md#L2988-L2993`：同步 API、架构、部署和排障口径，普通用户来源为 `ai_education.users`，同款替换 SSO 默认 mapped，固定 `003` 只作为显式回滚。
+- `CHANGELOG.md#L2053-L2058`、`migration.sql#L26-L31`：追加发布记录和 no-op migration，说明无数据库结构变更、回滚路径为固定账号开关或上一中心服版本。
+- 验证与影响：`tests.test_openapi_contract` 12/12 通过。本次只补契约、配置模板和文档；没有提交 secret，没有新增数据库迁移 DDL/DML。部署仍需设置中心服与漫剧生成器相同的 SSO secret 并重启对应服务。

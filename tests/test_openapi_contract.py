@@ -339,6 +339,25 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertEqual(request_schema["properties"]["newPassword"]["minLength"], 8)
         self.assertFalse(request_schema["additionalProperties"])
 
+    def test_auth_login_documents_main_db_unavailable_error(self):
+        document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+        login = document["paths"]["/api/auth/login"]["post"]
+        self.assertIn("503", login["responses"])
+        schema = login["responses"]["503"]["content"]["application/json"]["schema"]
+        self.assertTrue(schema)
+        text = yaml.safe_dump(document, allow_unicode=True)
+        self.assertIn("maindb_required", text)
+        self.assertIn("maindb_unavailable", text)
+
+    def test_comic_sso_documents_mapped_account_mode(self):
+        document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
+        text = yaml.safe_dump(document, allow_unicode=True)
+        self.assertIn("/api/comic/auth/ticket", document["paths"])
+        self.assertIn("comicAccountMode", text)
+        self.assertIn("mapped", text)
+        self.assertIn("fixed", text)
+        self.assertIn("comic_sso_user_not_mapped", text)
+
     def test_enterprise_user_upsert_openapi_does_not_require_phone_or_email(self):
         document = yaml.safe_load(OPENAPI.read_text(encoding="utf-8"))
         path = document["paths"]["/api/enterprise/users/upsert"]["post"]

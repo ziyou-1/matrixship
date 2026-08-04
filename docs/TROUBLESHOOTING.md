@@ -841,7 +841,7 @@
 
 - 现象：新同款替换任务停在 `comic_project`、`comic_assets`、`comic_prepare_audio`、`comic_generate_flowchart` 或 `comic_generate_video`；片段显示 `video_replace_comic_segment_failed`、`comic_project_id_missing`、`comic_storyboard_id_missing`、`comic_sso_ticket_missing`、`comic_sso_token_missing` 或 `comic_api_http_4xx/5xx`。
 - 根因：新任务默认 `replacementMode="comic_project"`，本地客户端需要先向中心服换取漫剧 SSO ticket，再到漫剧生成器交换 token，之后创建项目、分析分镜、写入人物/场景/道具、准备配音、生成首尾帧和视频。任一远程接口没有返回项目 ID、分镜 ID、任务 ID 或可下载视频 URL，都会把当前片段标记为失败；其他片段不再被整体抛弃，任务进入 `partial`。
-- 排查：查看 `video_replacements/<job-id>/replacement_job.json`。正常链路应出现 `comicProjectId`、`comicProjectUrl`、`comicAssets`、每段 `comicStoryboardId`、`flowchartTaskId/flowchartUrl`、`comicVideoTaskId/videoUrl` 和最终 `videoPath`。若缺少 `comicProjectId`，先查中心服 `/api/comic/auth/ticket` 和漫剧 `/api/v2/auth/exchange-matrix-ticket`；中心服 ticket 响应应包含 `comicUserId=44`、`comicUsername=003`、`comicAccountMode=fixed`。若仍出现 `comic_sso_user_not_mapped`，说明运行中的中心服仍是旧映射逻辑，需要手动重启中心服或检查是否回滚。若缺少 `comicStoryboardId`，先查漫剧项目分析返回的 `storyboards`；若缺少 `videoUrl`，先查远程视频任务结果。
+- 排查：查看 `video_replacements/<job-id>/replacement_job.json`。正常链路应出现 `comicProjectId`、`comicProjectUrl`、`comicAssets`、每段 `comicStoryboardId`、`flowchartTaskId/flowchartUrl`、`comicVideoTaskId/videoUrl` 和最终 `videoPath`。若缺少 `comicProjectId`，先查中心服 `/api/comic/auth/ticket` 和漫剧 `/api/v2/auth/exchange-matrix-ticket`；生产中心服 ticket 响应应包含 `comicAccountMode=mapped`，且 `comicUserId` 等于当前登录用户的 `ai_education.users.id`。只有显式回滚 `MATRIX_COMIC_FIXED_SSO_ENABLED=1` 时才允许出现 `comicAccountMode=fixed` / `comicUsername=003`。若出现 `comic_sso_user_not_mapped`，说明当前会话不是主库用户、主库不可用或运行中的中心服版本未更新。若缺少 `comicStoryboardId`，先查漫剧项目分析返回的 `storyboards`；若缺少 `videoUrl`，先查远程视频任务结果。
 - 音频边界：漫剧项目模式当前只允许 `AI 音色配音`。`source` 原片声音和 `uploaded` 上传完整配音会被前置阻断，因为当前链路还没有“上传完整配音 -> 片段对白音频 -> 漫剧口型/字幕同步”的稳定接口。看到“漫剧项目模式暂不支持上传完整配音保证口型同步”不是故障，先切回 AI 音色配音。
 - 模型/参数错误：如果错误里出现 `resolution 720P 不合法`、`参数验证失败` 或上游 LK888 模型名，说明仍在走旧 LK888 链路或远程漫剧服务把参数透传给了不兼容模型。新任务应优先确认 `replacementMode="comic_project"`；需要快速回退时设置 `VIDEO_REPLACE_DEFAULT_MODE=legacy` 并手动重启本地客户端。
 - 回滚：本地回滚需要恢复 `backend/central_server.py`、`backend/matrix_native_client.py` 和相关测试/文档，或设置 `VIDEO_REPLACE_DEFAULT_MODE=legacy` 让新任务回到旧链路；不涉及数据库迁移。若只回滚中心服固定账号策略，运行中的中心服需要手动重启后才会生效；若修改的是远程漫剧 `server.py`，也需要重启对应漫剧服务进程。
@@ -2985,3 +2985,9 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 ## 2026-08-04 Unified comic account SSO Phase 0
 - RED: `tests.test_unified_comic_account_sso` proves the current center still signs comic SSO tickets to fixed account `003` (`comicUserId=44`) instead of the logged-in main-db user.
 - Required fix: authenticate ordinary AI爆款复刻 users through `ai_education.users` and sign comic SSO tickets with the current `users.id`.
+## 2026-08-04 统一漫剧账号 SSO
+- 现象：AI爆款复刻登录成功后进入同款替换漫剧项目，漫剧生成器仍要求登录，或项目落到固定账号 `003`。
+- 排查：先确认中心服 `/api/comic/auth/ticket` 返回 `comicAccountMode=mapped`，且 `comicUserId` 等于当前登录用户在 `ai_education.users.id` 中的数值 ID。若返回 `fixed`，说明生产环境误开了 `MATRIX_COMIC_FIXED_SSO_ENABLED=1`；若返回 `comic_sso_user_not_mapped`，说明当前会话不是主库用户或中心服仍在旧本地 JSON 普通用户路径。
+- 主库故障：普通登录返回 503 `maindb_required` 或 `maindb_unavailable` 是预期 fail-closed 行为，不要手动把本地 JSON users 当作普通用户兜底。先检查 `MAINDB_ENABLED=1`、`MAINDB_*` 环境变量、数据库网络和 `maindb.ping()`。
+- 企业成员：主库模式下邀请接受和企业中心新增成员需要手机号来创建或认领 `ai_education.users`；缺少手机号会返回 `main_db_phone_required`。管理员重置主库成员密码会调用 `maindb.set_password()`，不会要求该用户存在于中心服本地 users 数组。
+- 回滚：临时回滚固定账号可设置 `MATRIX_COMIC_FIXED_SSO_ENABLED=1`、`MATRIX_COMIC_FIXED_USER_ID=44`、`MATRIX_COMIC_FIXED_USERNAME=003`、`MATRIX_COMIC_FIXED_DISPLAY_NAME=003` 并重启中心服；恢复后必须改回 mapped 模式。代码回滚恢复 `backend/central_server.py`、`docs/openapi.yaml`、相关测试和本文档。

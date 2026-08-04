@@ -212,12 +212,13 @@ class RolePermissionsTest(unittest.TestCase):
         self.assertNotIn('"email":', block)
 
     def test_enterprise_user_upsert_generates_login_identifier_without_contact_fields(self):
-        payload, status = self.server.upsert_enterprise_user({
-            "orgId": "org-a",
-            "name": "No Contact Member",
-            "password": "member-password-1",
-            "role": "member",
-        })
+        with mock.patch.object(self.server, "MAINDB_ENABLED", False):
+            payload, status = self.server.upsert_enterprise_user({
+                "orgId": "org-a",
+                "name": "No Contact Member",
+                "password": "member-password-1",
+                "role": "member",
+            })
 
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
