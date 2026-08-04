@@ -2642,3 +2642,6 @@
 - `docs/API_REFERENCE.md#L105-L114`、`docs/ARCHITECTURE.md#L274-L280`、`docs/DEPLOYMENT.md#L641-L647`、`docs/TROUBLESHOOTING.md#L844-L849`、`docs/TROUBLESHOOTING.md#L2988-L2993`：同步 API、架构、部署和排障口径，普通用户来源为 `ai_education.users`，同款替换 SSO 默认 mapped，固定 `003` 只作为显式回滚。
 - `CHANGELOG.md#L2053-L2058`、`migration.sql#L26-L31`：追加发布记录和 no-op migration，说明无数据库结构变更、回滚路径为固定账号开关或上一中心服版本。
 - 验证与影响：`tests.test_openapi_contract` 12/12 通过。本次只补契约、配置模板和文档；没有提交 secret，没有新增数据库迁移 DDL/DML。部署仍需设置中心服与漫剧生成器相同的 SSO secret 并重启对应服务。
+## 2026-08-04 统一漫剧账号验证补充
+- `tests/test_role_permissions.py#L214-L238`：历史“无手机号/邮箱新增成员”角色测试显式设置 `MAINDB_ENABLED=False`，限定为本地 JSON 兼容路径；生产主库模式仍由 `tests/test_enterprise_invites.py#L204-L263` 覆盖手机号创建/认领主库用户。
+- 验证：`tests.test_unified_comic_account_sso tests.test_comic_sso tests.test_enterprise_invites tests.test_auth_login_modes tests.test_openapi_contract` 共 36 项通过；`tests.test_billing_unified tests.test_billing_dashboard_api tests.test_role_permissions` 共 77 项通过；`py_compile`、`git diff --check` 和排除设计/计划占位符后的密钥扫描通过。
