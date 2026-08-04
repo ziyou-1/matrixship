@@ -60,6 +60,14 @@ class FailingPipeline(FakePipeline):
         raise RuntimeError("fake provider failed")
 
 
+class SensitiveFailingPipeline(FakePipeline):
+    def execute(self, job, selected_segments=None, progress=None):
+        raise RuntimeError(
+            "fake provider failed: out_dir=%s source=%s token=secret-token"
+            % (job["outDir"], job["sourceVideoPath"])
+        )
+
+
 class ReplacementServiceContractTests(unittest.TestCase):
     def setUp(self):
         self.module = load_replacement_service_module()
@@ -130,6 +138,26 @@ class ReplacementServiceContractTests(unittest.TestCase):
             self.assertEqual(public_job["status"], "failed")
             self.assertEqual(public_job["error"], "fake provider failed")
             self.assertNotIn("outputPath", public_job)
+
+    def test_public_job_redacts_internal_paths_and_credentials_embedded_in_error_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            service = self._service(td, pipeline=SensitiveFailingPipeline())
+            service.prepare("job-126", {"sourceUrl": "https://example.test/video.mp4"}, [])
+
+            with self.assertRaisesRegex(RuntimeError, "fake provider failed"):
+                service.execute("job-126")
+
+            saved = json.loads((Path(td) / "job-126" / "job.json").read_text(encoding="utf-8"))
+            self.assertIn(saved["outDir"], saved["error"])
+            self.assertIn(saved["sourceVideoPath"], saved["error"])
+
+            public_job = service.get_job("job-126")
+            self.assertEqual(public_job["status"], "failed")
+            self.assertIn("fake provider failed", public_job["error"])
+            self.assertNotIn(td, public_job["error"])
+            self.assertNotIn(saved["outDir"], public_job["error"])
+            self.assertNotIn(saved["sourceVideoPath"], public_job["error"])
+            self.assertNotIn("secret-token", public_job["error"])
 
     def test_cancel_updates_status_and_get_job_returns_none_for_missing_job(self):
         with tempfile.TemporaryDirectory() as td:

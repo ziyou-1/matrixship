@@ -8,6 +8,11 @@ import time
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _INTERNAL_PATH_KEYS = {"outDir", "sourceVideoPath", "videoPath", "outputPath"}
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_PATH_REDACTION = "[redacted-path]"
+_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?P<key>authorization|bearer|token|cookie|password)\b"
+    r"(?:\s*[:=]\s*|\s+)(?P<value>[^\s,;]+)"
+)
 
 
 class ReplacementService:
@@ -119,19 +124,64 @@ class ReplacementService:
         return payload if isinstance(payload, dict) else None
 
     def _public_job(self, job):
-        return self._scrub_value(copy.deepcopy(job or {}))
+        return self._scrub_value(
+            copy.deepcopy(job or {}),
+            sensitive_strings=self._public_sensitive_strings(job),
+        )
 
-    def _scrub_value(self, value):
+    def _scrub_value(self, value, sensitive_strings):
         if isinstance(value, dict):
             cleaned = {}
             for key, child in value.items():
                 if key in _INTERNAL_PATH_KEYS:
                     continue
-                cleaned[key] = self._scrub_value(child)
+                cleaned[key] = self._scrub_value(child, sensitive_strings)
             return cleaned
         if isinstance(value, list):
-            return [self._scrub_value(item) for item in value]
+            return [self._scrub_value(item, sensitive_strings) for item in value]
+        if isinstance(value, str):
+            return self._scrub_string(value, sensitive_strings)
         return value
+
+    def _scrub_string(self, value, sensitive_strings):
+        cleaned = str(value)
+        for item in sensitive_strings:
+            cleaned = cleaned.replace(item, _PATH_REDACTION)
+        return _CREDENTIAL_RE.sub(self._redact_credential_match, cleaned)
+
+    def _redact_credential_match(self, match):
+        return "%s=[redacted]" % match.group("key")
+
+    def _public_sensitive_strings(self, job):
+        sensitive = set(self._path_variants(self.data_dir))
+        self._collect_sensitive_strings(job, sensitive)
+        return sorted(
+            (item for item in sensitive if item),
+            key=len,
+            reverse=True,
+        )
+
+    def _collect_sensitive_strings(self, value, sensitive):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in _INTERNAL_PATH_KEYS and isinstance(child, str):
+                    sensitive.update(self._path_variants(child))
+                self._collect_sensitive_strings(child, sensitive)
+            return
+        if isinstance(value, list):
+            for item in value:
+                self._collect_sensitive_strings(item, sensitive)
+
+    def _path_variants(self, value):
+        raw = str(value or "").strip()
+        if not raw:
+            return set()
+        variants = {raw}
+        if "\\" in raw:
+            variants.add(raw.replace("\\", "/"))
+        if "/" in raw:
+            variants.add(raw.replace("/", "\\"))
+        return variants
 
     def _normalize_files(self, files):
         normalized = []
