@@ -74,3 +74,70 @@ note: only LF->CRLF working-tree warnings were emitted for unrelated existing di
 
 ## Remaining risk
 - Verification is source-level only; no native client restart or real LK888 / remote AI Canvas smoke was performed in this task.
+
+## Fix Follow-up
+
+### Review findings addressed
+- Added `sourceSegmentPath` and `sourceSegmentUploadPath` to the hybrid pipeline private scrub list so public job/progress payloads do not expose absolute local segment paths.
+- Updated `HybridReplacementPipeline.execute()` to return the canceled job when segment execution raises the known cancel signal, instead of bubbling that path into the caller's generic failure handler.
+- Added focused regressions for public payload scrubbing and execute-time cancellation.
+
+### Focused regression output
+```text
+.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_public_payloads_hide_internal_segment_paths tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_execute_returns_canceled_job_after_segment_cancellation -v
+test_hybrid_pipeline_public_payloads_hide_internal_segment_paths (tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_public_payloads_hide_internal_segment_paths) ... ok
+test_hybrid_pipeline_execute_returns_canceled_job_after_segment_cancellation (tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_execute_returns_canceled_job_after_segment_cancellation) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.229s
+
+OK
+```
+
+### Required verification output
+```text
+.\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_service tests.test_video_replacement tests.test_video_replacement_v2 -q
+======================================================================
+FAIL: test_keyframe_references_migrate_existing_central_library_urls_in_memory (tests.test_video_replacement_v2.VideoReplacementV2Test.test_keyframe_references_migrate_existing_central_library_urls_in_memory)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "E:\Desktop\�����ǽ�_Ӧ��ǰ��������ķ�Դ��_clean_20260710_150252\tests\test_video_replacement_v2.py", line 1620, in test_keyframe_references_migrate_existing_central_library_urls_in_memory
+    self.assertEqual(len(refs), 3)
+AssertionError: 0 != 3
+
+----------------------------------------------------------------------
+Ran 387 tests in 10.081s
+
+FAILED (failures=1)
+```
+
+```text
+.\.venv-win\Scripts\python.exe -m py_compile backend\replacement_pipeline.py backend\matrix_native_client.py tests\test_replacement_service.py
+```
+
+```text
+git diff --check
+warning: in the working copy of 'CHANGELOG.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/.env.example', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/api_server.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/build_matrix_agent.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/installer/MatrixShipAgent.iss', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/matrix_native_client.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/platform_features.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'backend/replacement_pipeline.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/API_REFERENCE.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/ARCHITECTURE.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/DEPLOYMENT.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/IMPLEMENTATION.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/TROUBLESHOOTING.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/openapi.yaml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/superpowers/plans/2026-08-04-video-replacement-service-task-3-report.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'migration.sql', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_login_centered_layout.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_minimax_aicanvas_remote.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_native_enterprise_invite.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_video_breakdown.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_video_replacement_v2.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_web_surface_removed.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tools/aicanvas_remote/server_current.py', LF will be replaced by CRLF the next time Git touches it
+```

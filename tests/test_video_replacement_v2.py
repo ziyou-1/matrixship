@@ -1277,6 +1277,48 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertTrue(any(event["stage"] == "awaiting_review" for event in progress_events))
         self.assertGreaterEqual(len(saved), 2)
 
+    def test_hybrid_pipeline_public_payloads_hide_internal_segment_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            source_segment = Path(td) / "source-segment.mp4"
+            source_segment_safe = Path(td) / "source-segment.subtitle-safe.mp4"
+            segment_video = Path(td) / "segment-01.mp4"
+            for path in (source_segment, source_segment_safe, segment_video):
+                path.write_bytes(b"segment")
+            job = {
+                "id": "job-public",
+                "outDir": td,
+                "pipeline": "hybrid_v2",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "segments": [{
+                    "index": 1,
+                    "start": 0.0,
+                    "end": 8.0,
+                    "duration": 8.0,
+                    "status": "done",
+                    "audioStatus": "passed",
+                    "qcStatus": "passed",
+                    "videoPath": str(segment_video),
+                    "sourceSegmentPath": str(source_segment),
+                    "sourceSegmentUploadPath": str(source_segment_safe),
+                    "script": "稳定片段",
+                }],
+            }
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+
+            public_job = pipeline.public_job(job)
+            public_segments = pipeline.public_segments(job)
+
+        public_dump = json.dumps(public_job, ensure_ascii=False)
+        segments_dump = json.dumps(public_segments, ensure_ascii=False)
+        self.assertNotIn("sourceSegmentPath", public_dump)
+        self.assertNotIn("sourceSegmentUploadPath", public_dump)
+        self.assertNotIn(str(source_segment), public_dump)
+        self.assertNotIn(str(source_segment_safe), public_dump)
+        self.assertNotIn("sourceSegmentPath", segments_dump)
+        self.assertNotIn("sourceSegmentUploadPath", segments_dump)
+        self.assertNotIn(str(source_segment), segments_dump)
+        self.assertNotIn(str(source_segment_safe), segments_dump)
+
     def test_hybrid_pipeline_execute_marks_partial_and_never_promotes_invalid_media_to_review(self):
         with tempfile.TemporaryDirectory() as td:
             saved = []
@@ -1355,6 +1397,50 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(result["segments"][1]["status"], "failed")
         self.assertNotEqual(result["status"], "awaiting_review")
         self.assertTrue(any(item["status"] == "partial" for item in saved))
+
+    def test_hybrid_pipeline_execute_returns_canceled_job_after_segment_cancellation(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved = []
+            job = {
+                "id": "job-cancel",
+                "outDir": td,
+                "pipeline": "hybrid_v2",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "segments": [{
+                    "index": 1,
+                    "start": 0.0,
+                    "end": 8.0,
+                    "duration": 8.0,
+                    "status": "planned",
+                    "audioStatus": "pending",
+                    "qcStatus": "pending",
+                    "script": "取消段",
+                }],
+            }
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+
+            def fake_save(value):
+                saved.append(json.loads(json.dumps(value, ensure_ascii=False)))
+
+            def fake_stage(job_value, segment, stage="", **_kwargs):
+                return {
+                    "stage": stage or str((segment or {}).get("status") or ""),
+                    "stageLabel": stage or str((segment or {}).get("status") or ""),
+                    "segmentElapsedSec": 0,
+                    "segmentEtaSec": 0,
+                }
+
+            def fake_runner(_job, _segment):
+                raise RuntimeError("lk888_task_cancelled")
+
+            with mock.patch.object(self.client, "_save_replacement_job", side_effect=fake_save), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", side_effect=fake_stage), \
+                    mock.patch.object(self.client, "_run_hybrid_replacement_segment", side_effect=fake_runner):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "canceled")
+        self.assertEqual(result["segments"][0]["status"], "cancel_requested")
+        self.assertTrue(any(item["status"] == "canceled" for item in saved))
 
     def test_hybrid_pipeline_retry_only_replays_requested_failed_segment(self):
         with tempfile.TemporaryDirectory() as td:

@@ -21,6 +21,8 @@ _PRIVATE_KEYS = {
     "editedVideoPath",
     "faceSwapPath",
     "sourceFramePath",
+    "sourceSegmentPath",
+    "sourceSegmentUploadPath",
     "keyframePath",
     "sceneImagePath",
     "startFramePath",
@@ -154,7 +156,12 @@ class HybridReplacementPipeline(ReplacementPipeline):
                         float(segment.get("end") or 0),
                     ),
                 )
-                self._run_segment(job, segment)
+                try:
+                    self._run_segment(job, segment)
+                except Exception as exc:
+                    if self._call("_replacement_cancel_exception", exc) or self._call("_replacement_cancel_requested", job):
+                        return job
+                    raise
                 segment["segmentEndedAt"] = self._now()
                 segment["elapsedSec"] = self._call("_replacement_segment_elapsed_sec", segment)
                 if segment.get("status") == "done":
