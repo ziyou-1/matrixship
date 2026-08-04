@@ -3186,6 +3186,22 @@ def maindb_on():
     return _MAINDB_OK
 
 
+def require_main_db_auth_source():
+    """Return whether ordinary users may authenticate against the comic main DB."""
+    if not MAINDB_ENABLED:
+        return False, "maindb_required"
+    if maindb is None:
+        return False, "maindb_unavailable"
+    try:
+        if not maindb.configured():
+            return False, "maindb_unavailable"
+    except Exception:
+        return False, "maindb_unavailable"
+    if not _MAINDB_OK or not maindb_on():
+        return False, "maindb_unavailable"
+    return True, ""
+
+
 def shape_mdb_user(row, auth_type="session", session_id=None):
     """漫剧 users 行 → matrixship 代码期望的用户 dict 形状。id=漫剧 int id;balance=算力;
     passwordHash=bcrypt;isPlatformAdmin 由 is_admin/is_staff 决定。"""
@@ -3214,6 +3230,12 @@ def find_login_user(identifier):
     if not identifier:
         return None
     low = identifier.lower()
+    if low == "admin":
+        with LOCK:
+            return next((dict(u) for u in STATE.get("users") or [] if u.get("id") == "user-owner"), None)
+    main_db_ready, _code = require_main_db_auth_source()
+    if not main_db_ready:
+        return None
     if maindb_on():
         # 运营方后台账号("admin")仍用本地 user-owner;其余走漫剧主库
         if low != "admin":
@@ -3224,8 +3246,7 @@ def find_login_user(identifier):
             if row:
                 return shape_mdb_user(row, "session")
             return None
-        with LOCK:
-            return next((dict(u) for u in STATE.get("users") or [] if u.get("id") == "user-owner"), None)
+        return None
     with LOCK:
         for u in STATE.get("users") or []:
             vals = [u.get("id"), u.get("phone"), u.get("email"), u.get("name")]
@@ -16342,6 +16363,24 @@ class Handler(BaseHTTPRequestHandler):
                 identifier = (body.get("identifier") or body.get("phone") or body.get("username") or body.get("email") or "").strip()
                 password = body.get("password") or body.get("token") or ""
                 code = str(body.get("code") or "").strip()
+                if identifier.lower() != "admin":
+                    main_db_ready, main_db_error = require_main_db_auth_source()
+                    if not main_db_ready:
+                        error_id = uuid.uuid4().hex[:12]
+                        json_log(
+                            logger,
+                            "auth_main_db_unavailable",
+                            level="warning",
+                            errorId=error_id,
+                            code=main_db_error,
+                            identifierHash=_short_hash(identifier),
+                        )
+                        add_audit(self, "auth.login", path, ok=False, meta={
+                            "identifierHash": _short_hash(identifier),
+                            "error": main_db_error,
+                            "errorId": error_id,
+                        })
+                        return json_response(self, {"ok": False, "error": main_db_error, "errorId": error_id}, 503)
                 user = find_login_user(identifier)
                 if not user or user.get("status", "active") != "active" or not verify_user_password(user, password):
                     add_audit(self, "auth.login", path, ok=False, meta={"identifier": identifier})

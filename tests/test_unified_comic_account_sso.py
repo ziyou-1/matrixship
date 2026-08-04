@@ -89,3 +89,31 @@ class UnifiedComicAccountSmokeTest(unittest.TestCase):
         )
         self.assertEqual(verified["user_id"], 88)
         self.assertEqual(verified["sub"], "88")
+
+
+class UnifiedAuthSourceGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.central = load_module("central_server_unified_auth_guard", SERVER)
+
+    def test_main_db_required_when_enabled_but_unavailable(self):
+        fake = FakeMainDb()
+        with mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", fake), \
+                mock.patch.object(self.central, "_MAINDB_OK", False), \
+                mock.patch.object(self.central, "_MAINDB_LAST_PROBE", 0.0):
+            ok, code = self.central.require_main_db_auth_source()
+
+        self.assertFalse(ok)
+        self.assertEqual(code, "maindb_unavailable")
+
+    def test_local_json_ordinary_user_is_not_used_when_main_db_auth_is_required(self):
+        state = {
+            "users": [{"id": "user-local", "name": "local", "status": "active"}],
+            "sessions": [],
+        }
+        with mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", None):
+            user = self.central.find_login_user("local")
+
+        self.assertIsNone(user)
