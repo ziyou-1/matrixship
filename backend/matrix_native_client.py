@@ -14,6 +14,7 @@ MatrixShipAgent.exe。界面在客户端里用原生控件绘制;平台自动化
 import os
 import sys
 import time
+import copy
 import hashlib
 import threading
 import queue
@@ -11595,6 +11596,29 @@ def _replacement_emit_stage(job, segment, stage, message="", prompt=None):
         callback(segment, stage, message or _replacement_stage_label(stage), prompt=prompt)
 
 
+class _ReplacementHelperProxy:
+    def __init__(self, namespace):
+        self._namespace = namespace
+
+    def __getattr__(self, name):
+        try:
+            return self._namespace[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+_REPLACEMENT_HELPERS = _ReplacementHelperProxy(globals())
+
+
+def _replacement_hybrid_pipeline():
+    from replacement_pipeline import HybridReplacementPipeline
+    return HybridReplacementPipeline(helpers=_REPLACEMENT_HELPERS, runtime=time)
+
+
+def _replacement_public_job(job):
+    return _replacement_hybrid_pipeline().public_job(job)
+
+
 def _replacement_cancel_requested(job):
     return bool((job or {}).get("cancelRequested")) or str((job or {}).get("status") or "") == "cancel_requested"
 
@@ -15164,13 +15188,10 @@ class VideoReplacementPage(BasePage):
 
     def _build_job(self):
         analysis = self._source.get("breakdownAnalysis") or {}
-        meta = analysis.get("meta") or {}
-        duration = float(meta.get("duration") or 0) or float(_probe_video(self._source.get("sourceVideoPath") or "").get("duration") or 8)
         out_dir = self._job.get("outDir") or os.path.join(data_dir(), "video_replacements", uuid.uuid4().hex)
         os.makedirs(out_dir, exist_ok=True)
         replacement_mode = _replacement_job_mode(self._job)
         no_person_mode = bool(self.no_person_mode.isChecked())
-        identity_mode = "standard"
         strict_script_audio = False
         selected_model = self._selected_replacement_model()
         if replacement_mode == "comic_project" and (
@@ -15184,15 +15205,6 @@ class VideoReplacementPage(BasePage):
             and _env_enabled("VIDEO_REPLACE_PRINCIPAL_REPLACEMENT", "1")
         )
         audio_mode = self._selected_audio_mode()
-        segments = self._job.get("segments") or _build_hybrid_replacement_plan(
-            analysis, duration, segment_seconds=8, strict_script_audio=strict_script_audio)
-        for segment in segments:
-            segment["segmentType"] = (
-                "talking"
-                if not no_person_mode and _replacement_segment_should_talk(
-                    segment, audio_mode=audio_mode, strict_script_audio=strict_script_audio)
-                else "non_talking"
-            )
         job = {
             "id": self._job.get("id") or uuid.uuid4().hex,
             "replacementMode": replacement_mode,
@@ -15227,7 +15239,7 @@ class VideoReplacementPage(BasePage):
             "modelNotes": "no human subject; product-only video" if no_person_mode else (
                 "authorized full-body person references" if principal_enabled else (
                     "authorized model face" if self._face_url else "virtual model identity")),
-            "segments": segments,
+            "segments": copy.deepcopy(self._job.get("segments") or []),
             "outDir": out_dir,
             "pipeline": "comic_project" if replacement_mode == "comic_project" else (
                 self._job.get("pipeline") or os.getenv("VIDEO_REPLACE_PIPELINE", "hybrid_v2")
@@ -15248,15 +15260,7 @@ class VideoReplacementPage(BasePage):
             "outputPath": "",
             "assetId": "",
         }
-        if replacement_mode == "comic_project":
-            job["principalReplacementMode"] = ""
-        for seg in segments:
-            seg["prompt"] = _build_replacement_prompt(
-                seg, analysis, job["productNotes"], job["modelNotes"])
-        if replacement_mode == "comic_project":
-            segments = _comic_plan_script_segments(segments, max_speech_sec=15.0)
-            job["segments"] = segments
-        return job
+        return _replacement_hybrid_pipeline().build_plan(job)
 
     def start_generation(self):
         if self._busy:
@@ -15382,7 +15386,7 @@ class VideoReplacementPage(BasePage):
                         "stage": "product_refs",
                         "message": message,
                         "timing": _replacement_timing_snapshot(job, None, stage="product_refs"),
-                        "segments": job.get("segments") or [],
+                        "segments": _replacement_hybrid_pipeline().public_segments(job),
                     })
 
                 if replacement_mode != "comic_project":
@@ -15407,7 +15411,7 @@ class VideoReplacementPage(BasePage):
                                 upstream_preflight.get("summary") or "上游预检未通过",
                                 error_id or "-",
                             ),
-                            "job": job,
+                            "job": _replacement_public_job(job),
                         })
                         return
 
@@ -15451,13 +15455,13 @@ class VideoReplacementPage(BasePage):
                     BRIDGE.payload.emit("video_replace_done", {
                         "jobId": job["id"],
                         "message": "参考图与原视频主题冲突，已停止生成（错误编号 %s）" % (error_id or "-"),
-                        "job": job,
+                        "job": _replacement_public_job(job),
                     })
                     return
                 BRIDGE.payload.emit("video_replace_progress", {
                     "jobId": job["id"], "stage": "editing", "message": "开始串行生成片段…",
                     "timing": _replacement_timing_snapshot(job, None, stage="editing"),
-                    "segments": job["segments"],
+                    "segments": _replacement_hybrid_pipeline().public_segments(job),
                 })
                 self._run_job_segments(job, [s for s in job["segments"]])
             except Exception as exc:
@@ -15473,92 +15477,64 @@ class VideoReplacementPage(BasePage):
                 BRIDGE.payload.emit("video_replace_done", {
                     "jobId": (self._job or {}).get("id") or "",
                     "message": "替换生成失败（错误编号 %s）:%s" % (error_id or "-", str(exc)[:120]),
-                    "job": failure_job,
+                    "job": _replacement_public_job(failure_job),
                 })
         run_bg(work)
 
     def _run_job_segments(self, job, selected_segments):
-        job["startedAt"] = job.get("startedAt") or time.time()
-        job["status"] = "running"
-        total = len(job.get("segments") or [])
+        if _replacement_job_mode(job) == "comic_project":
+            def emit_progress(segment=None, stage="", message="", prompt=None):
+                timing = _replacement_timing_snapshot(job, segment, stage=stage)
+                if segment is not None:
+                    segment["stage"] = timing.get("stage") or stage or segment.get("status") or ""
+                    segment["stageLabel"] = timing.get("stageLabel") or ""
+                    segment["elapsedSec"] = timing.get("segmentElapsedSec") or 0
+                    segment["etaSec"] = timing.get("segmentEtaSec") or 0
+                BRIDGE.payload.emit("video_replace_progress", {
+                    "jobId": job["id"],
+                    "stage": timing.get("stage") or stage or "",
+                    "message": message or _replacement_stage_label(stage),
+                    "timing": timing,
+                    "segments": job.get("segments") or [],
+                    "prompt": prompt if prompt is not None else ((segment or {}).get("prompt") or ""),
+                })
+            self._run_comic_project_segments(job, selected_segments, emit_progress)
+            return
 
-        def emit_progress(segment=None, stage="", message="", prompt=None):
+        pipeline = _replacement_hybrid_pipeline()
+
+        def emit_progress(job_id, stage, message, segment_index, segments):
+            segment = None
+            if segment_index is not None:
+                for item in (job.get("segments") or []):
+                    if int(item.get("index") or 0) == int(segment_index or 0):
+                        segment = item
+                        break
             timing = _replacement_timing_snapshot(job, segment, stage=stage)
-            if segment is not None:
-                segment["stage"] = timing.get("stage") or stage or segment.get("status") or ""
-                segment["stageLabel"] = timing.get("stageLabel") or ""
-                segment["elapsedSec"] = timing.get("segmentElapsedSec") or 0
-                segment["etaSec"] = timing.get("segmentEtaSec") or 0
+            prompt = ""
+            if segment_index is not None:
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
             BRIDGE.payload.emit("video_replace_progress", {
-                "jobId": job["id"],
+                "jobId": job_id,
                 "stage": timing.get("stage") or stage or "",
                 "message": message or _replacement_stage_label(stage),
                 "timing": timing,
-                "segments": job.get("segments") or [],
-                "prompt": prompt if prompt is not None else ((segment or {}).get("prompt") or ""),
+                "segments": segments or [],
+                "prompt": prompt,
             })
 
-        _REPLACEMENT_PROGRESS_CALLBACKS[str(job.get("id") or "")] = emit_progress
-        try:
-            if _replacement_job_mode(job) == "comic_project":
-                self._run_comic_project_segments(job, selected_segments, emit_progress)
-                return
-            for seg in selected_segments:
-                if self._cancel_requested or _replacement_cancel_requested(job):
-                    _mark_replacement_job_canceled(job)
-                    return
-                seg["segmentStartedAt"] = time.time()
-                seg["segmentEndedAt"] = 0
-                seg["elapsedSec"] = 0
-                seg["etaSec"] = _replacement_segment_baseline_sec(seg)
-                emit_progress(seg, "editing", "生成片段 %s/%s：准备生成（%.1f-%.1fs）" % (
-                    seg.get("index"), total, seg.get("start") or 0, seg.get("end") or 0))
-                try:
-                    if (job.get("pipeline") or os.getenv("VIDEO_REPLACE_PIPELINE", "hybrid_v2")) == "hybrid_v2":
-                        _run_hybrid_replacement_segment(job, seg)
-                    else:
-                        _run_replacement_segment(job, seg)
-                        if seg.get("status") == "done":
-                            seg.update({"audioStatus": "passed", "qcStatus": "passed"})
-                except Exception as exc:
-                    if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
-                        seg.update({"status": "cancel_requested", "stage": "cancel_requested",
-                                    "stageLabel": "取消中", "etaSec": 0})
-                        _mark_replacement_job_canceled(job)
-                        return
-                    raise
-                seg["segmentEndedAt"] = time.time()
-                seg["elapsedSec"] = _replacement_segment_elapsed_sec(seg)
-                if seg.get("status") == "done":
-                    seg.update({"stage": "done", "stageLabel": _replacement_stage_label("done"), "etaSec": 0})
-                elif seg.get("status") == "failed":
-                    seg.update({"etaSec": 0})
-                _save_replacement_job(job)
-                emit_progress(seg, seg.get("stage") or seg.get("status") or "editing", "片段 %s/%s 状态已更新" % (
-                    seg.get("index"), total))
-            failed = [s for s in job.get("segments") or [] if s.get("status") == "failed"]
-            if failed:
-                job["status"] = "partial"
-                job["diagnostics"] = _replacement_diagnostics_summary(job)
-                _save_replacement_job(job)
-                BRIDGE.payload.emit("video_replace_done", {
-                    "jobId": job["id"],
-                    "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
-                    "job": job,
-                    "failedSegments": failed,
-                })
-                return
-            job["status"] = "awaiting_review"
-            _save_replacement_job(job)
-            BRIDGE.payload.emit("video_replace_progress", {
+        result = pipeline.execute(job, selected_segments, progress=emit_progress)
+        if result.get("status") == "partial":
+            failed = [item for item in (job.get("segments") or []) if item.get("status") == "failed"]
+            BRIDGE.payload.emit("video_replace_done", {
                 "jobId": job["id"],
-                "stage": "awaiting_review",
-                "message": "片段已通过自动检查，请查看首、中、尾帧和试听后确认合成。",
-                "timing": _replacement_timing_snapshot(job, None, stage="awaiting_review"),
-                "segments": job.get("segments") or [],
+                "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
+                "job": _replacement_public_job(job),
+                "failedSegments": pipeline.public_job({"segments": failed}).get("segments") or [],
             })
-        finally:
-            _REPLACEMENT_PROGRESS_CALLBACKS.pop(str(job.get("id") or ""), None)
 
     def _run_comic_project_segments(self, job, selected_segments, emit_progress):
         adapter = ComicProjectAdapter()
@@ -15923,29 +15899,16 @@ class VideoReplacementPage(BasePage):
         def work():
             job = self._job
             try:
-                out = os.path.join(job.get("outDir") or data_dir(), "replacement_final_%s.mp4" % int(time.time()))
-                paths = [s.get("videoPath") for s in job.get("segments") or []]
-                final_out = _prepare_replacement_final_video(job, paths, out)
-                asset = _save_replacement_to_assets(final_out, job)
-                if not asset:
-                    raise RuntimeError("replacement_asset_save_failed")
-                job.pop("audioCheck", None)
-                job.update({
-                    "status": "done",
-                    "outputPath": asset.get("path") or final_out,
-                    "assetId": asset.get("id") or "",
+                job = _replacement_hybrid_pipeline().concat(job)
+                self._job = job
+                BRIDGE.payload.emit("video_replace_done", {
+                    "jobId": job["id"],
+                    "message": "替换生成完成，已存入资产库",
+                    "job": _replacement_public_job(job),
                     "audioValidation": "disabled",
                     "reviewStatus": "approved",
-                })
-                cleanup = _cleanup_replacement_sensitive_materials(job)
-                temporary_cleanup = _cleanup_replacement_temporary_materials(job)
-                job["sensitiveCleanup"] = cleanup
-                job["temporaryCleanup"] = temporary_cleanup
-                _save_replacement_job(job)
-                BRIDGE.payload.emit("video_replace_done", {
-                    "jobId": job["id"], "message": "替换生成完成，已存入资产库", "job": job,
-                    "audioValidation": "disabled", "reviewStatus": "approved",
-                    "sensitiveCleanup": cleanup, "temporaryCleanup": temporary_cleanup,
+                    "sensitiveCleanup": job.get("sensitiveCleanup") or {},
+                    "temporaryCleanup": job.get("temporaryCleanup") or {},
                 })
             except Exception as exc:
                 error_id = _replacement_error_id("video_replace_concat_failed", exc, source_video=job.get("sourceVideoPath") or "")
@@ -15954,7 +15917,7 @@ class VideoReplacementPage(BasePage):
                 BRIDGE.payload.emit("video_replace_done", {
                     "jobId": job["id"],
                     "message": "合成失败（错误编号 %s）:%s" % (error_id or "-", str(exc)[:120]),
-                    "job": job,
+                    "job": _replacement_public_job(job),
                 })
         run_bg(work)
 
@@ -16012,25 +15975,54 @@ class VideoReplacementPage(BasePage):
             self.b_retry_failed.setEnabled(False)
             QtWidgets.QMessageBox.information(self, "替换生成", "没有失败片段可重试。")
             return
-        failed, retry_normalization = _normalize_replacement_retry_segments(self._job, failed)
-        retry_summaries = [_prepare_replacement_segment_for_retry(segment) for segment in failed]
-        self._job["lastRetryPreparation"] = {
-            "ts": time.time(),
-            "normalization": retry_normalization,
-            "segments": [
-                {
-                    "index": segment.get("index"),
-                    "demotedCodes": summary.get("demotedCodes") or [],
-                }
-                for segment, summary in zip(failed, retry_summaries)
-            ],
-        }
-        _save_replacement_job(self._job)
         self._busy = True
         self.b_retry_failed.setEnabled(False)
         self.status.setText("正在重试失败片段…")
         self._set_generation_feedback(True, "正在重试失败片段…")
-        run_bg(lambda: self._run_job_segments(self._job, failed))
+        pipeline = _replacement_hybrid_pipeline()
+
+        def emit_progress(job_id, stage, message, segment_index, segments):
+            segment = None
+            if segment_index is not None:
+                for item in (self._job.get("segments") or []):
+                    if int(item.get("index") or 0) == int(segment_index or 0):
+                        segment = item
+                        break
+            timing = _replacement_timing_snapshot(self._job, segment, stage=stage)
+            prompt = ""
+            if segment_index is not None:
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
+            BRIDGE.payload.emit("video_replace_progress", {
+                "jobId": job_id,
+                "stage": timing.get("stage") or stage or "",
+                "message": message or _replacement_stage_label(stage),
+                "timing": timing,
+                "segments": segments or [],
+                "prompt": prompt,
+            })
+
+        def work():
+            pipeline.retry(
+                self._job,
+                segment_indices=[segment.get("index") for segment in failed],
+                progress=emit_progress,
+            )
+            if self._job.get("status") == "partial":
+                failed_segments = [
+                    item for item in (self._job.get("segments") or [])
+                    if item.get("status") == "failed"
+                ]
+                BRIDGE.payload.emit("video_replace_done", {
+                    "jobId": self._job.get("id") or "",
+                    "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed_segments),
+                    "job": _replacement_public_job(self._job),
+                    "failedSegments": pipeline.public_job({"segments": failed_segments}).get("segments") or [],
+                })
+
+        run_bg(work)
 
     def _comic_regeneration_click_allowed(self, segment, media_kind):
         segment = segment if isinstance(segment, dict) else {}

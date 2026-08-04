@@ -1172,12 +1172,28 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             src.index("    def regenerate_selected_segment(self):"):
             src.index("    def cancel_generation", src.index("    def regenerate_selected_segment(self):"))
         ]
+        build_block = src[
+            src.index("    def _build_job(self):"):
+            src.index("    def start_generation", src.index("    def _build_job(self):"))
+        ]
+        run_block = src[
+            src.index("    def _run_job_segments(self, job, selected_segments):"):
+            src.index("    def _run_comic_project_segments", src.index("    def _run_job_segments(self, job, selected_segments):"))
+        ]
+        concat_block = src[
+            src.index("    def confirm_and_concat(self):"):
+            src.index("    def retry_failed_segments", src.index("    def confirm_and_concat(self):"))
+        ]
 
         self.assertIn('status") in ("failed", "download_failed")', retry_block)
         self.assertIn("_comic_segments_ready_for_video_retry", retry_block)
         self.assertIn("_run_comic_video_regeneration", retry_block)
         self.assertIn("allow_pending_recovery=True", retry_block)
-        self.assertIn("_run_job_segments", retry_block)
+        self.assertIn("HybridReplacementPipeline", src)
+        self.assertIn(".build_plan(", build_block)
+        self.assertIn(".execute(", run_block)
+        self.assertIn(".retry(", retry_block)
+        self.assertIn(".concat(", concat_block)
         self.assertIn("_sync_segment_scripts_from_table", regenerate_block)
         self.assertIn('QMessageBox.question(', regenerate_block)
         self.assertIn('"重新生成视频"', regenerate_block)

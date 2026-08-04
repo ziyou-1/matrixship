@@ -15,6 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "backend" / "matrix_native_client.py"
+PIPELINE = ROOT / "backend" / "replacement_pipeline.py"
 
 
 class _DummyQtMeta(type):
@@ -232,6 +233,13 @@ def load_client():
     return mod
 
 
+def load_replacement_pipeline():
+    spec = importlib.util.spec_from_file_location("replacement_pipeline_for_video_replacement", PIPELINE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def fake_qt_multimedia_backend():
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
@@ -354,6 +362,7 @@ class VideoReplacementV2Test(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = load_client()
+        cls.pipeline_module = load_replacement_pipeline()
 
     def test_mix_clips_preserves_non_silent_audio_when_requested(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1169,6 +1178,281 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(plan[0]["segmentType"], "non_talking")
         self.assertEqual(plan[0]["script"], "strict spoken script")
         self.assertEqual(plan[1]["segmentType"], "non_talking")
+
+    def test_hybrid_pipeline_build_plan_preserves_source_entities_and_scripts(self):
+        with tempfile.TemporaryDirectory() as td:
+            analysis = {
+                "meta": {"duration": 12.0},
+                "transcript": {
+                    "segments": [{"startSec": 1.0, "endSec": 5.0, "text": "strict spoken script"}],
+                },
+                "report": "人物：门店销售，产品：汽车，场景：展厅",
+            }
+            job = {
+                "id": "job-plan",
+                "outDir": td,
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "breakdownAnalysis": analysis,
+                "productNotes": "uploaded product reference images: product.png",
+                "modelNotes": "authorized model face",
+                "audioMode": "tts",
+                "strictScriptAudio": True,
+                "noPersonMode": False,
+                "pipeline": "hybrid_v2",
+            }
+
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+            planned = pipeline.build_plan(job)
+
+        self.assertEqual(planned["pipeline"], "hybrid_v2")
+        self.assertEqual(planned["sourceReplacementEntities"], self.client._replacement_source_entities_from_analysis(analysis))
+        self.assertEqual(planned["segments"][0]["script"], "strict spoken script")
+        self.assertEqual(planned["segments"][0]["segmentType"], "talking")
+
+    def test_hybrid_pipeline_execute_keeps_successful_fake_segments_done_and_passed(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "segment-01.mp4"
+            saved = []
+            progress_events = []
+            job = {
+                "id": "job-success",
+                "outDir": td,
+                "pipeline": "hybrid_v2",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "segments": [{
+                    "index": 1,
+                    "start": 0.0,
+                    "end": 8.0,
+                    "duration": 8.0,
+                    "status": "planned",
+                    "audioStatus": "pending",
+                    "qcStatus": "pending",
+                    "script": "新的产品口播",
+                    "prompt": "stable presenter",
+                }],
+            }
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+
+            def fake_save(value):
+                saved.append(json.loads(json.dumps(value, ensure_ascii=False)))
+
+            def fake_stage(job_value, segment, stage="", **_kwargs):
+                return {
+                    "stage": stage or str((segment or {}).get("status") or ""),
+                    "stageLabel": stage or str((segment or {}).get("status") or ""),
+                    "segmentElapsedSec": 0,
+                    "segmentEtaSec": 0,
+                }
+
+            def fake_runner(_job, segment):
+                output.write_bytes(b"segment")
+                segment.update({
+                    "status": "done",
+                    "audioStatus": "passed",
+                    "qcStatus": "passed",
+                    "videoPath": str(output),
+                    "providerTaskId": "task-seg-1",
+                })
+                return {"ok": True, "segment": segment, "path": str(output)}
+
+            with mock.patch.object(self.client, "_save_replacement_job", side_effect=fake_save), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", side_effect=fake_stage), \
+                    mock.patch.object(self.client, "_run_hybrid_replacement_segment", side_effect=fake_runner):
+                result = pipeline.execute(
+                    job,
+                    selected_segments=job["segments"],
+                    progress=lambda job_id, stage, message, segment_index, segments: progress_events.append({
+                        "jobId": job_id,
+                        "stage": stage,
+                        "message": message,
+                        "segmentIndex": segment_index,
+                        "segments": segments,
+                    }),
+                )
+
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(result["segments"][0]["status"], "done")
+        self.assertEqual(result["segments"][0]["qcStatus"], "passed")
+        self.assertEqual(result["segments"][0]["providerTaskId"], "task-seg-1")
+        self.assertTrue(any(event["stage"] == "awaiting_review" for event in progress_events))
+        self.assertGreaterEqual(len(saved), 2)
+
+    def test_hybrid_pipeline_execute_marks_partial_and_never_promotes_invalid_media_to_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved = []
+            job = {
+                "id": "job-invalid",
+                "outDir": td,
+                "pipeline": "hybrid_v2",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "segments": [
+                    {
+                        "index": 1,
+                        "start": 0.0,
+                        "end": 8.0,
+                        "duration": 8.0,
+                        "status": "planned",
+                        "audioStatus": "pending",
+                        "qcStatus": "pending",
+                        "script": "第一段",
+                    },
+                    {
+                        "index": 2,
+                        "start": 8.0,
+                        "end": 16.0,
+                        "duration": 8.0,
+                        "status": "planned",
+                        "audioStatus": "pending",
+                        "qcStatus": "pending",
+                        "script": "第二段",
+                    },
+                ],
+            }
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+
+            def fake_save(value):
+                saved.append(json.loads(json.dumps(value, ensure_ascii=False)))
+
+            def fake_stage(job_value, segment, stage="", **_kwargs):
+                return {
+                    "stage": stage or str((segment or {}).get("status") or ""),
+                    "stageLabel": stage or str((segment or {}).get("status") or ""),
+                    "segmentElapsedSec": 0,
+                    "segmentEtaSec": 0,
+                }
+
+            def fake_runner(_job, segment):
+                if segment["index"] == 1:
+                    segment.update({
+                        "status": "done",
+                        "audioStatus": "passed",
+                        "qcStatus": "passed",
+                        "videoPath": str(Path(td) / "segment-01.mp4"),
+                    })
+                    Path(segment["videoPath"]).write_bytes(b"segment")
+                    return {"ok": True, "segment": segment, "path": segment["videoPath"]}
+                segment.update({
+                    "status": "failed",
+                    "audioStatus": "failed",
+                    "qcStatus": "failed",
+                    "error": "segment_invalid:download_html_body",
+                    "errorId": "err-invalid-seg-2",
+                })
+                return {
+                    "ok": False,
+                    "segment": segment,
+                    "error": segment["error"],
+                    "errorId": segment["errorId"],
+                }
+
+            with mock.patch.object(self.client, "_save_replacement_job", side_effect=fake_save), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", side_effect=fake_stage), \
+                    mock.patch.object(self.client, "_run_hybrid_replacement_segment", side_effect=fake_runner):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["segments"][0]["status"], "done")
+        self.assertEqual(result["segments"][1]["status"], "failed")
+        self.assertNotEqual(result["status"], "awaiting_review")
+        self.assertTrue(any(item["status"] == "partial" for item in saved))
+
+    def test_hybrid_pipeline_retry_only_replays_requested_failed_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            saved = []
+            progress_events = []
+            segment_one = {
+                "index": 1,
+                "start": 0.0,
+                "end": 8.0,
+                "duration": 8.0,
+                "status": "done",
+                "audioStatus": "passed",
+                "qcStatus": "passed",
+                "videoPath": str(Path(td) / "segment-01.mp4"),
+                "script": "保留成功片段",
+            }
+            Path(segment_one["videoPath"]).write_bytes(b"ok")
+            segment_two = {
+                "index": 2,
+                "start": 8.0,
+                "end": 16.0,
+                "duration": 8.0,
+                "status": "failed",
+                "audioStatus": "failed",
+                "qcStatus": "failed",
+                "error": "provider submit failed",
+                "errorId": "err-seg-2",
+                "script": "失败片段 A",
+            }
+            segment_three = {
+                "index": 3,
+                "start": 16.0,
+                "end": 24.0,
+                "duration": 8.0,
+                "status": "failed",
+                "audioStatus": "failed",
+                "qcStatus": "failed",
+                "error": "provider submit failed",
+                "errorId": "err-seg-3",
+                "script": "失败片段 B",
+            }
+            job = {
+                "id": "job-retry",
+                "outDir": td,
+                "pipeline": "hybrid_v2",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "segments": [segment_one, segment_two, segment_three],
+            }
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+
+            def fake_save(value):
+                saved.append(json.loads(json.dumps(value, ensure_ascii=False)))
+
+            def fake_stage(job_value, segment, stage="", **_kwargs):
+                return {
+                    "stage": stage or str((segment or {}).get("status") or ""),
+                    "stageLabel": stage or str((segment or {}).get("status") or ""),
+                    "segmentElapsedSec": 0,
+                    "segmentEtaSec": 0,
+                }
+
+            def fake_runner(_job, segment):
+                if segment["index"] != 3:
+                    raise AssertionError("retry should only rerun the requested failed segment")
+                output = Path(td) / "segment-03-retry.mp4"
+                output.write_bytes(b"retry")
+                segment.update({
+                    "status": "done",
+                    "audioStatus": "passed",
+                    "qcStatus": "passed",
+                    "videoPath": str(output),
+                    "providerTaskId": "task-seg-3-retry",
+                })
+                return {"ok": True, "segment": segment, "path": str(output)}
+
+            with mock.patch.object(self.client, "_save_replacement_job", side_effect=fake_save), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", side_effect=fake_stage), \
+                    mock.patch.object(self.client, "_run_hybrid_replacement_segment", side_effect=fake_runner):
+                result = pipeline.retry(
+                    job,
+                    segment_indices=[3],
+                    progress=lambda job_id, stage, message, segment_index, segments: progress_events.append({
+                        "jobId": job_id,
+                        "stage": stage,
+                        "message": message,
+                        "segmentIndex": segment_index,
+                        "segments": segments,
+                    }),
+                )
+
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["segments"][0]["status"], "done")
+        self.assertEqual(result["segments"][1]["status"], "failed")
+        self.assertEqual(result["segments"][2]["status"], "done")
+        self.assertEqual(result["segments"][2]["qcStatus"], "passed")
+        self.assertEqual(result["segments"][2]["providerTaskId"], "task-seg-3-retry")
+        self.assertEqual(job["lastRetryPreparation"]["segments"], [{"index": 3, "demotedCodes": []}])
+        self.assertTrue(any(event["segmentIndex"] == 3 for event in progress_events))
 
     def test_talking_segment_reuses_existing_tts_and_kling_digital_human(self):
         segment = {"index": 1, "segmentType": "talking", "script": "新的产品口播", "keyframeUrl": "https://x/key.png"}

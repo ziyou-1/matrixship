@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 SERVICE_PATH = BACKEND / "replacement_service.py"
 ANALYSIS_PATH = BACKEND / "replacement_analysis.py"
+PIPELINE_PATH = BACKEND / "replacement_pipeline.py"
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -34,6 +35,18 @@ def load_replacement_analysis_module():
     spec = importlib.util.spec_from_file_location(
         "replacement_analysis_for_test",
         ANALYSIS_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_replacement_pipeline_module():
+    if not PIPELINE_PATH.is_file():
+        raise AssertionError("replacement_pipeline.py is missing")
+    spec = importlib.util.spec_from_file_location(
+        "replacement_pipeline_for_test",
+        PIPELINE_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -69,6 +82,16 @@ class FakePipeline:
         output = os.path.join(job["outDir"], "final.mp4")
         Path(output).write_bytes(b"fake-final")
         job.update({"status": "completed", "outputPath": output})
+        return job
+
+    def retry(self, job, segment_indices, progress=None):
+        selected = set(segment_indices or [])
+        for segment in job.get("segments") or []:
+            if segment.get("index") in selected:
+                output = os.path.join(job["outDir"], "segment-%02d-retry.mp4" % int(segment["index"]))
+                Path(output).write_bytes(b"fake-retry")
+                segment.update({"status": "done", "videoPath": output, "qcStatus": "passed"})
+        job["status"] = "awaiting_review"
         return job
 
 
