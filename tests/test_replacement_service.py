@@ -98,6 +98,14 @@ class FakeDownloader:
         return path
 
 
+class OutsideJobDirDownloader(FakeDownloader):
+    def download(self, source_url, job_dir):
+        self.calls.append((source_url, job_dir))
+        path = Path(job_dir).parent / self.filename
+        path.write_bytes(self.payload)
+        return str(path)
+
+
 class FakeVisionRunner:
     def __init__(self):
         self.calls = []
@@ -417,6 +425,88 @@ class ReplacementServiceContractTests(unittest.TestCase):
             self.assertEqual(saved["breakdownAnalysis"]["validation"]["code"], "download_html_body")
             self.assertEqual(saved["breakdownAnalysis"]["report"].splitlines()[0], "## 分解失败")
             self.assertFalse(Path(saved["sourceVideoPath"]).exists())
+
+
+    def test_prepare_redacts_private_urls_from_public_job_payloads(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_video = Path(td) / "handoff-private.mp4"
+            handoff_video.write_bytes(b"fake-video")
+            private_url = "https://private.example/video/abc?sig=secret&token=secret"
+            analysis = self._replacement_analysis()
+            pipeline = FakePipeline()
+            service = self.ReplacementService(
+                data_dir=td,
+                source_resolver=self.SourceResolver(analysis),
+                pipeline=pipeline,
+            )
+
+            prepared = service.prepare(
+                "job-203",
+                {
+                    "sourceUrl": private_url,
+                    "handoff": {
+                        "handoffId": "rwh_aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "sourceUrl": private_url,
+                        "sourceVideoPath": str(handoff_video),
+                        "platform": "douyin",
+                        "breakdownAnalysis": {
+                            "meta": {"duration": 9.0},
+                            "sourceUrl": private_url,
+                            "visual": "source: %s" % private_url,
+                            "report": "## report\nlink: %s" % private_url,
+                        },
+                    },
+                },
+                [],
+            )
+            public_job = service.get_job("job-203")
+            saved = json.loads((Path(td) / "job-203" / "job.json").read_text(encoding="utf-8"))
+            prepared_dump = json.dumps(prepared, ensure_ascii=False)
+            public_dump = json.dumps(public_job, ensure_ascii=False)
+            safe_url = "https://private.example/[redacted-url]"
+
+            self.assertEqual(saved["request"]["sourceUrl"], private_url)
+            self.assertIn(private_url, saved["breakdownAnalysis"]["report"])
+            self.assertNotIn(private_url, prepared_dump)
+            self.assertNotIn(private_url, public_dump)
+            self.assertNotIn("sig=secret", prepared_dump)
+            self.assertNotIn("token=secret", prepared_dump)
+            self.assertNotIn("sig=secret", public_dump)
+            self.assertNotIn("token=secret", public_dump)
+            self.assertIn(safe_url, prepared_dump)
+            self.assertIn(safe_url, public_dump)
+
+    def test_prepare_rejects_direct_download_path_outside_job_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            downloader = OutsideJobDirDownloader(filename="outside-source.mp4")
+            analysis = self._replacement_analysis(downloader=downloader)
+            pipeline = FakePipeline()
+            service = self.ReplacementService(
+                data_dir=td,
+                source_resolver=self.SourceResolver(analysis),
+                pipeline=pipeline,
+            )
+
+            prepared = service.prepare(
+                "job-204",
+                {"sourceUrl": "https://www.douyin.com/video/outside"},
+                [("characterImage", "face.png", b"img")],
+            )
+
+            self.assertEqual(prepared["status"], "failed")
+            self.assertEqual(prepared["error"], "replacement_source_outside_job_dir")
+            self.assertEqual(prepared["sourceContext"]["platform"], "douyin")
+            self.assertFalse(prepared["sourceContext"]["sourceVideoAvailable"])
+            self.assertEqual(pipeline.build_plan_calls, 0)
+
+            saved = json.loads((Path(td) / "job-204" / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["error"], "replacement_source_outside_job_dir")
+            self.assertEqual(
+                saved["breakdownAnalysis"]["validation"]["code"],
+                "replacement_source_outside_job_dir",
+            )
+            self.assertFalse(saved["sourceVideoPath"].startswith(str(Path(td) / "job-204")))
 
 
 if __name__ == "__main__":

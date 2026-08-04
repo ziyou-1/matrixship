@@ -3,16 +3,19 @@ import json
 import os
 import re
 import time
+from urllib.parse import urlparse
 
 
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _INTERNAL_PATH_KEYS = {"outDir", "sourceVideoPath", "videoPath", "outputPath"}
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 _PATH_REDACTION = "[redacted-path]"
+_URL_REDACTION = "[redacted-url]"
 _CREDENTIAL_RE = re.compile(
     r"(?i)\b(?P<key>authorization|bearer|token|cookie|password)\b"
     r"(?:\s*[:=]\s*|\s+)(?P<value>[^\s,;]+)"
 )
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 
 class SourceResolver:
@@ -181,7 +184,19 @@ class ReplacementService:
         cleaned = str(value)
         for item in sensitive_strings:
             cleaned = cleaned.replace(item, _PATH_REDACTION)
+        cleaned = _HTTP_URL_RE.sub(self._redact_public_url_match, cleaned)
         return _CREDENTIAL_RE.sub(self._redact_credential_match, cleaned)
+
+    def _redact_public_url_match(self, match):
+        raw = str(match.group(0) or "").strip()
+        parsed = urlparse(raw)
+        host = str(parsed.hostname or "").strip()
+        scheme = str(parsed.scheme or "").strip().lower()
+        if scheme in ("http", "https") and host:
+            if parsed.port:
+                host = "%s:%s" % (host, parsed.port)
+            return "%s://%s/%s" % (scheme, host, _URL_REDACTION)
+        return _URL_REDACTION
 
     def _redact_credential_match(self, match):
         return "%s=[redacted]" % match.group("key")

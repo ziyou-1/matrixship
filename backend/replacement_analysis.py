@@ -40,6 +40,17 @@ def _analysis_duration(analysis):
         return 0.0
 
 
+def _path_within_dir(path, root):
+    raw_path = os.path.abspath(str(path or "").strip())
+    raw_root = os.path.abspath(str(root or "").strip())
+    if not (raw_path and raw_root):
+        return False
+    try:
+        return os.path.commonpath([raw_path, raw_root]) == raw_root
+    except ValueError:
+        return False
+
+
 class ReplacementAnalysis:
     def __init__(
             self,
@@ -110,6 +121,15 @@ class ReplacementAnalysis:
 
         platform = str(self.platform_from_url(source_url) or request.get("platform") or "").strip()
         source_video_path = os.path.abspath(self.downloader.download(source_url, job_dir))
+        if not _path_within_dir(source_video_path, job_dir):
+            analysis = self._source_rejection_analysis(
+                source_video_path,
+                source_url,
+                platform,
+                "replacement_source_outside_job_dir",
+                "downloaded source escaped job dir",
+            )
+            return self._failed_payload(source_url, platform, source_video_path, analysis)
         validation = copy.deepcopy(self.download_validator(source_video_path) or {})
         if not validation.get("ok"):
             self._cleanup_invalid_source(source_video_path, job_dir)
@@ -317,6 +337,35 @@ class ReplacementAnalysis:
             "failedRanges": [],
             "errors": [],
             "message": str(message or "")[:240],
+        }
+
+    def _source_rejection_analysis(self, video_path, source_url, platform, code, message):
+        validation = {
+            "ok": False,
+            "code": str(code or "replacement_source_rejected"),
+            "path": os.path.abspath(str(video_path or "").strip()),
+            "duration": 0.0,
+            "width": 0,
+            "height": 0,
+        }
+        return {
+            "platform": str(platform or "").strip(),
+            "sourceUrl": str(source_url or "").strip(),
+            "videoPath": validation["path"],
+            "validation": validation,
+            "meta": validation,
+            "ocr": {
+                "status": "skipped",
+                "engine": "none",
+                "text": "",
+                "errors": [],
+                "message": str(message or "")[:160],
+            },
+            "transcript": self._diagnostic_transcript(message),
+            "visual": "",
+            "report": "## Source Rejected\n- code: %s" % validation["code"],
+            "error": validation["code"],
+            "message": str(message or "")[:160],
         }
 
     def _resolved_payload(self, source_url, platform, source_video_path, analysis, handoff_id="", message=""):
