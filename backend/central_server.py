@@ -2981,6 +2981,34 @@ def same_user_id(a, b):
     return str(a if a is not None else "").strip() == str(b if b is not None else "").strip()
 
 
+def ensure_membership(org_id, user_id, role="member"):
+    org_id = normalize_org_id(org_id)
+    role = (role or "member").strip().lower() if isinstance(role, str) else "member"
+    if role not in ("owner", "admin", "member", "auditor"):
+        role = "member"
+    with LOCK:
+        memberships = STATE.setdefault("memberships", [])
+        existing = next((m for m in memberships if normalize_org_id(m.get("orgId")) == org_id and same_user_id(m.get("userId"), user_id)), None)
+        if existing:
+            existing["role"] = role or existing.get("role") or "member"
+            existing["status"] = "active"
+            existing["updatedAt"] = now()
+            persist()
+            return dict(existing)
+        membership = {
+            "id": "m-%s-%s" % (org_id, user_id),
+            "orgId": org_id,
+            "userId": user_id,
+            "role": role or "member",
+            "status": "active",
+            "createdAt": now(),
+            "updatedAt": now(),
+        }
+        memberships.append(membership)
+        persist()
+        return dict(membership)
+
+
 def user_orgs(user_id, user=None):
     if user is None and maindb_on() and isinstance(user_id, int):
         user = {"id": user_id, "_mdb": True}
@@ -3504,6 +3532,48 @@ def create_phone_user(phone):
             _add_ledger(uid, bonus, "注册赠豆", "signup-bonus", user["balance"])
         persist()
     return dict(user)
+
+
+def get_main_db_user_by_id(uid):
+    if not maindb:
+        return None
+    try:
+        row = maindb.get_user_by_id(uid)
+        if row:
+            return row
+        uid_text = str(uid or "").strip()
+        if uid_text.isdigit():
+            return maindb.get_user_by_id(int(uid_text))
+    except Exception:
+        return None
+    return None
+
+
+def create_or_claim_main_db_user(phone="", password="", name=""):
+    main_db_ready, main_db_error = require_main_db_auth_source()
+    if not main_db_ready:
+        raise RuntimeError(main_db_error)
+    p = str(phone or "").strip()
+    if not p:
+        raise ValueError("main_db_phone_required")
+    existing = maindb.get_user_by_phone(p)
+    if existing:
+        uid = existing.get("id")
+        if password:
+            maindb.set_password(uid, password)
+        if name:
+            maindb.set_username(uid, str(name)[:40])
+        row = get_main_db_user_by_id(uid) or existing
+    else:
+        row = maindb.create_phone_user(p, password=password, signup_bonus=MAINDB_SIGNUP_BONUS)
+        uid = (row or {}).get("id")
+        if name and uid:
+            maindb.set_username(uid, str(name)[:40])
+            row = get_main_db_user_by_id(uid) or row
+    user = shape_mdb_user(row, "session") if row else None
+    if not user:
+        raise RuntimeError("main_db_user_create_failed")
+    return user
 
 
 def get_or_create_phone_user(phone):
@@ -8621,7 +8691,7 @@ def replace_enterprise_memberships(body):
 def reset_enterprise_user_password(org_id, body=None):
     body = body if isinstance(body, dict) else {}
     org_id = normalize_org_id(org_id or body.get("orgId"))
-    user_id = (body.get("userId") or body.get("id") or "").strip()
+    user_id = str(body.get("userId") or body.get("id") or "").strip()
     explicit_password = (body.get("password") or body.get("initialPassword") or body.get("newPassword") or "").strip()
     force_password_change = body.get("forcePasswordChange")
     if force_password_change is None:
@@ -8631,12 +8701,23 @@ def reset_enterprise_user_password(org_id, body=None):
     generated_password = "" if explicit_password else _generated_initial_password()
     password = explicit_password or generated_password
     with LOCK:
-        membership = next((m for m in STATE.get("memberships") or [] if m.get("userId") == user_id and normalize_org_id(m.get("orgId")) == org_id), None)
+        membership = next((m for m in STATE.get("memberships") or [] if same_user_id(m.get("userId"), user_id) and normalize_org_id(m.get("orgId")) == org_id), None)
         if not membership:
             return {"ok": False, "error": "membership_not_found", "orgId": org_id, "userId": user_id}, 404
-        user = next((u for u in STATE.get("users") or [] if u.get("id") == user_id), None)
-        if not user:
+        user = next((u for u in STATE.get("users") or [] if same_user_id(u.get("id"), user_id)), None)
+    if not user and MAINDB_ENABLED:
+        main_db_ready, main_db_error = require_main_db_auth_source()
+        if not main_db_ready:
+            return {"ok": False, "error": main_db_error}, 503
+        row = get_main_db_user_by_id(user_id)
+        if not row:
             return {"ok": False, "error": "user_not_found", "orgId": org_id, "userId": user_id}, 404
+        user = shape_mdb_user(row, "session")
+        set_user_password(user, password)
+        return {"ok": True, "orgId": org_id, "user": public_user(user), "credential": {"identifier": user.get("phone") or user.get("email") or user.get("id"), "initialPassword": password, "generated": bool(generated_password)}}, 200
+    if not user:
+        return {"ok": False, "error": "user_not_found", "orgId": org_id, "userId": user_id}, 404
+    with LOCK:
         set_user_password(user, password)
         user["passwordChangeRequired"] = bool(force_password_change)
         user["status"] = user.get("status") or "active"
@@ -8657,6 +8738,27 @@ def upsert_enterprise_user(body):
     role = (body.get("role") or "member").strip().lower() or "member"
     if role not in ("owner", "admin", "member", "auditor"):
         role = "member"
+    if MAINDB_ENABLED:
+        phone = (body.get("phone") or "").strip()
+        try:
+            item = create_or_claim_main_db_user(phone=phone, password=password, name=name)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)[:80]}, 400
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:80]}, 503
+        if org_id:
+            ensure_membership(org_id, item.get("id"), role)
+        identifier = item.get("phone") or item.get("email") or item.get("id")
+        return {
+            "ok": True,
+            "orgId": org_id,
+            "user": public_user(item),
+            "credential": {
+                "identifier": identifier,
+                "initialPassword": password,
+                "generated": False,
+            },
+        }, 200
     with LOCK:
         users = STATE.setdefault("users", [])
         item = upsert_by_id(users, {
@@ -8925,6 +9027,52 @@ def accept_enterprise_invite(body, handler=None):
     org_id = normalize_org_id(invite.get("orgId"))
     role = invite.get("role") or "member"
     ts = now()
+    if MAINDB_ENABLED:
+        with LOCK:
+            actual_invite = next((x for x in STATE.setdefault("enterpriseInvites", []) if x.get("tokenHash") == enterprise_invite_token_hash(token)), None)
+            if not actual_invite:
+                return {"ok": False, "error": "invalid_invite"}, 404
+            st = enterprise_invite_status(actual_invite)
+            if st != "active":
+                return {"ok": False, "error": "invite_" + st, "status": st}, 410
+        try:
+            user = create_or_claim_main_db_user(phone=phone, password=password, name=name)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)[:80]}, 400
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:80]}, 503
+        with LOCK:
+            actual_invite = next((x for x in STATE.setdefault("enterpriseInvites", []) if x.get("tokenHash") == enterprise_invite_token_hash(token)), None)
+            if not actual_invite:
+                return {"ok": False, "error": "invalid_invite"}, 404
+            st = enterprise_invite_status(actual_invite)
+            if st != "active":
+                return {"ok": False, "error": "invite_" + st, "status": st}, 410
+            membership = ensure_membership(org_id, user.get("id"), role)
+            actual_invite["status"] = "accepted"
+            actual_invite["usedAt"] = ts
+            actual_invite["acceptedBy"] = user.get("id")
+            actual_invite["updatedAt"] = ts
+            persist()
+            out_membership = dict(membership)
+        out_user = public_user(user)
+        session = create_user_session(user, {
+            "ip": handler.client_address[0] if handler and getattr(handler, "client_address", None) else "",
+            "userAgent": handler.headers.get("User-Agent") if handler else "",
+            "inviteId": invite.get("id") or "",
+        })
+        ctx = auth_context_for_user(user)
+        return dict(ctx, **{
+            "ok": True,
+            "token": session.get("token"),
+            "expiresAt": session.get("expiresAt"),
+            "user": out_user,
+            "membership": out_membership,
+            "memberships": user_memberships(user),
+            "organizations": user_orgs(user.get("id"), user=user),
+            "orgId": org_id,
+            "message": "invite_accepted",
+        }), 200
     with LOCK:
         invites = STATE.setdefault("enterpriseInvites", [])
         actual_invite = next((x for x in invites if x.get("tokenHash") == enterprise_invite_token_hash(token)), None)

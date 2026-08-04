@@ -2625,3 +2625,12 @@
 - `backend/central_server.py#L15658-L15659`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
 - `tests/test_web_surface_removed.py#L45-L90`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
 - 验证与影响：`tests.test_web_surface_removed.WebSurfaceRemovedTest` 先红后绿；本次无 OpenAPI JSON Schema、数据库、Docker、环境变量或 `migration.sql` 影响。中心服重启后生效，回滚上述文件和文档即可移除页面。
+## 2026-08-04 统一漫剧账号体系企业成员写入
+- `backend/central_server.py#L2984-L3010`：新增 `ensure_membership()`，按 `orgId + userId` 幂等写入企业成员关系，兼容主库整型用户 ID 和本地字符串用户 ID。
+- `backend/central_server.py#L3221-L3234`、`backend/central_server.py#L3552-L3576`：普通用户写入前先要求主库可用；`create_or_claim_main_db_user()` 通过 `ai_education.users.phone` 认领或创建主库用户，并把初始密码/用户名写回 `maindb`。
+- `backend/central_server.py#L8691-L8726`：企业中心重置成员密码支持 membership 中的主库用户 ID，不再要求该用户存在于本地 JSON `STATE["users"]`。
+- `backend/central_server.py#L8729-L8793`：`upsert_enterprise_user()` 在 `MAINDB_ENABLED=1` 时创建/认领主库用户并写 membership；缺少手机号时返回 `main_db_phone_required`，不降级造本地普通用户。
+- `backend/central_server.py#L9006-L9132`：接受企业邀请在主库模式下创建/认领当前手机号用户，复核邀请码状态后写 membership、标记邀请已接受并创建中心服 session。
+- `tests/test_enterprise_invites.py#L143-L263`：RED/GREEN 覆盖邀请接受和企业中心新增成员都使用主库用户，且不向本地 users 数组写普通用户。
+- `tests/test_unified_comic_account_sso.py#L174-L216`：RED/GREEN 覆盖管理员重置主库成员密码时调用 `maindb.set_password()`。
+- 验证与影响：`tests.test_comic_sso tests.test_enterprise_invites tests.test_unified_comic_account_sso` 共 19 项通过；`py_compile` 和 `git diff --check` 通过。本次影响中心服账号/企业成员链路，不改变数据库结构，不提交密钥；OpenAPI、部署文档、`CHANGELOG.md` 和 `migration.sql` 将在统一账号 SSO 文档任务中继续补齐。回滚 `backend/central_server.py`、相关测试和本条文档即可恢复 Task 4 前行为；生产环境也可临时关闭 `MAINDB_ENABLED` 退回本地测试路径，但普通用户统一账号目标会失效。

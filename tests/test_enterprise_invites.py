@@ -33,10 +33,13 @@ class EnterpriseInviteContractTest(unittest.TestCase):
         }
         self.state_patch = mock.patch.object(self.server, "STATE", self.state)
         self.persist_patch = mock.patch.object(self.server, "persist", return_value=None)
+        self.main_db_patch = mock.patch.object(self.server, "MAINDB_ENABLED", False)
         self.state_patch.start()
         self.persist_patch.start()
+        self.main_db_patch.start()
         self.addCleanup(self.state_patch.stop)
         self.addCleanup(self.persist_patch.stop)
+        self.addCleanup(self.main_db_patch.stop)
 
     def create_invite(self, **overrides):
         body = {
@@ -136,6 +139,129 @@ class EnterpriseInviteContractTest(unittest.TestCase):
         self.assertEqual(accepted_status, 200)
         self.assertTrue(accepted["ok"])
         self.assertTrue(self.server.verify_user_password(user, "replacement-password"))
+
+    def test_invite_acceptance_uses_main_db_user_when_main_db_enabled(self):
+        class InviteMainDb:
+            def __init__(self):
+                self.created = None
+                self.passwords = []
+
+            def configured(self):
+                return True
+
+            def ping(self):
+                return True
+
+            def get_user_by_phone(self, phone):
+                return self.created if self.created and self.created["phone"] == phone else None
+
+            def get_user_by_id(self, uid):
+                return self.created if self.created and self.created["id"] == uid else None
+
+            def create_phone_user(self, phone, password=None, signup_bonus=0):
+                self.created = {
+                    "id": 91,
+                    "phone": phone,
+                    "email": "",
+                    "username": "invitee",
+                    "password_hash": "hash",
+                    "member_level": "FREE",
+                    "member_plan_id": None,
+                    "computing_power": signup_bonus,
+                    "is_active": 1,
+                    "is_admin": 0,
+                    "is_staff": 0,
+                }
+                if password:
+                    self.passwords.append((91, password))
+                return self.created
+
+            def set_password(self, uid, password):
+                self.passwords.append((uid, password))
+
+            def set_username(self, uid, name):
+                self.created["username"] = name
+
+        fake = InviteMainDb()
+        code = self.create_invite(phone="13800000091")["inviteCode"]
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.server, "maindb", fake), \
+                mock.patch.object(self.server, "_MAINDB_OK", True):
+            payload, status = self.server.accept_enterprise_invite({
+                "token": code,
+                "name": "Invitee",
+                "phone": "13800000091",
+                "password": "new-password-1",
+            })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["user"]["id"], 91)
+        self.assertEqual(payload["membership"]["userId"], 91)
+        self.assertIn((91, "new-password-1"), fake.passwords)
+        self.assertFalse(any(u.get("id") == 91 for u in self.state["users"]))
+
+    def test_upsert_enterprise_user_creates_main_db_user_when_main_db_enabled(self):
+        class UpsertMainDb:
+            def __init__(self):
+                self.created = None
+                self.passwords = []
+
+            def configured(self):
+                return True
+
+            def ping(self):
+                return True
+
+            def get_user_by_phone(self, phone):
+                return self.created if self.created and self.created["phone"] == phone else None
+
+            def get_user_by_id(self, uid):
+                return self.created if self.created and self.created["id"] == uid else None
+
+            def create_phone_user(self, phone, password=None, signup_bonus=0):
+                self.created = {
+                    "id": 92,
+                    "phone": phone,
+                    "email": "",
+                    "username": "member",
+                    "password_hash": "hash",
+                    "member_level": "FREE",
+                    "member_plan_id": None,
+                    "computing_power": signup_bonus,
+                    "is_active": 1,
+                    "is_admin": 0,
+                    "is_staff": 0,
+                }
+                if password:
+                    self.passwords.append((92, password))
+                return self.created
+
+            def set_password(self, uid, password):
+                self.passwords.append((uid, password))
+
+            def set_username(self, uid, name):
+                self.created["username"] = name
+
+        fake = UpsertMainDb()
+        with mock.patch.object(self.server, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.server, "maindb", fake), \
+                mock.patch.object(self.server, "_MAINDB_OK", True):
+            payload, status = self.server.upsert_enterprise_user({
+                "orgId": "org-a",
+                "name": "Main Db Member",
+                "phone": "13800000092",
+                "initialPassword": "new-password-2",
+                "role": "member",
+            })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["user"]["id"], 92)
+        self.assertEqual(payload["credential"]["identifier"], "13800000092")
+        self.assertIn((92, "new-password-2"), fake.passwords)
+        self.assertEqual(self.state["memberships"][0]["userId"], 92)
+        self.assertFalse(self.state["users"])
 
     def test_verify_is_post_only_and_audited_without_secret(self):
         source = SERVER.read_text(encoding="utf-8")

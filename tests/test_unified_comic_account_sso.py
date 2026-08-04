@@ -169,3 +169,47 @@ class UnifiedAuthSourceGuardTest(unittest.TestCase):
         self.assertEqual(user["name"], "comic-user")
         self.assertTrue(user["_mdb"])
         self.assertTrue(verified)
+
+
+class UnifiedPasswordWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.central = load_module("central_server_unified_password_write", SERVER)
+        self.state = {
+            "organizations": [{"id": "org-a", "name": "Org A", "status": "active"}],
+            "users": [],
+            "memberships": [{"id": "m-org-a-88", "orgId": "org-a", "userId": 88, "role": "member", "status": "active"}],
+            "sessions": [],
+            "auditLogs": [],
+        }
+
+    def test_reset_enterprise_user_password_writes_main_db_member_password(self):
+        class PasswordMainDb(FakeMainDb):
+            def __init__(self):
+                super().__init__()
+                self.passwords = []
+
+            def get_user_by_id(self, uid):
+                return self.row if uid == self.row["id"] else None
+
+            def set_password(self, uid, password):
+                self.passwords.append((uid, password))
+
+            def hash_password(self, password):
+                return "new-hash"
+
+        fake = PasswordMainDb()
+        with mock.patch.object(self.central, "STATE", self.state), \
+                mock.patch.object(self.central, "persist", return_value=None), \
+                mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", fake), \
+                mock.patch.object(self.central, "_MAINDB_OK", True):
+            payload, status = self.central.reset_enterprise_user_password("org-a", {
+                "userId": "88",
+                "password": "new-password-3",
+            })
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["user"]["id"], 88)
+        self.assertEqual(payload["credential"]["identifier"], "13800000000")
+        self.assertEqual(fake.passwords, [(88, "new-password-3")])
