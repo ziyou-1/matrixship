@@ -112,26 +112,35 @@ class CentralComicSsoTest(unittest.TestCase):
         cls.central = load_module("central_server_comic_sso_under_test", CENTRAL_SERVER)
         cls.sso = load_module("matrix_sso_for_central_fixed_test", SSO_MODULE)
 
-    def test_central_issues_ticket_for_fixed_comic_account(self):
+    def test_central_issues_ticket_for_current_main_db_user(self):
+        user = {
+            "id": 88,
+            "name": "comic-user",
+            "username": "comic-user",
+            "_mdb": True,
+            "status": "active",
+        }
         with mock.patch.object(self.central, "COMIC_SSO_ENABLED", True), \
                 mock.patch.object(self.central, "COMIC_SSO_SECRET", "s" * 48), \
                 mock.patch.object(self.central, "COMIC_FIXED_USER_ID", "44", create=True), \
                 mock.patch.object(self.central, "COMIC_FIXED_USERNAME", "003", create=True), \
-                mock.patch.object(self.central, "COMIC_FIXED_DISPLAY_NAME", "003", create=True):
+                mock.patch.object(self.central, "COMIC_FIXED_DISPLAY_NAME", "003", create=True), \
+                mock.patch.object(self.central, "COMIC_FIXED_SSO_ENABLED", False, create=True):
             response = self.central.issue_comic_sso_ticket_for_user(
-                {"id": "user-owner", "name": "local user"},
+                user,
                 "org-default",
                 now_ts=1_000,
-                nonce="nonce-44",
+                nonce="nonce-88",
             )
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["expiresAt"], 1_060)
         self.assertEqual(response["exchangePath"], "/api/v2/auth/exchange-matrix-ticket")
-        self.assertEqual(response["userId"], 44)
-        self.assertEqual(response["matrixUserId"], "user-owner")
-        self.assertEqual(response["comicUsername"], "003")
-        self.assertEqual(response["comicAccountMode"], "fixed")
+        self.assertEqual(response["userId"], 88)
+        self.assertEqual(response["comicUserId"], 88)
+        self.assertEqual(response["matrixUserId"], "88")
+        self.assertEqual(response["comicUsername"], "comic-user")
+        self.assertEqual(response["comicAccountMode"], "mapped")
         self.assertNotIn("secret", response)
 
         verified = self.sso.verify_ticket(
@@ -142,8 +151,19 @@ class CentralComicSsoTest(unittest.TestCase):
             now=1_030,
             max_ttl_seconds=120,
         )
-        self.assertEqual(verified["user_id"], 44)
-        self.assertEqual(verified["name"], "003")
+        self.assertEqual(verified["user_id"], 88)
+        self.assertEqual(verified["name"], "comic-user")
+
+    def test_fixed_comic_account_requires_explicit_rollback_flag(self):
+        with mock.patch.object(self.central, "COMIC_FIXED_SSO_ENABLED", True, create=True), \
+                mock.patch.object(self.central, "COMIC_FIXED_USER_ID", "44", create=True), \
+                mock.patch.object(self.central, "COMIC_FIXED_USERNAME", "003", create=True), \
+                mock.patch.object(self.central, "COMIC_FIXED_DISPLAY_NAME", "003", create=True):
+            scope = self.central.comic_sso_ticket_user_scope({"id": "user-owner", "name": "ops"})
+
+        self.assertEqual(scope["mode"], "fixed")
+        self.assertEqual(scope["userId"], 44)
+        self.assertEqual(scope["username"], "003")
 
     def test_central_fails_closed_when_sso_is_disabled_or_secret_missing(self):
         user = {"id": 44, "name": "测试用户", "_mdb": True}

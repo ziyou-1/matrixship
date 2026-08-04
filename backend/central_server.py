@@ -137,6 +137,9 @@ try:
 except (TypeError, ValueError):
     COMIC_SSO_TTL_SEC = 60
 COMIC_SSO_EXCHANGE_PATH = "/api/v2/auth/exchange-matrix-ticket"
+COMIC_FIXED_SSO_ENABLED = os.getenv("MATRIX_COMIC_FIXED_SSO_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 COMIC_FIXED_USER_ID = os.getenv("MATRIX_COMIC_FIXED_USER_ID", "44").strip()
 COMIC_FIXED_USERNAME = os.getenv("MATRIX_COMIC_FIXED_USERNAME", "003").strip() or "003"
 COMIC_FIXED_DISPLAY_NAME = (
@@ -3049,8 +3052,8 @@ class ComicSsoIssueError(RuntimeError):
 def comic_sso_ticket_user_scope(user):
     """Return the AI CanvasPro user claims used for Matrix same-style replacement."""
     matrix_user_id = str((user or {}).get("id") or "").strip()
-    fixed_user_id = str(COMIC_FIXED_USER_ID or "").strip()
-    if fixed_user_id:
+    if COMIC_FIXED_SSO_ENABLED:
+        fixed_user_id = str(COMIC_FIXED_USER_ID or "").strip()
         try:
             user_id = int(fixed_user_id)
         except (TypeError, ValueError) as exc:
@@ -3076,11 +3079,12 @@ def comic_sso_ticket_user_scope(user):
         (user or {}).get("name"),
         (user or {}).get("nickname"),
         (user or {}).get("username"),
+        str(user_id),
     )
     return {
         "mode": "mapped",
         "userId": user_id,
-        "username": str((user or {}).get("username") or ""),
+        "username": str((user or {}).get("username") or (user or {}).get("name") or ""),
         "displayName": display_name,
         "matrixUserId": matrix_user_id,
     }
