@@ -20,6 +20,8 @@ backend/datas/
 backend/uploads/
 
 # Local validation and agent scratch artifacts
+.worktrees
+.worktrees/
 .playwright-cli/
 .workbuddy/
 .tmp-*.log
