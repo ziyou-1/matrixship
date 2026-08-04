@@ -46,6 +46,7 @@
 - ReplacementService(data_dir, source_resolver, pipeline, runtime=None)
 - prepare(job_id, request, files, progress=None) -> dict
 - execute(job_id, overrides=None, progress=None) -> dict
+- concat(job_id, progress=None) -> dict
 - get_job(job_id) -> dict | None
 - cancel(job_id) -> dict
 
@@ -122,6 +123,14 @@ class ReplacementService:
         job = self.pipeline.execute(
             job, selected_segments=job.get("segments") or [], progress=progress
         )
+        self._write_job(job)
+        return job
+
+    def concat(self, job_id, progress=None):
+        job = self._load_job(job_id)
+        if not job or job.get("status") != "awaiting_review":
+            raise ValueError("replacement_job_not_ready_for_concat")
+        job = self.pipeline.concat(job)
         self._write_job(job)
         return job
 ~~~
@@ -385,11 +394,12 @@ git commit -m "feat: run video replacement from local web service"
 ~~~python
 def test_shared_mode_routes_qt_to_service(self):
     page = make_video_page_for_test()
-    with patch.object(page.service, "prepare") as prepare, patch.object(page.service, "execute") as execute:
-        page.generate_plan()
-        page.start_generation()
-    prepare.assert_called_once()
-    execute.assert_called_once()
+    page._job = {"id": "rvw_test", "status": "planned", "segments": [{"index": 1}]}
+    page._service_adapter = Mock()
+    page._start_shared_service_job()
+    page._service_adapter.execute.assert_called_once_with(
+        "rvw_test", {}, progress=page._emit_service_progress
+    )
 
 def test_legacy_mode_keeps_old_path(self):
     with patch.dict(os.environ, {"VIDEO_REPLACEMENT_SERVICE_MODE": "legacy"}):
@@ -448,7 +458,7 @@ git commit -m "feat: route native video replacement through shared service"
 
 - [ ] Step 1: Add failing circuit-breaker and redaction tests.
 
-Use at least 100 terminal jobs with one failure and assert shared mode becomes legacy, while a secret-like provider URL and task ID do not appear in logs or API responses.
+Use exactly 100 terminal jobs with two failures and assert shared mode becomes legacy, while a secret-like provider URL and task ID do not appear in logs or API responses. One failure in 100 jobs is exactly 1% and must not open the circuit.
 
 - [ ] Step 2: Run the red tests.
 
@@ -477,7 +487,7 @@ Expected: no public schema exposes private paths or credentials, and no stale im
 - [ ] Step 6: Commit only the Task 7 changes.
 
 ~~~powershell
-git add backend tests docs CHANGELOG.md migration.sql
+git add backend/replacement_service.py backend/replacement_analysis.py backend/replacement_pipeline.py backend/replacement_web.py backend/api_server.py backend/matrix_native_client.py backend/platform_features.py tests/test_replacement_service.py tests/test_replacement_web_mvp.py tests/test_video_breakdown.py tests/test_video_replacement.py tests/test_video_replacement_v2.py docs/openapi.yaml docs/API_REFERENCE.md docs/ARCHITECTURE.md docs/DEPLOYMENT.md docs/TROUBLESHOOTING.md docs/IMPLEMENTATION.md CHANGELOG.md migration.sql
 git commit -m "docs: document video replacement service rollout and rollback"
 ~~~
 
@@ -545,7 +555,7 @@ Expected: only intended files are changed and all references point to current li
 Update CHANGELOG.md and docs/TROUBLESHOOTING.md with changed tiers, tests, smoke outcomes, restart requirement, no center/remote/database deployment, shared-to-legacy switch, previous stable installer/tag and residual live-provider risk. Then:
 
 ~~~powershell
-git add backend tests docs CHANGELOG.md migration.sql
+git add backend/replacement_service.py backend/replacement_analysis.py backend/replacement_pipeline.py backend/replacement_web.py backend/api_server.py backend/matrix_native_client.py backend/platform_features.py tests/test_replacement_service.py tests/test_replacement_web_mvp.py tests/test_video_breakdown.py tests/test_video_replacement.py tests/test_video_replacement_v2.py docs/openapi.yaml docs/API_REFERENCE.md docs/ARCHITECTURE.md docs/DEPLOYMENT.md docs/TROUBLESHOOTING.md docs/IMPLEMENTATION.md CHANGELOG.md migration.sql
 git commit -m "feat: complete shared local video replacement service"
 ~~~
 
@@ -553,6 +563,6 @@ git commit -m "feat: complete shared local video replacement service"
 
 - Spec coverage: Tasks 1-2 cover architecture and both source modes; Task 3 covers hybrid_v2; Task 4 covers comic recovery, fallback and actual billing; Task 5 covers web lifecycle; Task 6 covers Qt compatibility; Task 7 covers observability, OpenAPI, deployment, rollback and no migration; Task 8 covers release evidence.
 - Placeholder scan: no unfinished marker or vague implementation step is used.
-- Type consistency: ReplacementService methods are defined in Task 1 and consumed by Tasks 5-6; pipeline interfaces are defined in Tasks 3-4; circuit-breaker methods are defined and tested in Task 7.
+- Type consistency: ReplacementService prepare, execute, concat, get_job and cancel are defined in Task 1 and consumed by Tasks 5-6; pipeline interfaces are defined in Tasks 3-4; circuit-breaker methods are defined and tested in Task 7.
 - Safety review: no task authorizes remote deployment, database changes, live provider use without an explicit condition, or secret output.
 - Documentation review: docs/IMPLEMENTATION.md line references are recalculated after source edits and before commit.
