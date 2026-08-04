@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 SERVICE_PATH = BACKEND / "replacement_service.py"
+ANALYSIS_PATH = BACKEND / "replacement_analysis.py"
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -27,6 +28,18 @@ def load_replacement_service_module():
     return module
 
 
+def load_replacement_analysis_module():
+    if not ANALYSIS_PATH.is_file():
+        raise AssertionError("replacement_analysis.py is missing")
+    spec = importlib.util.spec_from_file_location(
+        "replacement_analysis_for_test",
+        ANALYSIS_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class FakeSourceResolver:
     def prepare(self, job, request, progress=None):
         job["sourceVideoPath"] = os.path.join(job["outDir"], "source.mp4")
@@ -36,7 +49,11 @@ class FakeSourceResolver:
 
 
 class FakePipeline:
+    def __init__(self):
+        self.build_plan_calls = 0
+
     def build_plan(self, job):
+        self.build_plan_calls += 1
         job["segments"] = [{"index": 1, "start": 0.0, "end": 8.0, "status": "planned"}]
         return job
 
@@ -68,16 +85,113 @@ class SensitiveFailingPipeline(FakePipeline):
         )
 
 
+class FakeDownloader:
+    def __init__(self, filename="downloaded.mp4", payload=b"fake-video"):
+        self.filename = filename
+        self.payload = payload
+        self.calls = []
+
+    def download(self, source_url, job_dir):
+        self.calls.append((source_url, job_dir))
+        path = os.path.join(job_dir, self.filename)
+        Path(path).write_bytes(self.payload)
+        return path
+
+
+class FakeVisionRunner:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, prompt, frame_urls, **kwargs):
+        self.calls.append({
+            "prompt": prompt,
+            "frameUrls": list(frame_urls),
+            "kwargs": dict(kwargs),
+        })
+        return "fake visual summary"
+
+
 class ReplacementServiceContractTests(unittest.TestCase):
     def setUp(self):
         self.module = load_replacement_service_module()
+        self.analysis_module = load_replacement_analysis_module()
         self.ReplacementService = self.module.ReplacementService
+        self.SourceResolver = self.module.SourceResolver
+        self.ReplacementAnalysis = self.analysis_module.ReplacementAnalysis
 
     def _service(self, data_dir, pipeline=None):
         return self.ReplacementService(
             data_dir=data_dir,
             source_resolver=FakeSourceResolver(),
             pipeline=pipeline or FakePipeline(),
+        )
+
+    def _replacement_analysis(
+            self,
+            downloader=None,
+            download_validation=None,
+            source_validation=None,
+            frame_times=None):
+        frame_times = list(frame_times or [1.0])
+        vision = FakeVisionRunner()
+
+        def extract_frames(_video_path, frames_dir, _limit):
+            os.makedirs(frames_dir, exist_ok=True)
+            frames = []
+            for index, stamp in enumerate(frame_times, 1):
+                frame_path = Path(frames_dir) / ("frame-%02d.jpg" % index)
+                frame_path.write_bytes(b"fake-frame")
+                frames.append({"time": stamp, "path": str(frame_path)})
+            return frames
+
+        return self.ReplacementAnalysis(
+            downloader=downloader or FakeDownloader(),
+            download_validator=(download_validation or (lambda path: {
+                "ok": True,
+                "code": "",
+                "path": path,
+                "duration": 8.0,
+                "width": 720,
+                "height": 1280,
+            })),
+            platform_from_url=lambda url: "xhs" if "xiaohongshu" in str(url) else "douyin",
+            source_validator=(source_validation or (lambda path: {
+                "ok": True,
+                "code": "",
+                "path": path,
+                "duration": 8.0,
+                "width": 720,
+                "height": 1280,
+            })),
+            frame_extractor=extract_frames,
+            ocr_runner=lambda frames: {
+                "status": "ok",
+                "engine": "fake-ocr",
+                "text": "字幕 %d" % len(frames),
+                "errors": [],
+            },
+            transcription_runner=lambda _video_path, out_dir, progress=None: {
+                "status": "ok",
+                "text": "口播测试",
+                "segments": [{"start": 0.0, "end": 1.0, "text": "口播测试"}],
+                "failedRanges": [],
+                "errors": [],
+                "retryCount": 0,
+                "outDir": out_dir,
+            },
+            vision_runner=vision,
+            report_builder=lambda out: (
+                "## 报告\n来源:%s\n时长:%s"
+                % (out.get("platform") or "-", (out.get("meta") or {}).get("duration") or 0),
+                "分析完成",
+            ),
+            markdown_builder=lambda out: (
+                "# 分解\n%s\n%s"
+                % (out.get("sourceUrl") or "", out.get("videoPath") or "")
+            ),
+            image_data_url=lambda path: "data:image/jpeg;base64,%s" % os.path.basename(path),
+            json_logger=lambda *_args, **_kwargs: '{"errorId":"err-analysis-test"}',
+            log_event=lambda *_args, **_kwargs: None,
         )
 
     def test_prepare_execute_concat_persists_internal_paths_and_returns_public_job(self):
@@ -179,6 +293,130 @@ class ReplacementServiceContractTests(unittest.TestCase):
                 service.prepare("../escape", {"sourceUrl": "https://example.test/video.mp4"}, [])
 
             self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_prepare_reuses_handoff_source_and_analysis_without_redownloading(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_video = Path(td) / "handoff-source.mp4"
+            handoff_video.write_bytes(b"fake-video")
+            analysis = self._replacement_analysis()
+            pipeline = FakePipeline()
+            service = self.ReplacementService(
+                data_dir=td,
+                source_resolver=self.SourceResolver(analysis),
+                pipeline=pipeline,
+            )
+
+            prepared = service.prepare(
+                "job-200",
+                {
+                    "handoff": {
+                        "handoffId": "rwh_1234567890abcdef12345678",
+                        "sourceUrl": "https://www.douyin.com/video/123?token=secret",
+                        "sourceVideoPath": str(handoff_video),
+                        "platform": "douyin",
+                        "breakdownAnalysis": {
+                            "meta": {"duration": 8.0, "width": 1080, "height": 1920},
+                            "transcript": {"segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]},
+                        },
+                    }
+                },
+                [],
+            )
+
+            self.assertEqual(prepared["status"], "planned")
+            self.assertEqual(prepared["source"]["host"], "www.douyin.com")
+            self.assertEqual(prepared["sourceContext"]["platform"], "douyin")
+            self.assertEqual(prepared["sourceContext"]["duration"], 8.0)
+            self.assertTrue(prepared["sourceContext"]["hasBreakdownAnalysis"])
+            self.assertTrue(prepared["sourceContext"]["sourceVideoAvailable"])
+            self.assertNotIn("sourceVideoPath", prepared)
+            self.assertEqual(analysis.downloader.calls, [])
+            self.assertEqual(pipeline.build_plan_calls, 1)
+
+            saved = json.loads((Path(td) / "job-200" / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["handoffId"], "rwh_1234567890abcdef12345678")
+            self.assertEqual(saved["sourceVideoPath"], str(handoff_video))
+            self.assertEqual(saved["breakdownAnalysis"]["meta"]["duration"], 8.0)
+
+    def test_prepare_downloads_direct_url_into_job_dir_and_analyzes_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            downloader = FakeDownloader(filename="source-direct.mp4")
+            analysis = self._replacement_analysis(downloader=downloader)
+            pipeline = FakePipeline()
+            service = self.ReplacementService(
+                data_dir=td,
+                source_resolver=self.SourceResolver(analysis),
+                pipeline=pipeline,
+            )
+
+            prepared = service.prepare(
+                "job-201",
+                {"sourceUrl": "https://www.douyin.com/video/abc123?token=secret"},
+                [("characterImage", "face.png", b"img")],
+            )
+
+            job_dir = str(Path(td) / "job-201")
+            self.assertEqual(downloader.calls, [
+                ("https://www.douyin.com/video/abc123?token=secret", job_dir)
+            ])
+            self.assertEqual(prepared["status"], "planned")
+            self.assertEqual(prepared["source"]["host"], "www.douyin.com")
+            self.assertEqual(prepared["sourceContext"]["platform"], "douyin")
+            self.assertEqual(prepared["sourceContext"]["duration"], 8.0)
+            self.assertTrue(prepared["sourceContext"]["sourceVideoAvailable"])
+            self.assertIn("sourceVideoPathHash", prepared["sourceContext"])
+            self.assertNotIn(job_dir, json.dumps(prepared, ensure_ascii=False))
+
+            saved = json.loads((Path(td) / "job-201" / "job.json").read_text(encoding="utf-8"))
+            self.assertTrue(saved["sourceVideoPath"].startswith(job_dir))
+            self.assertTrue(saved["sourceVideoPath"].endswith("source-direct.mp4"))
+            self.assertEqual(saved["breakdownAnalysis"]["meta"]["duration"], 8.0)
+            self.assertEqual(saved["breakdownAnalysis"]["ocr"]["engine"], "fake-ocr")
+            self.assertEqual(saved["breakdownAnalysis"]["transcript"]["segments"][0]["text"], "口播测试")
+            self.assertEqual(saved["breakdownAnalysis"]["visual"], "fake visual summary")
+
+    def test_prepare_returns_structured_failed_job_for_invalid_media_without_planning(self):
+        with tempfile.TemporaryDirectory() as td:
+            downloader = FakeDownloader(filename="downloaded-invalid.mp4", payload=b"<html>403</html>")
+            analysis = self._replacement_analysis(
+                downloader=downloader,
+                download_validation=lambda path: {
+                    "ok": False,
+                    "code": "download_html_body",
+                    "path": path,
+                    "size": len(b"<html>403</html>"),
+                    "duration": 0.0,
+                    "width": 0,
+                    "height": 0,
+                },
+            )
+            pipeline = FakePipeline()
+            service = self.ReplacementService(
+                data_dir=td,
+                source_resolver=self.SourceResolver(analysis),
+                pipeline=pipeline,
+            )
+
+            prepared = service.prepare(
+                "job-202",
+                {"sourceUrl": "https://www.douyin.com/video/bad"},
+                [("characterImage", "face.png", b"img")],
+            )
+
+            self.assertEqual(prepared["status"], "failed")
+            self.assertEqual(prepared["error"], "download_html_body")
+            self.assertEqual(prepared["source"]["host"], "www.douyin.com")
+            self.assertEqual(prepared["sourceContext"]["platform"], "douyin")
+            self.assertFalse(prepared["sourceContext"]["sourceVideoAvailable"])
+            self.assertNotEqual(prepared["status"], "completed")
+            self.assertEqual(pipeline.build_plan_calls, 0)
+
+            saved = json.loads((Path(td) / "job-202" / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["error"], "download_html_body")
+            self.assertEqual(saved["breakdownAnalysis"]["validation"]["code"], "download_html_body")
+            self.assertEqual(saved["breakdownAnalysis"]["report"].splitlines()[0], "## 分解失败")
+            self.assertFalse(Path(saved["sourceVideoPath"]).exists())
 
 
 if __name__ == "__main__":

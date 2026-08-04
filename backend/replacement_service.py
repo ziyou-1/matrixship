@@ -15,6 +15,37 @@ _CREDENTIAL_RE = re.compile(
 )
 
 
+class SourceResolver:
+    def __init__(self, analysis):
+        self.analysis = analysis
+
+    def prepare(self, job, request, progress=None):
+        job = job if isinstance(job, dict) else {}
+        request = request if isinstance(request, dict) else {}
+        resolved = self.analysis.resolve_source(
+            request,
+            job.get("outDir") or "",
+            progress=progress,
+        )
+        if not isinstance(resolved, dict):
+            raise RuntimeError("replacement_source_resolution_invalid")
+        for key in (
+                "handoffId",
+                "platform",
+                "sourceUrl",
+                "source",
+                "sourceVideoPath",
+                "sourceContext",
+                "breakdownAnalysis",
+                "message"):
+            if key in resolved:
+                job[key] = copy.deepcopy(resolved.get(key))
+        if resolved.get("status") == "failed":
+            job["status"] = "failed"
+            job["error"] = str(resolved.get("error") or "media_invalid")
+        return job
+
+
 class ReplacementService:
     def __init__(self, data_dir, source_resolver, pipeline, runtime=None):
         self.data_dir = os.path.abspath(data_dir)
@@ -26,6 +57,9 @@ class ReplacementService:
         job = self._create_job(job_id, request, files)
         self._write_job(job)
         job = self.source_resolver.prepare(job, request, progress=progress)
+        if job.get("status") == "failed":
+            self._write_job(job)
+            return self._public_job(job)
         job = self.pipeline.build_plan(job)
         job["status"] = "planned"
         self._write_job(job)

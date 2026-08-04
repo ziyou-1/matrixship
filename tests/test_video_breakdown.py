@@ -13,6 +13,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "backend" / "matrix_native_client.py"
+REPLACEMENT_ANALYSIS = ROOT / "backend" / "replacement_analysis.py"
 
 
 def load_client():
@@ -1135,6 +1136,50 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         self.assertIn("self._busy = False", src)
         self.assertIn("if self._busy:", src)
         self.assertIn("self._busy = True", src)
+
+    def test_workflow_reference_analysis_wrapper_delegates_to_replacement_analysis(self):
+        import replacement_analysis as replacement_analysis_module
+
+        expected = {
+            "analysis": {
+                "platform": "douyin",
+                "sourceUrl": "https://example.test/video/123",
+                "videoPath": "E:/tmp/source.mp4",
+                "meta": {"duration": 9.0},
+            },
+            "markdown": "# delegated",
+            "message": "分析完成",
+        }
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(
+                replacement_analysis_module.ReplacementAnalysis,
+                "analyze",
+                return_value=expected) as analyze:
+            result = self.client._workflow_analyze_reference_video(
+                "E:/tmp/source.mp4",
+                item={
+                    "url": "https://example.test/video/123",
+                    "platform": "douyin",
+                },
+                topic="测试主题",
+                out_dir=td,
+                progress=mock.Mock(),
+            )
+
+        self.assertEqual(result, expected)
+        analyze.assert_called_once()
+        self.assertEqual(analyze.call_args.args[0], "E:/tmp/source.mp4")
+        self.assertEqual(analyze.call_args.kwargs["source_url"], "https://example.test/video/123")
+        self.assertEqual(analyze.call_args.kwargs["platform"], "douyin")
+        self.assertEqual(analyze.call_args.kwargs["out_dir"], td)
+
+    def test_replacement_analysis_module_stays_qt_free(self):
+        src = REPLACEMENT_ANALYSIS.read_text(encoding="utf-8")
+
+        self.assertIn("class ReplacementAnalysis", src)
+        self.assertNotIn("PySide6", src)
+        self.assertNotIn("QtWidgets", src)
+        self.assertNotIn("QtCore", src)
 
 
 if __name__ == "__main__":

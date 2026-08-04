@@ -17871,171 +17871,47 @@ def _workflow_normalize_reference_breakdown_text(text):
 
 
 def _workflow_analyze_reference_video(video_path, item=None, topic="", out_dir=None, progress=None):
-    """Run the same evidence-backed analysis used by the video breakdown page."""
+    """Compatibility wrapper that delegates workflow analysis to the pure service layer."""
+    from replacement_analysis import ReplacementAnalysis
+
     item = item if isinstance(item, dict) else {}
-    video_path = str(video_path or "").strip()
     source_url = str(
         item.get("note_url") or item.get("work_url") or item.get("url") or ""
     ).strip()
     platform = str(item.get("platform") or "").strip()
-    tmp_root = out_dir or os.path.join(data_dir(), "video_breakdowns", "workflow-" + uuid.uuid4().hex)
-    os.makedirs(tmp_root, exist_ok=True)
-    out = {
-        "platform": platform,
-        "sourceUrl": source_url,
-        "videoPath": video_path,
-    }
 
-    def notify(message):
-        if callable(progress):
-            progress(str(message or ""))
-
-    def diagnostic(message):
-        return {
-            "status": "failed",
-            "code": "workflow_reference_analysis_failed",
-            "text": "",
-            "segments": [],
-            "failedRanges": [],
-            "errors": [],
-            "message": str(message or "")[:240],
-        }
-
-    _workflow_assistant_log(
-        "reference_analysis_started",
-        video=os.path.basename(video_path),
-        topic=topic,
-    )
-    try:
-        notify("校验参考视频…")
-        validation = _breakdown_source_validation(video_path)
-        out["validation"] = validation
-        if not validation.get("ok"):
-            out["meta"] = validation
-            out["ocr"] = {
-                "status": "skipped",
-                "engine": "none",
-                "text": "",
-                "errors": [],
-                "message": "视频真实性校验未通过。",
-            }
-            out["transcript"] = diagnostic("视频真实性校验未通过。")
-            out["report"] = (
-                "## 分解失败\n"
-                "源视频未通过真实性校验，未把不可验证内容交给同款替换。\n\n"
-                "- code: %s" % (validation.get("code") or "media_invalid")
-            )
-            return {
-                "analysis": out,
-                "markdown": _video_breakdown_markdown(out),
-                "message": "参考视频分析失败（视频文件无效）",
-            }
-
-        meta = {
-            "duration": validation.get("duration") or 0,
-            "width": validation.get("width") or 0,
-            "height": validation.get("height") or 0,
-            "path": video_path,
-        }
-        out["meta"] = meta
-        notify("抽取整条视频关键帧…")
-        frames = _extract_breakdown_frames(video_path, os.path.join(tmp_root, "frames"), 16)
-        frame_notes = "\n".join(
-            "[%.2fs] %s" % (f.get("time") or 0, os.path.basename(f.get("path") or ""))
-            for f in frames
-        ) or "未抽取到关键帧"
-        out["frameNotes"] = frame_notes
-
-        notify("识别画面字幕…")
-        out["ocr"] = _ocr_breakdown_frames(frames)
-
-        notify("分片转写整条视频口播…")
-        out["transcript"] = _transcribe_breakdown_audio(
-            video_path,
-            out_dir=os.path.join(tmp_root, "audio"),
-            progress=lambda index, total, start, end, state: notify(
-                "音频转写 %d/%d（%.0f-%.0fs，%s）" % (
+    def transcription_runner(source_path, analysis_out_dir, progress=None):
+        def on_chunk(index, total, start, end, state):
+            if callable(progress):
+                progress("音频转写 %d/%d（%.0f-%.0fs，%s）" % (
                     index + 1, total, start, end, state
-                )
-            ),
-        )
-        out["transcript"].setdefault("retryCount", 0)
+                ))
 
-        notify("调用视觉模型分析关键帧…")
-        frame_urls = [_image_data_url(f.get("path")) for f in frames[:16]]
-        frame_urls = [url for url in frame_urls if url]
-        if frame_urls:
-            try:
-                out["visual"] = lk888_vision(
-                    "请逐帧深度描述这些短视频关键帧，严格按时间顺序提取人物外观、构图、景别、"
-                    "动作、产品/道具、场景、字幕和镜头节奏；不要臆造关键帧中看不到的内容。",
-                    frame_urls,
-                    max_tokens=2200,
-                    billing_scenario="video_breakdown",
-                    billing_stage="visual_analysis",
-                    billing_detail="workflow assistant key frame visual analysis",
-                )
-            except Exception as exc:
-                raw = json_log(
-                    _CLIENT_JSON_LOGGER,
-                    "workflow_reference_vision_failed",
-                    exc=exc,
-                    code="workflow_reference_vision_failed",
-                    video_path=video_path,
-                )
-                import json as _json
-                error_id = (_json.loads(raw) or {}).get("errorId")
-                out["visual"] = (
-                    "视觉模型分析失败（errorId: %s）: %s\n%s"
-                    % (error_id or "-", str(exc)[:160], frame_notes)
-                )
-        else:
-            out["visual"] = "未抽取到可供视觉模型分析的关键帧。"
+        return _transcribe_breakdown_audio(
+            source_path,
+            out_dir=analysis_out_dir,
+            progress=on_chunk,
+        )
 
-        notify("生成完整拆解报告…")
-        report, message = _generate_video_breakdown_report(out)
-        out["report"] = report
-        markdown = _video_breakdown_markdown(out)
-        _workflow_assistant_log(
-            "reference_analysis_completed",
-            video=os.path.basename(video_path),
-            duration=meta.get("duration") or 0,
-            transcript_status=(out.get("transcript") or {}).get("status") or "",
-            transcript_segments=len((out.get("transcript") or {}).get("segments") or []),
-            transcript_failed_ranges=len((out.get("transcript") or {}).get("failedRanges") or []),
-            report_chars=len(report or ""),
-        )
-        return {"analysis": out, "markdown": markdown, "message": message or "分析完成"}
-    except Exception as exc:
-        raw = json_log(
-            _CLIENT_JSON_LOGGER,
-            "workflow_reference_analysis_failed",
-            exc=exc,
-            code="workflow_reference_analysis_failed",
-            video_path=video_path,
-        )
-        import json as _json
-        error_id = (_json.loads(raw) or {}).get("errorId")
-        out["meta"] = out.get("meta") or {}
-        out["ocr"] = out.get("ocr") or {
-            "status": "failed",
-            "engine": "none",
-            "text": "",
-            "errors": [],
-            "message": str(exc)[:160],
-        }
-        out["transcript"] = out.get("transcript") or diagnostic(str(exc))
-        out["report"] = "## 分解失败\nerrorId: %s\n\n%s" % (
-            error_id or "-", str(exc)[:500]
-        )
-        return {
-            "analysis": out,
-            "markdown": _video_breakdown_markdown(out),
-            "message": "参考视频分析失败（错误编号 %s）" % (error_id or "-"),
-        }
-    finally:
-        if out_dir is None:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+    analysis = ReplacementAnalysis(
+        source_validator=_breakdown_source_validation,
+        frame_extractor=_extract_breakdown_frames,
+        ocr_runner=_ocr_breakdown_frames,
+        transcription_runner=transcription_runner,
+        vision_runner=lk888_vision,
+        report_builder=_generate_video_breakdown_report,
+        markdown_builder=_video_breakdown_markdown,
+        image_data_url=_image_data_url,
+        json_logger=lambda event, **fields: json_log(_CLIENT_JSON_LOGGER, event, **fields),
+        log_event=lambda event, **fields: _workflow_assistant_log(event, topic=topic, **fields),
+    )
+    return analysis.analyze(
+        video_path,
+        source_url=source_url,
+        platform=platform,
+        out_dir=out_dir or "",
+        progress=progress,
+    )
 
 
 def _workflow_save_reference_analysis_artifact(ctx, video_path, analysis):
