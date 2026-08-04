@@ -1,4 +1,6 @@
 import importlib.util
+import io
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -117,3 +119,53 @@ class UnifiedAuthSourceGuardTest(unittest.TestCase):
             user = self.central.find_login_user("local")
 
         self.assertIsNone(user)
+
+    def test_public_login_returns_503_without_falling_back_to_local_json_user(self):
+        state = {
+            "users": [{"id": "user-local", "name": "local", "status": "active", "passwordHash": "local"}],
+            "sessions": [],
+        }
+        body = json.dumps({
+            "identifier": "local",
+            "password": "local",
+            "legalConsent": {
+                "accepted": True,
+                "termsVersion": self.central.LEGAL_TERMS_VERSION,
+                "privacyVersion": self.central.LEGAL_PRIVACY_VERSION,
+                "acceptedAt": "2026-08-04T00:00:00Z",
+            },
+        }).encode("utf-8")
+        handler = object.__new__(self.central.Handler)
+        handler.path = "/api/auth/login"
+        handler.headers = {"Content-Length": str(len(body)), "User-Agent": "test"}
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        handler.client_address = ("127.0.0.1", 1)
+        handler.send_response = lambda status: setattr(handler, "status", status)
+        handler.send_header = lambda *_args: None
+        handler.end_headers = lambda: None
+        with mock.patch.object(self.central, "STATE", state), \
+                mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", None), \
+                mock.patch.object(self.central, "add_audit"), \
+                mock.patch.object(self.central, "json_log"):
+            self.central.Handler.do_POST(handler)
+
+        payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+        self.assertEqual(handler.status, 503)
+        self.assertEqual(payload["error"], "maindb_unavailable")
+
+    def test_healthy_main_db_authenticates_ordinary_user(self):
+        fake = FakeMainDb()
+        with mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", fake), \
+                mock.patch.object(self.central, "_MAINDB_OK", True), \
+                mock.patch.object(self.central, "maindb_on", return_value=True):
+            user = self.central.find_login_user("comic-user")
+            verified_user = self.central.shape_mdb_user(fake.row, "session")
+            verified = self.central.verify_user_password(verified_user, "right-password")
+
+        self.assertEqual(user["id"], 88)
+        self.assertEqual(user["name"], "comic-user")
+        self.assertTrue(user["_mdb"])
+        self.assertTrue(verified)
