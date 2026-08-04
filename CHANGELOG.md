@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 2026-08-04 登录页只保留漫剧账号登录
+### Changed
+- 本地客户端登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”，不再展示“加入企业”入口或登录页顶部模式切换。
+- 注册和邀请码加入企业控件仅保留为隐藏兼容对象，不加入首页布局；企业中心的邀请提示同步改为建议管理员使用“添加成员”或“重置密码”交付新成员账号。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_native_enterprise_invite.NativeEnterpriseInviteTest.test_login_home_shows_only_account_login_entry`、`test_enterprise_invite_copy_does_not_point_to_login_page` 和 `tests.test_login_centered_layout.LoginCenteredLayoutTest.test_marketing_copy_is_restored_outside_login_card`。
+- `tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes` 22/22 通过，`py_compile` 通过。本次只影响本地客户端 UI 和测试文档；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端或重新打包 EXE 后生效；回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧入口。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

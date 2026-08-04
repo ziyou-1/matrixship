@@ -5769,7 +5769,7 @@ class EnterpriseMembersPage(BasePage):
             elif action == "invite":
                 self._show_copy_dialog(
                     "邀请已创建",
-                    "邀请码：\n%s\n\n请通过可信渠道发送给对方，对方在本地客户端登录页选择“加入企业”。"
+                    "邀请码：\n%s\n\n当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。"
                     % (response.get("inviteCode") or "-"),
                 )
             elif action == "add":
@@ -5942,7 +5942,7 @@ class EnterpriseMembersPage(BasePage):
         form.addRow("成员角色", role)
         form.addRow("邀请码有效期", ttl)
         layout.addLayout(form)
-        tip = QtWidgets.QLabel("创建后复制邀请码发送给对方；对方在登录页输入邀请码、姓名和密码即可加入所选企业。")
+        tip = QtWidgets.QLabel("当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。")
         tip.setObjectName("sub")
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -30367,29 +30367,26 @@ class LoginView(QtWidgets.QWidget):
         self._card_layout = cv
         cv.setContentsMargins(32, 30, 32, 28)
         cv.setSpacing(13)
-        title = QtWidgets.QLabel("登录 / 加入企业")
+        title = QtWidgets.QLabel("账号登录")
         title.setStyleSheet("color:#f4f7ff;font-size:21px;font-weight:800;background:transparent;")
-        self.sub = QtWidgets.QLabel("使用用户名和密码登录，或通过邀请码加入企业")
+        self.sub = QtWidgets.QLabel("使用漫剧账号密码登录 AI爆款复刻")
         self.sub.setStyleSheet("color:rgba(160,172,196,0.9);font-size:12.5px;background:transparent;")
         cv.addWidget(title)
         cv.addWidget(self.sub)
         cv.addSpacing(4)
-        # 顶部切换:登录 / 加入企业；注册入口保留内部兼容但不在首页暴露。
-        tabrow = QtWidgets.QHBoxLayout()
-        tabrow.setSpacing(8)
-        self.tab_login = QtWidgets.QPushButton("登录")
-        self.tab_reg = QtWidgets.QPushButton("注册")
-        self.tab_invite = QtWidgets.QPushButton("加入企业")
+        # 登录页只暴露账号登录；注册/邀请控件保留为隐藏对象兼容既有内部流程。
+        self.tab_login = QtWidgets.QPushButton("登录", card)
+        self.tab_reg = QtWidgets.QPushButton("注册", card)
+        self.tab_invite = QtWidgets.QPushButton("加入企业", card)
+        self.tab_login.setVisible(False)
         self.tab_reg.setVisible(False)
+        self.tab_invite.setVisible(False)
         for tb in (self.tab_login, self.tab_reg, self.tab_invite):
             tb.setCursor(QtCore.Qt.PointingHandCursor)
             tb.setMinimumHeight(34)
         self.tab_login.clicked.connect(lambda: self._set_mode("login"))
         self.tab_reg.clicked.connect(lambda: self._set_mode("register"))
         self.tab_invite.clicked.connect(lambda: self._set_mode("invite"))
-        tabrow.addWidget(self.tab_login, 1)
-        tabrow.addWidget(self.tab_invite, 1)
-        cv.addLayout(tabrow)
         self.invite_code_row = QtWidgets.QWidget()
         self.invite_code_row.setStyleSheet("background:transparent;")
         invite_code_layout = QtWidgets.QHBoxLayout(self.invite_code_row)

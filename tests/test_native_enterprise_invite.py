@@ -39,7 +39,7 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
         self.assertIn("已过期", message)
         self.assertNotIn(code, message)
 
-    def test_login_view_exposes_native_invite_mode(self):
+    def test_login_view_keeps_native_invite_mode_internal_only(self):
         previous_bridge = self.client.BRIDGE
         view = None
         with mock.patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}, clear=False):
@@ -47,6 +47,8 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
             self.client.BRIDGE = self.client.Bridge()
             view = self.client.LoginView(lambda _org: None)
             try:
+                self.assertFalse(view.tab_invite.isVisibleTo(view))
+                self.assertFalse(view.invite_code_row.isVisibleTo(view))
                 view._set_mode("invite")
                 self.assertTrue(view.tab_invite.isEnabled())
                 self.assertTrue(view.invite_code_row.isVisibleTo(view))
@@ -61,15 +63,24 @@ class NativeEnterpriseInviteTest(unittest.TestCase):
                 self.client.BRIDGE = previous_bridge
                 app.processEvents()
 
-    def test_login_home_hides_register_tab_and_keeps_invite_tab(self):
+    def test_login_home_shows_only_account_login_entry(self):
         src = CLIENT.read_text(encoding="utf-8")
         build_card = src[src.index("    def _build_card(self):"):src.index("    def _show_legal_document")]
 
-        self.assertIn('title = QtWidgets.QLabel("登录 / 加入企业")', build_card)
-        self.assertIn('tabrow.addWidget(self.tab_login, 1)', build_card)
-        self.assertIn('tabrow.addWidget(self.tab_invite, 1)', build_card)
+        self.assertIn('title = QtWidgets.QLabel("账号登录")', build_card)
+        self.assertIn("使用漫剧账号密码登录 AI爆款复刻", build_card)
+        self.assertNotIn('tabrow.addWidget(self.tab_login, 1)', build_card)
+        self.assertNotIn('tabrow.addWidget(self.tab_invite, 1)', build_card)
         self.assertIn('self.tab_reg.setVisible(False)', build_card)
         self.assertNotIn('tabrow.addWidget(self.tab_reg, 1)', build_card)
+
+    def test_enterprise_invite_copy_does_not_point_to_login_page(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("class EnterpriseMembersPage")
+        end = src.index("class DigitalHumanPage")
+        enterprise_page = src[start:end]
+        self.assertNotIn("登录页选择“加入企业”", enterprise_page)
+        self.assertNotIn("登录页输入邀请码", enterprise_page)
 
     def test_entering_invite_mode_does_not_reuse_remembered_login_password(self):
         previous_bridge = self.client.BRIDGE

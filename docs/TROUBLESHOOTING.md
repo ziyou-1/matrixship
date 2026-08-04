@@ -769,13 +769,13 @@
 - 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_marks_xhs_account_violation_as_high_risk tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_applies_persisted_xhs_task_risk_to_same_platform -v`，应 2/2 通过；再运行完整 `tests.test_agent_mode_defaults` 回归和 `py_compile`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复旧判断；必要时删除运行数据目录下的 `account_risk_events.json` 清空本地风险缓存。本次不涉及数据库迁移、OpenAPI 或 Web 端。
 
-## 2026-07-28 登录首页仍显示注册按钮
-- 现象：首页登录卡顶部仍出现“注册”，不符合当前只保留“登录 / 加入企业”的入口要求。
-- 根因：旧实现把 `self.tab_reg` 和另外两个模式按钮一起加入 `tabrow`，并且标题仍写成“登录 / 注册”。
-- 修复：登录卡现在只把 `self.tab_login` 和 `self.tab_invite` 加入顶部按钮行；`self.tab_reg` 保留为隐藏对象以兼容内部旧注册模式和既有逻辑，但不在首页显示。
-- 排查：检查运行中的客户端源码是否包含 `backend/matrix_native_client.py#L21258-L21279` 的新逻辑；若仍显示注册按钮，说明当前客户端未重启或运行的不是这个工作区版本。
-- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`；Qt 冒烟应输出 `LOGIN_HOME_TABS True False True`。
-- 回滚：回滚 `backend/matrix_native_client.py`、相关测试和本文档即可恢复旧的“登录 / 注册 / 加入企业”三入口。
+## 2026-08-04 登录首页仍显示注册或加入企业入口
+- 现象：首页登录卡顶部仍出现“注册”或“加入企业”，不符合当前只保留“账号登录”的入口要求。
+- 根因：统一漫剧账号体系后，普通用户应直接用漫剧账号密码登录；登录前加入企业会把账号体系和企业归属混在一起，容易造成交付和权限理解混乱。
+- 修复：登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”；`self.tab_login/self.tab_reg/self.tab_invite` 仅保留为隐藏兼容对象，不再加入登录页布局。企业成员交付提示改为建议管理员使用“添加成员”或“重置密码”。
+- 排查：检查运行中的客户端源码是否包含 `backend/matrix_native_client.py#L30370-L30389` 的新逻辑；若仍显示注册或加入企业按钮，说明当前客户端未重启、运行旧 EXE，或打包产物尚未更新。
+- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`，并重新打开客户端确认登录卡只展示账号和密码输入。
+- 回滚：回滚 `backend/matrix_native_client.py`、相关测试和本文档即可恢复旧的“登录 / 加入企业”入口；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
 
 ## 2026-07-28 小红书创作服务平台一直刷新
 - 现象：点击“发布到小红书”后，创作服务平台浏览器已经打开，但登录页或创作者中心页面会反复刷新，用户还没来得及完成扫码/登录，页面又被重新跳转。

@@ -2645,3 +2645,9 @@
 ## 2026-08-04 统一漫剧账号验证补充
 - `tests/test_role_permissions.py#L214-L238`：历史“无手机号/邮箱新增成员”角色测试显式设置 `MAINDB_ENABLED=False`，限定为本地 JSON 兼容路径；生产主库模式仍由 `tests/test_enterprise_invites.py#L204-L263` 覆盖手机号创建/认领主库用户。
 - 验证：`tests.test_unified_comic_account_sso tests.test_comic_sso tests.test_enterprise_invites tests.test_auth_login_modes tests.test_openapi_contract` 共 36 项通过；`tests.test_billing_unified tests.test_billing_dashboard_api tests.test_role_permissions` 共 77 项通过；`py_compile`、`git diff --check` 和排除设计/计划占位符后的密钥扫描通过。
+
+## 2026-08-04 登录页只保留漫剧账号登录
+- `backend/matrix_native_client.py#L30370-L30389`：登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”；`self.tab_login/self.tab_reg/self.tab_invite` 保留为隐藏兼容对象，但不再创建 `tabrow` 或加入登录页布局。
+- `backend/matrix_native_client.py#L5772-L5772`、`backend/matrix_native_client.py#L5945-L5945`：企业中心“邀请成员”的复制弹窗和提示文案不再引导用户到登录页选择“加入企业”，改为建议管理员用“添加成员”或“重置密码”交付成员账号。
+- `tests/test_native_enterprise_invite.py#L42-L81`、`tests/test_login_centered_layout.py#L26-L38`：RED/GREEN 覆盖登录页隐藏加入企业入口、企业邀请文案不再指向登录页，以及登录卡营销布局仍在卡片外。
+- 验证与影响：`tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes` 共 22 项通过；`py_compile` 通过。本次只影响本地客户端 UI 和测试文档，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；重启本地客户端或重新打包 EXE 后生效。回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧入口。
