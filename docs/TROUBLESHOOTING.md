@@ -2982,3 +2982,6 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：当前阶段下载按钮必须为禁用状态，页面源码不应包含 `/MatrixShipAgent-Setup.exe`。运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest -v` 验证。
 - 验证：本地访问 `http://127.0.0.1:9080/download` 应返回 HTML，包含“云灵星图 AI 爆款复刻平台 Windows 客户端下载”和“Windows 客户端即将开放下载”，且不包含安装包直链。
 - 回滚：删除 `/download` 路由和页面渲染函数；不需要改动安装包直链接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+## 2026-08-04 Unified comic account SSO Phase 0
+- RED: `tests.test_unified_comic_account_sso` proves the current center still signs comic SSO tickets to fixed account `003` (`comicUserId=44`) instead of the logged-in main-db user.
+- Required fix: authenticate ordinary AI爆款复刻 users through `ai_education.users` and sign comic SSO tickets with the current `users.id`.
