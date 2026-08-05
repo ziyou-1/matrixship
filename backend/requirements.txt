@@ -20,3 +20,8 @@ rapidocr-onnxruntime==1.4.4
 jsonschema==4.23.0
 PyMySQL==1.1.1
 passlib[bcrypt]==1.7.4
+# passlib 1.7.4 已停止维护,和 bcrypt>=4.1 不兼容(读 bcrypt.__about__ 失败,
+# 校验时抛 "password cannot be longer than 72 bytes")。extra 不锁版本,2026-08-05
+# 镜像重建拉到 bcrypt 5.0.0 导致所有漫剧账号登录返回 invalid_credentials。
+# 必须锁死,且与漫剧后端 ai_education_backend 的 4.0.1 保持一致。
+bcrypt==4.0.1

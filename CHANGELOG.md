@@ -1,5 +1,18 @@
 ﻿# Changelog
 
+## 2026-08-05 修复漫剧账号登录全线 invalid_credentials
+### Fixed
+- 锁定 `bcrypt==4.0.1`。`passlib[bcrypt]==1.7.4` 的 extra 不锁 bcrypt 版本，镜像重建拉到 bcrypt 5.0.0 后与 passlib 1.7.4 不兼容，所有密码校验抛 `ValueError`，导致漫剧账号登录一律返回 `invalid_credentials`。版本与漫剧后端 `ai_education_backend` 保持一致。
+- `maindb.verify_password()` / `hash_password()` 不再把后端异常吞成 `False`，改为抛出新的 `PasswordBackendError`；`central_server.set_user_password()` 移除 `except Exception: pass`，主库写密码失败不再静默成空操作。
+
+### Changed
+- 登录、改密、企业成员重置密码在密码后端故障时返回 HTTP 503 `password_backend_unavailable` + `errorId`，不再降级成 401 `invalid_credentials`；结构化日志事件 `auth_password_backend_failed` 只记录异常类名和标识符哈希。
+- `docs/openapi.yaml` 的 `/api/auth/login` 503 枚举增加 `password_backend_unavailable`，`docs/API_REFERENCE.md` 同步说明三类错误码的区别。
+
+### Verification And Operations
+- 新增 `tests/test_password_backend_failure.py`；`tests.test_password_backend_failure tests.test_unified_comic_account_sso tests.test_enterprise_invites tests.test_role_permissions tests.test_comic_sso` 46/46 通过（1 项容器内专用探针在开发机跳过）。
+- 需要重建中心服镜像并重启容器才能生效，仅换代码不重装依赖无效。**回滚旧镜像无法修复**：`matrix-ship-central:d4c2e26` 与 `:5e3c052` 内同样是 bcrypt 5.0.0。不涉及数据库、`migration.sql` 或密钥变更。
+
 ## 2026-08-04 登录页只保留漫剧账号登录
 ### Changed
 - 本地客户端登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”，不再展示“加入企业”入口或登录页顶部模式切换。

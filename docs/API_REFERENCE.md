@@ -103,6 +103,7 @@
 - 中心服接口仍兼容手机号验证码登录；本地客户端登录页仅提交用户名、密码和法律同意，不再提供手机号验证码登录入口。
 - 注册请求使用 `phone` / `password` / `code` / `legalConsent`。
 - 生产环境普通用户登录源是漫剧主库 `ai_education.users`；`MAINDB_ENABLED=1` 但主库不可用时返回 HTTP 503，`error` 为 `maindb_required` 或 `maindb_unavailable`，不会降级读取本地 JSON 普通用户。`user-owner` / 管理员应急入口仍是独立运维路径。
+- bcrypt / passlib 密码后端自身抛异常时返回 HTTP 503 `password_backend_unavailable`，附 `errorId`，**不会**降级成 401 `invalid_credentials`。同一错误码也用于改密和企业成员重置密码接口。401 `invalid_credentials` 只表示账号不存在或密码不匹配。
 
 ## POST /api/comic/auth/ticket
 

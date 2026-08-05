@@ -40,7 +40,10 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/LegalConsentError"}
         "503":
-          description: Comic main database is required for ordinary user login but is unavailable
+          description: >-
+            Ordinary user login cannot be served: the comic main database is
+            required but unavailable, or the bcrypt password backend itself
+            failed. Never downgraded to 401 invalid_credentials.
           content:
             application/json:
               schema:
@@ -50,7 +53,7 @@ paths:
                   ok: {const: false}
                   error:
                     type: string
-                    enum: [maindb_required, maindb_unavailable]
+                    enum: [maindb_required, maindb_unavailable, password_backend_unavailable]
                   errorId: {type: string}
                 additionalProperties: true
   /api/auth/register:

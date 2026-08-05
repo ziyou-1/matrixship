@@ -21,3 +21,6 @@ rapidocr-onnxruntime==1.4.4
 jsonschema==4.23.0
 PyMySQL==1.1.1
 passlib[bcrypt]==1.7.4
+# 见 requirements.txt 同处注释:bcrypt 必须锁在 <4.1,否则 passlib 1.7.4 的
+# 校验会抛异常,登录全线返回 invalid_credentials。
+bcrypt==4.0.1

@@ -64,6 +64,12 @@ if MAINDB_ENABLED:
         # exception, which may contain connection details from the runtime.
         MAINDB_IMPORT_ERROR = exc
 
+if maindb is not None:
+    PasswordBackendError = maindb.PasswordBackendError
+else:
+    class PasswordBackendError(RuntimeError):
+        """占位:主库模块没导入时也要能 except,避免退化成裸 Exception。"""
+
 from billing_analytics import (
     BillingQueryError,
     build_billing_analytics,
@@ -3164,11 +3170,11 @@ def hash_password(password, salt=None):
 def set_user_password(user, password):
     # 漫剧用户:直接把 bcrypt 写回主库 users.password_hash
     if maindb_on() and user and (user.get("_mdb") or isinstance(user.get("id"), int)):
-        try:
-            maindb.set_password(user.get("id"), password)
-            user["passwordHash"] = maindb.hash_password(password)
-        except Exception:
-            pass
+        # 写主库失败必须冒泡。旧实现 except Exception: pass 会让"改密成功"变成
+        # 空操作 —— bcrypt 后端一坏,set_password 在 UPDATE 之前就抛了,用户拿到
+        # 200 却什么都没改。
+        maindb.set_password(user.get("id"), password)
+        user["passwordHash"] = maindb.hash_password(password)
         return
     salt, h = hash_password(password)
     user["passwordSalt"] = salt
@@ -3232,6 +3238,24 @@ def require_main_db_auth_source():
     if not _MAINDB_OK or not maindb_on():
         return False, "maindb_unavailable"
     return True, ""
+
+
+def password_backend_failure(exc, identifier=""):
+    """PasswordBackendError -> 可上报的 503 载荷。
+
+    和 maindb 不可用同一档:这是服务端故障,不是凭据错误。返回 errorId 让用户
+    能报给运维,日志里只留异常类名和标识符哈希,不落明文标识符或哈希。
+    """
+    error_id = uuid.uuid4().hex[:12]
+    json_log(
+        logger,
+        "auth_password_backend_failed",
+        level="error",
+        errorId=error_id,
+        code=str(exc) or "PasswordBackendError",
+        identifierHash=_short_hash(identifier),
+    )
+    return error_id, {"ok": False, "error": "password_backend_unavailable", "errorId": error_id}
 
 
 def shape_mdb_user(row, auth_type="session", session_id=None):
@@ -4839,9 +4863,13 @@ def change_authenticated_user_password(user, current_password, new_password, kee
             actual = None
         if not actual or actual.get("status") != "active":
             return {"ok": False, "error": "user_not_found"}, 404
-        if not verify_user_password(actual, current_password):
-            return {"ok": False, "error": "current_password_invalid"}, 403
-        set_user_password(actual, new_password)
+        try:
+            if not verify_user_password(actual, current_password):
+                return {"ok": False, "error": "current_password_invalid"}, 403
+            set_user_password(actual, new_password)
+        except PasswordBackendError as exc:
+            _error_id, payload = password_backend_failure(exc, str(user_id))
+            return payload, 503
         try:
             actual = shape_mdb_user(maindb.get_user_by_id(user_id), "session", keep_session_id) or actual
         except Exception:
@@ -8713,7 +8741,11 @@ def reset_enterprise_user_password(org_id, body=None):
         if not row:
             return {"ok": False, "error": "user_not_found", "orgId": org_id, "userId": user_id}, 404
         user = shape_mdb_user(row, "session")
-        set_user_password(user, password)
+        try:
+            set_user_password(user, password)
+        except PasswordBackendError as exc:
+            _error_id, payload = password_backend_failure(exc, str(user_id))
+            return payload, 503
         return {"ok": True, "orgId": org_id, "user": public_user(user), "credential": {"identifier": user.get("phone") or user.get("email") or user.get("id"), "initialPassword": password, "generated": bool(generated_password)}}, 200
     if not user:
         return {"ok": False, "error": "user_not_found", "orgId": org_id, "userId": user_id}, 404
@@ -16534,7 +16566,23 @@ class Handler(BaseHTTPRequestHandler):
                         })
                         return json_response(self, {"ok": False, "error": main_db_error, "errorId": error_id}, 503)
                 user = find_login_user(identifier)
-                if not user or user.get("status", "active") != "active" or not verify_user_password(user, password):
+                try:
+                    credentials_ok = bool(
+                        user
+                        and user.get("status", "active") == "active"
+                        and verify_user_password(user, password)
+                    )
+                except PasswordBackendError as exc:
+                    # 校验器自己坏了 != 密码错了。降级成 invalid_credentials 会把
+                    # 运维故障伪装成用户操作失误。
+                    error_id, payload = password_backend_failure(exc, identifier)
+                    add_audit(self, "auth.login", path, ok=False, meta={
+                        "identifierHash": _short_hash(identifier),
+                        "error": "password_backend_unavailable",
+                        "errorId": error_id,
+                    })
+                    return json_response(self, payload, 503)
+                if not credentials_ok:
                     add_audit(self, "auth.login", path, ok=False, meta={"identifier": identifier})
                     return json_response(self, {"ok": False, "error": "invalid_credentials"}, 401)
                 # 手机号 + 密码登录需要短信验证码;用户名/账号名 + 密码登录不需要验证码。

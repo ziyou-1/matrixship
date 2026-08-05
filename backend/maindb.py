@@ -114,18 +114,32 @@ def find_login_user(identifier):
     return None
 
 
+class PasswordBackendError(RuntimeError):
+    """bcrypt/passlib 后端本身失效,而不是密码不匹配。
+
+    调用方必须把它当成服务端故障上报,**绝不能**降级成"凭据错误"。2026-08-05
+    的事故就是这么来的:镜像重建把 bcrypt 拉到 5.0.0,和 passlib 1.7.4 不兼容,
+    每次校验都抛 ValueError,旧实现把异常吞成 False,于是所有漫剧账号在登录页
+    看到的都是 invalid_credentials。
+    """
+
+
 def verify_password(user, password):
     h = (user or {}).get("password_hash")
     if not h:
         return False
     try:
         return _PWD.verify(password or "", h)
-    except Exception:
-        return False
+    except Exception as exc:
+        # 只带异常类名:passlib 的原始消息可能包含哈希片段。
+        raise PasswordBackendError(type(exc).__name__) from exc
 
 
 def hash_password(password):
-    return _PWD.hash(password or "")
+    try:
+        return _PWD.hash(password or "")
+    except Exception as exc:
+        raise PasswordBackendError(type(exc).__name__) from exc
 
 
 def set_password(uid, password):
