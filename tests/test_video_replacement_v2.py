@@ -1828,6 +1828,53 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertTrue(segment["modelFallbackApplied"])
         self.assertEqual([call[0] for call in charges], [0.031, 0.032, 0.42])
 
+    def test_service_pipeline_defaults_missing_mode_to_product_default_and_routes_comic(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "comic_project"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_a", "segments": []}
+            router.build_plan(job)
+        self.assertEqual(job["replacementMode"], "comic_project")
+        comic.build_plan.assert_called_once_with(job)
+        hybrid.build_plan.assert_not_called()
+
+    def test_service_pipeline_default_legacy_routes_to_hybrid(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "legacy"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_b"}
+            router.build_plan(job)
+        self.assertEqual(job["replacementMode"], "legacy")
+        hybrid.build_plan.assert_called_once_with(job)
+        comic.build_plan.assert_not_called()
+
+    def test_service_pipeline_preserves_explicit_mode_and_routes_execute_to_comic(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "legacy"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_c", "replacementMode": "comic_project"}
+            router.execute(job, selected_segments=[{"index": 1}], progress=None)
+        # explicit comic mode wins over the legacy default, and is not rewritten
+        comic.execute.assert_called_once()
+        hybrid.execute.assert_not_called()
+        self.assertEqual(job["replacementMode"], "comic_project")
+
+    def test_build_video_service_uses_job_routing_pipeline(self):
+        import tempfile
+        import replacement_web
+        with tempfile.TemporaryDirectory() as td:
+            svc = replacement_web.build_video_service(td)
+        self.assertEqual(type(svc.pipeline).__name__, "_ReplacementServicePipeline")
+
     def test_settle_actual_cost_is_idempotent_and_ignores_submit_estimate(self):
         charge_calls = []
         helper = types.SimpleNamespace(
@@ -1963,19 +2010,25 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertFalse(any("127.0.0.1" in ref for ref in refs))
 
     def test_keyframe_references_migrate_existing_central_library_urls_in_memory(self):
+        # The download-and-inline migration only applies to loopback central-library
+        # URLs (a public central serves remotely-fetchable URLs that pass straight
+        # through). Pin CENTRAL to loopback so this branch is exercised regardless of
+        # the shipped default central host (public vs loopback).
+        base = "http://127.0.0.1:9080"
         job = {
             "productImageUrls": [
-                "http://127.0.0.1:9080/api/library/file/product/product.png"
+                base + "/api/library/file/product/product.png"
             ],
-            "modelFaceUrl": "http://127.0.0.1:9080/api/library/file/face/face.png",
-            "sceneImageUrl": "http://127.0.0.1:9080/api/library/file/scene/scene.png",
+            "modelFaceUrl": base + "/api/library/file/face/face.png",
+            "sceneImageUrl": base + "/api/library/file/scene/scene.png",
         }
         response = mock.Mock(
             status_code=200,
             content=b"existing-library-image",
             headers={"Content-Type": "image/png"},
         )
-        with mock.patch.object(self.client.requests, "get", return_value=response) as get:
+        with mock.patch.object(self.client, "CENTRAL", base), \
+                mock.patch.object(self.client.requests, "get", return_value=response) as get:
             refs = self.client._build_replacement_keyframe_references(job, {}, "", "")
 
         self.assertEqual(len(refs), 3)

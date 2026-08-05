@@ -1,4 +1,10 @@
-﻿## 2026-08-04 本地视频替换共享服务（Web 生命周期、Qt 适配器与熔断回滚）
+﻿## 2026-08-05 网页替换按 job 模式选管线（漫剧/hybrid）+ 网页启动器
+- `backend/matrix_native_client.py#L11690`、`#L11727`：新增 `_ReplacementServicePipeline` / `_replacement_service_pipeline()`，为 `/replacement` 网页与 Qt 共享服务按 job 的 `replacementMode` 路由 hybrid 或 comic_project 管线（镜像 `_replacement_pipeline_for_job`）；缺模式的网页 job 在 `build_plan` 时补产品默认 `VIDEO_REPLACE_DEFAULT_MODE`（默认 `comic_project`）并持久化到 job.json，使后续 execute/retry/concat 路由一致；已有模式的 Qt 共享 job 不被覆盖。修复此前网页服务 `_build_pipeline` 写死 hybrid、忽略默认漫剧模式的 gap。
+- `backend/replacement_web.py` 的 `_build_pipeline()`：`build_video_service` 改用 `_replacement_service_pipeline()` 路由管线，取代只用 `_replacement_hybrid_pipeline()`。
+- `tests/test_video_replacement_v2.py`：新增 4 个路由测试（缺模式默认 comic、legacy 默认 hybrid、显式模式优先并路由 execute、`build_video_service` 使用路由管线）；并修复 `test_keyframe_references_migrate_existing_central_library_urls_in_memory` —— 该迁移仅对回环中心库 URL 适用，测试显式钉 `CENTRAL=http://127.0.0.1:9080`，不再依赖出厂默认（现为公网 `120.26.194.174`，见 d349f9c）。
+- `start-visible-client-web.bat`：出厂 `start-visible-client.bat` 的瘦包装，额外设 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 与 `VIDEO_REPLACEMENT_SERVICE_MODE=shared`，便于本机跑网页版同款替换真实链路（原脚本保持默认关的安全默认）。
+
+## 2026-08-04 本地视频替换共享服务（Web 生命周期、Qt 适配器与熔断回滚）
 - `backend/replacement_service.py#L109`：模块级 `public_job()` 抽出集中脱敏（去除 `outDir/sourceVideoPath/videoPath/outputPath`、凭据、签名 URL），Web 与 Qt 复用同一份公开视图。
 - `backend/replacement_service.py#L458`：`ReplacementService.retry()` 仅在 `partial`/`awaiting_review` 状态转发 `pipeline.retry`，原子持久化并返回脱敏 job；缺失 job 抛 `replacement_job_not_found`。
 - `backend/replacement_service.py#L190`、`#L224`、`#L246`：`record_terminal_result()` 维护有界终态窗口（≤500，按 agent 数据目录持久化、只存 job id 哈希，cancelled 不计失败）；`circuit_breaker_state()` / `shared_mode_allowed()` 需至少 100 个终态样本，仅当 `failed/total > 0.01` 才回落 legacy（1% 严格不触发），且从不打断进行中的 job。

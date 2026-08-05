@@ -11687,6 +11687,47 @@ def _replacement_pipeline_for_job(job=None):
     return _replacement_hybrid_pipeline()
 
 
+class _ReplacementServicePipeline:
+    """Route each ReplacementService call to the hybrid or comic pipeline by job mode.
+
+    The /replacement web path and the Qt shared-service adapter both drive a
+    ReplacementService built from a single pipeline. Using only the hybrid
+    pipeline ignored comic_project jobs, which is the product default
+    (VIDEO_REPLACE_DEFAULT_MODE). This router mirrors _replacement_pipeline_for_job
+    so both surfaces honor comic vs legacy exactly like the native Qt page.
+
+    A job that carries no explicit replacementMode (e.g. a fresh web job) is
+    defaulted to the product default at plan time so the choice persists in
+    job.json and later execute/retry/concat route to the same pipeline. Jobs that
+    already carry a mode (Qt shared-mode jobs) are never overridden.
+    """
+
+    def _for(self, job):
+        return _replacement_pipeline_for_job(job)
+
+    def build_plan(self, job):
+        job = job if isinstance(job, dict) else {}
+        if not str(job.get("replacementMode") or "").strip():
+            job["replacementMode"] = _video_replacement_default_mode()
+        return self._for(job).build_plan(job)
+
+    def execute(self, job, selected_segments=None, progress=None):
+        return self._for(job).execute(job, selected_segments, progress=progress)
+
+    def retry(self, job, segment_indices, progress=None):
+        return self._for(job).retry(job, segment_indices, progress=progress)
+
+    def concat(self, job):
+        return self._for(job).concat(job)
+
+    def regenerate_frame(self, job, segment_index, frame_kind, progress=None):
+        return self._for(job).regenerate_frame(job, segment_index, frame_kind, progress=progress)
+
+
+def _replacement_service_pipeline():
+    return _ReplacementServicePipeline()
+
+
 def _replacement_public_job(job):
     return _replacement_pipeline_for_job(job).public_job(job)
 

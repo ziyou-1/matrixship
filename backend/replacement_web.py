@@ -1044,7 +1044,9 @@ def _build_pipeline():
     except Exception:
         import replacement_pipeline
         return replacement_pipeline.ReplacementPipeline()
-    return helpers._replacement_hybrid_pipeline()
+    # Route hybrid vs comic_project per job mode (matches the native Qt page and
+    # the product default VIDEO_REPLACE_DEFAULT_MODE), instead of always hybrid.
+    return helpers._replacement_service_pipeline()
 
 
 def _build_source_resolver():
