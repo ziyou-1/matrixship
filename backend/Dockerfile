@@ -17,7 +17,18 @@ RUN python --version && node --version && npm --version
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+# 生产服务器在大陆,直连 files.pythonhosted.org 会 ReadTimeout。线上镜像一直带着
+# 这三个 PIP_* 环境变量,但 Dockerfile 里没有 —— 只要 requirements.txt 一变、pip
+# 层缓存失效,镜像就再也构建不出来(2026-08-05 锁 bcrypt 版本时踩到)。这里补齐并
+# 允许按需覆盖:境外构建可传 --build-arg PIP_INDEX_URL=https://pypi.org/simple。
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG PIP_DEFAULT_TIMEOUT=120
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+    PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT}
+
+RUN pip install --no-cache-dir --retries 5 -r requirements.txt
 
 COPY . .
 

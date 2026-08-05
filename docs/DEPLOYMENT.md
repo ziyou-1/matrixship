@@ -503,6 +503,16 @@ curl -fsS http://127.0.0.1:9080/api/health
 
 回滚时把 `IMAGE_TAG` 切回上一稳定版本并重启服务。若新版本错误率超过 1%，先停止新任务入口，再回滚镜像；`matrix-central-data` 卷保留业务数据，不随容器删除。
 
+镜像构建的 pip 源由 `backend/Dockerfile` 的构建参数控制，默认 `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple`（生产服务器在大陆，直连 `files.pythonhosted.org` 会 `ReadTimeout`）。境外或内网构建可覆盖：
+
+```bash
+docker compose -f docker-compose.prod.yml build \
+  --build-arg PIP_INDEX_URL=https://pypi.org/simple \
+  --build-arg PIP_TRUSTED_HOST=pypi.org
+```
+
+注意：只要改动 `backend/requirements.txt`，pip 层缓存就会失效并触发一次完整依赖安装。这一步依赖上面的镜像源配置，否则构建会在 `pip install` 阶段超时失败（2026-08-05 锁定 `bcrypt==4.0.1` 时发生过一次）。
+
 ### Windows 10 本地生产冒烟
 
 当前 Windows 验证机为 Windows 10 Pro 21H2 build `19044.1766`。该版本对 Store WSL 的 `wsl.exe --status` 支持不足，Docker Desktop 可切换到 Hyper-V 后端完成本地生产冒烟。Docker Desktop 配置文件必须保持 UTF-8 无 BOM；Windows PowerShell 的 `Set-Content -Encoding UTF8` 可能写入 BOM，导致 Docker 报 `invalid character 'ï'`。
