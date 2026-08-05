@@ -1,4 +1,12 @@
-﻿## 2026-08-05 漫剧账号登录一律返回 `invalid_credentials`
+﻿## 2026-08-05 中心服重启后登录永久返回 503 `maindb_unavailable`
+- 现象：中心服重启后，普通用户登录一直返回 HTTP 503 `maindb_unavailable`，重试无效；但在容器里手工执行 `maindb.ping()` 返回 `True`，`MAINDB_*` 环境变量也都正确。
+- 根因：`require_main_db_auth_source()` 写成 `if not _MAINDB_OK or not maindb_on():`。`_MAINDB_OK` 是进程内缓存标志，进程刚起时为 `False`，Python 的 `or` 短路让右边的 `maindb_on()` 永远不执行——而 `maindb_on()` 正是唯一探测主库并把该标志置 `True` 的函数。于是登录路径自己把自己锁死，只能等别的代码路径偶然调用 `maindb_on()` 才恢复。手工 `docker exec` 的探测跑在另一个进程里，不会影响服务进程的标志。
+- 修复：`backend/central_server.py` 的判断改成 `if not maindb_on() or not _MAINDB_OK:`，先探测再看结果。
+- 排查：确认现象是"重启后必现、且重试不恢复"，而不是主库真的不可达。判据是容器内 `maindb.ping()` 为 `True` 但登录仍 503。修复后重启中心服，第一次登录就应该成功。
+- 验证：`tests.test_unified_comic_account_sso.UnifiedAuthSourceGuardTest.test_fresh_process_probes_the_main_db_instead_of_failing_closed` 覆盖冷进程探测；`test_main_db_required_when_enabled_but_unavailable` 同步改用 `ping()` 返回 `False` 的 fake，之前它用的是健康 fake 却断言 `maindb_unavailable`，等于把这个 bug 当成正确行为锁住了。
+- 回滚：回滚 `backend/central_server.py` 该行和 `tests/test_unified_comic_account_sso.py` 即可；不涉及 OpenAPI、数据库、依赖或 `migration.sql`。回滚后重启中心服会再次出现登录永久 503。
+
+## 2026-08-05 漫剧账号登录一律返回 `invalid_credentials`
 - 现象：本地客户端用正确的漫剧账号密码登录，登录页固定提示“登录失败:invalid_credentials”。漫剧网页端用同一账号可以正常登录。
 - 根因：中心服镜像重建时把 `bcrypt` 拉到 5.0.0。`passlib==1.7.4` 已停止维护，和 `bcrypt>=4.1` 不兼容（读 `bcrypt.__about__` 失败，容器日志出现 `(trapped) error reading bcrypt version`），任何长度的密码校验都抛 `ValueError: password cannot be longer than 72 bytes`。旧 `maindb.verify_password()` 把异常吞成 `False`，于是运维故障被伪装成“密码错误”。`requirements.txt` / `requirements.deploy.txt` 只写了 `passlib[bcrypt]==1.7.4`，extra 不锁 bcrypt 版本，所以只要重建镜像就会复现。同一个 bug 也让 `set_password` 在 UPDATE 之前就抛异常，而 `set_user_password()` 的 `except Exception: pass` 把改密变成静默空操作。
 - 修复：`backend/requirements.txt` 和 `backend/requirements.deploy.txt` 增加 `bcrypt==4.0.1`（与漫剧后端 `ai_education_backend` 一致）；`backend/maindb.py` 新增 `PasswordBackendError`，`verify_password()` / `hash_password()` 改为抛出该异常而不是返回 `False`；`backend/central_server.py` 新增 `password_backend_failure()`，登录、改密和企业成员重置密码遇到该异常返回 HTTP 503 `password_backend_unavailable` + `errorId`，`set_user_password()` 不再吞掉主库写入失败。

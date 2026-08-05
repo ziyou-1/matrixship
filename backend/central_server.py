@@ -3235,7 +3235,10 @@ def require_main_db_auth_source():
             return False, "maindb_unavailable"
     except Exception:
         return False, "maindb_unavailable"
-    if not _MAINDB_OK or not maindb_on():
+    # 顺序不能反。`not _MAINDB_OK or not maindb_on()` 会因为 or 短路而永远不调
+    # maindb_on(),而 maindb_on() 正是唯一探测主库并把 _MAINDB_OK 置 True 的函数
+    # —— 中心服一重启,登录就永久 503 maindb_unavailable。必须先探测再看结果。
+    if not maindb_on() or not _MAINDB_OK:
         return False, "maindb_unavailable"
     return True, ""
 

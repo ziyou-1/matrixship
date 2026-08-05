@@ -98,7 +98,11 @@ class UnifiedAuthSourceGuardTest(unittest.TestCase):
         self.central = load_module("central_server_unified_auth_guard", SERVER)
 
     def test_main_db_required_when_enabled_but_unavailable(self):
-        fake = FakeMainDb()
+        class DeadMainDb(FakeMainDb):
+            def ping(self):
+                return False
+
+        fake = DeadMainDb()
         with mock.patch.object(self.central, "MAINDB_ENABLED", True), \
                 mock.patch.object(self.central, "maindb", fake), \
                 mock.patch.object(self.central, "_MAINDB_OK", False), \
@@ -107,6 +111,23 @@ class UnifiedAuthSourceGuardTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(code, "maindb_unavailable")
+
+    def test_fresh_process_probes_the_main_db_instead_of_failing_closed(self):
+        """2026-08-05 回归:进程刚起时 `_MAINDB_OK` 还是 False。
+
+        旧实现写成 `not _MAINDB_OK or not maindb_on()`,or 短路让 maindb_on()
+        永远不执行,而它是唯一会探测主库并置位该标志的函数 —— 中心服每次重启后
+        登录就永久返回 503 maindb_unavailable。
+        """
+        fake = FakeMainDb()  # configured() / ping() 都正常
+        with mock.patch.object(self.central, "MAINDB_ENABLED", True), \
+                mock.patch.object(self.central, "maindb", fake), \
+                mock.patch.object(self.central, "_MAINDB_OK", False), \
+                mock.patch.object(self.central, "_MAINDB_LAST_PROBE", 0.0):
+            ok, code = self.central.require_main_db_auth_source()
+
+        self.assertTrue(ok, "健康主库 + 冷进程必须探测成功,不能直接 fail-closed")
+        self.assertEqual(code, "")
 
     def test_local_json_ordinary_user_is_not_used_when_main_db_auth_is_required(self):
         state = {
