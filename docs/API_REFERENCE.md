@@ -429,7 +429,25 @@
 }
 ```
 
-状态码：下载 403 返回 HTTP 403；详情连接持续失败、其他下载或媒体校验错误返回 HTTP 502；入库失败返回 HTTP 500。中心服调度同一接口时也使用相同的入库失败契约。
+状态码：下载 403 返回 HTTP 403；详情连接持续失败、其他下载或媒体校验错误返回 HTTP 502；入库失败返回 HTTP 500。
+
+上面这套契约适用于**本地执行器自身的素材库**，以及中心服通过云端执行节点（`/api/node/*`）调度的场景——那条链路上中心服能访问节点文件，入库失败属于真实异常。
+
+**本地浏览器链路（`/api/local-browser/result`）不同**：视频下载在用户自己的机器上完成，中心服（容器）无法访问用户内网文件，"同步到中心素材库"失败是常态。此时任务仍为 `status=done`、`result.ok` 保持 `true`，只在结果里附加三个标记，不占用 `error` 字段：
+
+```json
+{
+  "ok": true,
+  "savePath": "...",
+  "files": [{"name": "video.mp4", "path": "...", "size": 6692456}],
+  "libraryImported": false,
+  "libraryError": "library_import_failed",
+  "libraryErrorId": "err-0123456789abcdef",
+  "stage": "library"
+}
+```
+
+这样客户端可以继续用本地文件做分解和发布。同步失败仍然照记结构化日志 `download_library_import_failed`，凭 `libraryErrorId` 可查。若把它翻成 `ok=false`，客户端会显示"下载失败"，并在分解入口报"分解失败:下载未完成 library_import_failed"，而视频其实已经完整下载到用户磁盘。
 
 ## 小红书采集通用请求字段
 

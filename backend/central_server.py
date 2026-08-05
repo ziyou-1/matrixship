@@ -15163,14 +15163,21 @@ def local_browser_apply_side_effects(handler, task, result):
                 reason="missing_material_id",
             )
             error_id = (json.loads(raw_log) or {}).get("errorId")
+        # 素材已经在用户机器上下载完成了;入库失败只是"同步到中心素材库"这一步的
+        # 问题。旧实现把整个任务翻成失败,客户端因此显示"下载失败",分解入口报
+        # "分解失败:下载未完成 library_import_failed" —— 而视频就躺在用户本地磁盘上。
+        # 本地浏览器链路的中心服无法访问用户内网文件,这个同步失败是常态而非异常,
+        # 不能因此阻断用户后续的分解/发布。保留 ok 与 done 状态,只标记同步失败;
+        # 结构化日志仍然照记,可观测性不受影响。
+        # 注意:云端执行节点链路(/api/node/*)不走这里,那条路的 localApi 是注册过的,
+        # 拉取本就应当成功,失败仍按真实错误处理。
         result.update({
-            "ok": False,
-            "error": "library_import_failed",
-            "errorId": error_id,
-            "stage": "library",
             "libraryImported": False,
+            "libraryError": "library_import_failed",
+            "libraryErrorId": error_id,
+            "stage": "library",
         })
-        return False
+        return True
     try:
         if ttype in LOCAL_BROWSER_LOGIN_TYPES:
             if result.get("loggedIn") or result.get("ok"):

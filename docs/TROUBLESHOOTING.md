@@ -1,4 +1,13 @@
-﻿## 2026-08-05 中心服重启后登录永久返回 503 `maindb_unavailable`
+﻿## 2026-08-05 采集后下载提示「下载失败」/ 分解提示「分解失败:下载未完成 library_import_failed」
+- 现象：从公网下载安装的客户端，内容采集后点「下载」提示下载失败；点「分解」提示 `分解失败:下载未完成 library_import_failed`。但视频其实已经完整下载到用户磁盘（正式版路径 `<安装目录>\_internal\datasccounts\<账号ID>\media_datas\<作者>_<作者ID>\<标题>_<视频ID>ideo.mp4`）。
+- 根因：本地浏览器链路的下载在**用户自己机器上**完成，中心服（Linux 容器）随后要把素材镜像进中心素材库。`mirror_download_material_to_library()` 取文件只有两条路：读 `sourceDownloadPath`（用户的 Windows 路径，容器里不存在），或回源 `localApi + /api/library/file/...`。而 `node_info()` 读的是 `STATE["nodes"]`，本地浏览器客户端却存在 `STATE["localBrowserClients"]`，两个集合从不相交，`localApi` 也从未随注册包上报——所以拉取对本地浏览器链路**结构上不可能成功**，函数返回 `None`，记 `missing_material_id`。旧实现随后把整个结果改写成 `ok=False` / `error=library_import_failed` 并返回 `False`，上层据此把任务判成 `failed`。客户端 `matrix_native_client.py` 的分解入口只检查 `task.status != "done" or result.ok is False`，因此把一次成功的下载显示成失败，并挡住后续分解。
+- 修复：`backend/central_server.py` 的本地浏览器 side-effect 分支保留 `ok` 与 `done` 状态，只附加 `libraryImported=False` / `libraryError` / `libraryErrorId`，并返回 `True`。结构化日志 `download_library_import_failed` 照记，可观测性不变。云端执行节点链路（`/api/node/*`，`central_server.py` 内另外两处）不动——那条路的 `localApi` 是注册过的，拉取本就应当成功。
+- 排查：客户端过门后走 `_find_video_file_from_download()`，依赖结果里的 `files[].path` 和 `savePath`。中心服存储前会经 `safe_local_browser_result()` → `strip_large_payloads()`，它只删大字符串和图片类字段，不会删路径；若客户端改报「分解失败:未找到可分析的视频文件」，说明问题在路径字段而不是本条。中心服日志里仍应能看到 `download_library_import_failed`，凭 `libraryErrorId` 定位。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_local_browser_library_sync` 5/5 通过；先用 `git stash` 还原旧代码确认 2 条关键用例 RED，再恢复后 GREEN。
+- 回滚：回滚 `backend/central_server.py` 该处、`tests/test_local_browser_library_sync.py`、`docs/API_REFERENCE.md` 与本节，重建镜像重启中心服。回滚后下载与分解会重新全部失败。不涉及数据库、`migration.sql` 或密钥。
+- 遗留：这只是止血。素材始终同步不进中心素材库，云端素材库看不到本地采集的内容。真正的修法是把"中心服拉取"改成"客户端上传"（`/api/library/upload` 通路客户端已有 `upload_materials()`），需要下一版安装包。
+
+## 2026-08-05 中心服重启后登录永久返回 503 `maindb_unavailable`
 - 现象：中心服重启后，普通用户登录一直返回 HTTP 503 `maindb_unavailable`，重试无效；但在容器里手工执行 `maindb.ping()` 返回 `True`，`MAINDB_*` 环境变量也都正确。
 - 根因：`require_main_db_auth_source()` 写成 `if not _MAINDB_OK or not maindb_on():`。`_MAINDB_OK` 是进程内缓存标志，进程刚起时为 `False`，Python 的 `or` 短路让右边的 `maindb_on()` 永远不执行——而 `maindb_on()` 正是唯一探测主库并把该标志置 `True` 的函数。于是登录路径自己把自己锁死，只能等别的代码路径偶然调用 `maindb_on()` 才恢复。手工 `docker exec` 的探测跑在另一个进程里，不会影响服务进程的标志。
 - 修复：`backend/central_server.py` 的判断改成 `if not maindb_on() or not _MAINDB_OK:`，先探测再看结果。

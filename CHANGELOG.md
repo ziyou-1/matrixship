@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-05 中心素材库同步失败不再判定下载失败
+### Fixed
+- 本地浏览器链路的下载结果不再因中心素材库同步失败而被改写成 `ok=false`。视频在用户机器上下载完成后，中心服（容器）本就无法访问用户内网文件，同步失败属于常态；旧行为让客户端显示"下载失败"，并在分解入口报"分解失败:下载未完成 library_import_failed"，实际视频已完整落盘。
+
+### Changed
+- 同步失败改为在结果上附加 `libraryImported=false` / `libraryError` / `libraryErrorId`，不占用 `error` 字段，任务保持 `status=done`。结构化日志 `download_library_import_failed` 照记。云端执行节点链路（`/api/node/*`）行为不变。
+- `docs/API_REFERENCE.md` 补充本地浏览器链路与云端节点链路的入库失败契约差异。
+
+### Verification And Operations
+- 新增 `tests/test_local_browser_library_sync.py`，5/5 通过；已用 `git stash` 对旧代码做 RED 验证（2 条关键用例失败）。
+- 需重建中心服镜像并重启容器。不涉及客户端、数据库、`migration.sql` 或密钥。遗留问题：素材仍不会进入中心素材库，彻底修复需改为客户端上传，届时要重发安装包。
+
 ## 2026-08-05 修复漫剧账号登录全线 invalid_credentials
 ### Fixed
 - 锁定 `bcrypt==4.0.1`。`passlib[bcrypt]==1.7.4` 的 extra 不锁 bcrypt 版本，镜像重建拉到 bcrypt 5.0.0 后与 passlib 1.7.4 不兼容，所有密码校验抛 `ValueError`，导致漫剧账号登录一律返回 `invalid_credentials`。版本与漫剧后端 `ai_education_backend` 保持一致。
