@@ -148,6 +148,35 @@ class ReplacementWebModuleTests(unittest.TestCase):
         self.assertNotIn("frontend", html.lower())
         self.assertNotIn("landing", html.lower())
 
+    def test_replacement_page_script_has_no_unterminated_string_literals(self):
+        # Regression: JS string literals in the page template must escape newlines
+        # as \\n. A bare \n in the Python triple-quoted template is parsed into a
+        # real newline, which terminates the enclosing single-quoted JS string and
+        # breaks the whole <script>. When that happens no event handlers register,
+        # so clicking "准备替换任务" does a native form submit and the page reloads.
+        import re
+        import shutil
+        import subprocess
+        import tempfile
+        import os as _os
+        html = self.mod.replacement_page_html()
+        script = re.search("<script>(.*)</script>", html, re.S).group(1)
+        # `+ '` immediately followed by a newline is an unterminated string literal.
+        self.assertNotIn("+ '" + chr(10), script)
+        node = shutil.which("node")
+        if node:
+            handle = tempfile.NamedTemporaryFile(
+                "w", suffix=".js", delete=False, encoding="utf-8")
+            handle.write(script)
+            handle.close()
+            try:
+                result = subprocess.run(
+                    [node, "--check", handle.name],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                _os.unlink(handle.name)
+
     def test_replacement_page_html_supports_note_preview_copy_editing(self):
         html = self.mod.replacement_page_html()
 

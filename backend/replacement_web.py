@@ -303,10 +303,10 @@ async function loadVideoHandoff() {
     const res = await fetch(`/api/replacement/video/handoff?handoffId=${encodeURIComponent(handoffId)}`, {headers: authHeaders()});
     const json = await readJsonResponse(res);
     if (!res.ok || !json.ok) {
-      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2);
       return;
     }
-    status.textContent = '\u5df2\u63a5\u5165\u672c\u5730\u5206\u89e3\u7ed3\u679c\uff0c\u53ef\u4e0a\u4f20\u66ff\u6362\u7d20\u6750\u540e\u521b\u5efa\u66ff\u6362\u4efb\u52a1\u3002\n\n' + JSON.stringify(json, null, 2);
+    status.textContent = '\u5df2\u63a5\u5165\u672c\u5730\u5206\u89e3\u7ed3\u679c\uff0c\u53ef\u4e0a\u4f20\u66ff\u6362\u7d20\u6750\u540e\u521b\u5efa\u66ff\u6362\u4efb\u52a1\u3002\\n\\n' + JSON.stringify(json, null, 2);
     const sourceInput = document.querySelector('#video-form input[name="sourceUrl"]');
     if (sourceInput) sourceInput.required = false;
     const mode = document.getElementById('video-source-mode');
@@ -354,7 +354,7 @@ async function submitForm(formId, url, statusId) {
     const res = await fetch(url, {method: 'POST', body: data, headers: authHeaders()});
     const json = await readJsonResponse(res);
     if (!res.ok || !json.ok) {
-      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2);
       return;
     }
     if (formId === 'note-form' && json.jobId) {
@@ -389,7 +389,7 @@ async function saveNoteDraft() {
     });
     const json = await readJsonResponse(res);
     if (!res.ok || !json.ok) {
-      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2);
       return;
     }
     status.textContent = JSON.stringify(json, null, 2);
@@ -462,7 +462,7 @@ function renderVideoJob(job) {
   const canDownload = !!(job.download && job.download.available);
   download.hidden = !canDownload;
   download.dataset.filename = canDownload ? (job.download.filename || '') : '';
-  status.textContent = videoStatusMessage(job) + '\n\n' + JSON.stringify(job, null, 2);
+  status.textContent = videoStatusMessage(job) + '\\n\\n' + JSON.stringify(job, null, 2);
 }
 async function pollVideoJob() {
   const jobId = currentVideoJobId();
@@ -501,11 +501,11 @@ async function prepareVideoJob() {
     const res = await fetch('/api/replacement/video/prepare', {method: 'POST', body: data, headers: authHeaders()});
     const json = await readJsonResponse(res);
     if (!res.ok || !json.ok) {
-      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2);
       return;
     }
     setVideoJobId(json.jobId);
-    status.textContent = '本地视频替换任务已创建。\n\n' + JSON.stringify(json, null, 2);
+    status.textContent = '本地视频替换任务已创建。\\n\\n' + JSON.stringify(json, null, 2);
     renderVideoJob(json);
     pollVideoJob();
   } catch (error) {
@@ -531,7 +531,7 @@ async function videoLifecycleCall(url, payload, activeMessage) {
     });
     const json = await readJsonResponse(res);
     if (!res.ok || !json.ok) {
-      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2);
       return;
     }
     renderVideoJob(json);
