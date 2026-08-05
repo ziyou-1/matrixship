@@ -312,7 +312,7 @@ tesseract --list-langs
 | `CENTRAL_DATA_DIR` | `backend/central_data` | 中心服数据目录 |
 | `CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC` | `900` | 本地浏览器长任务在中心服被重新排队前允许运行的秒数；覆盖 AI触达、寻找线索、发布和下载类任务 |
 | `LK888_BASE_URL` | `https://api.lk888.ai` | LK888 上游地址；本地网络无法直连 LK888 TLS 时可设为 `https://img.yunlingai.net/lk888-upstream` |
-| `LK888_API_KEY` | 无 | 仅中心服保存的密钥 |
+| `LK888_API_KEY` | 无 | 仅中心服保存的密钥。**未设置时 `/lk888` 代理直接返回 503 `lk888_not_configured`**（`central_server.py` 的 `lk888_proxy`），客户端"分解视频"的视觉分析步骤因此全部失败——客户端不直连模型服务，必须经中心服转发。生产环境缺这一项会让分解功能完全不可用 |
 | `PUBLIC_MEDIA_BASE_URL` | 无 | 公网 HTTPS 素材代理地址；临时测试可用 Cloudflare Tunnel 的 `https://*.trycloudflare.com` |
 | `PUBLIC_MEDIA_TOKEN_SECRET` | 无 | 素材公网链接 HMAC 签名密钥；不配置时不生成 `publicUrls` |
 | `PUBLIC_MEDIA_TTL_SEC` | `3600` | 素材公网链接有效期，最低 60 秒 |

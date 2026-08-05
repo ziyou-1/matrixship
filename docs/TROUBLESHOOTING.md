@@ -1,4 +1,12 @@
-﻿## 2026-08-05 公网下载的客户端默认连本机中心服导致登录失败
+﻿## 2026-08-05 公网客户端「分解视频」全部失败（视觉分析步骤）
+- 现象：从公网下载安装的客户端，登录、内容采集都正常，但「分解视频」到"调用视觉模型分析关键帧"这一步失败。本机开发环境同样失败，但报错不同（`ReadTimeout` / `ConnectionError`，本机中心服的 lk888 代理出网不通）。
+- 根因：客户端不直连模型服务，`lk888_vision()` 会把请求发给 `中心服 + /lk888/v1/chat/completions`。生产中心服的 `LK888_API_KEY` 为空，`lk888_proxy` 在 `if not key:` 处直接返回 503 `lk888_not_configured`，请求根本到不了上游。
+- 修复：在生产 `backend/.env.prod` 填入 `LK888_API_KEY`（该行原本存在但值为空），重启中心服容器使 `env_file` 重新加载。纯配置变更，不改代码、不需要重新打包客户端。
+- 排查：容器内 `printenv LK888_API_KEY` 应非空（**只看长度，不要打印值**）。带有效会话调用 `GET /lk888/v1/models` 应返回 200 和模型列表；返回 503 `lk888_not_configured` 即为本问题，返回 401 `not_authenticated` 说明会话无效而非配置问题。注意客户端 `lk888_vision()` 的默认视觉模型是 `gemini-3.1-pro-preview`（`matrix_native_client.py` 内写死，分解调用点不传 model），需确认它在上游模型列表中。
+- 验证：2026-08-05 配置后实测，`GET /lk888/v1/models` 返回 200、共 55 个模型且包含 `gemini-3.1-pro-preview`；`POST /lk888/v1/chat/completions` 以 `max_tokens=1` 打到该模型返回 200，`usage.total_tokens=12`，计费未拦截。中心服 health 200，登录回归正常。
+- 回滚：把 `.env.prod` 恢复为备份 `.env.prod.bak-20260805_lk888`（SHA-256 `4173fb6b6ec788ba705333adf851985d08fc6d89f416d0d4326b0cd7b4bebcb2`）并重启容器。回滚后分解功能会重新全部失败。不涉及代码、镜像、数据库、OpenAPI 或 `migration.sql`。**密钥只存在于服务器 `.env.prod`，不得提交进仓库。**
+
+## 2026-08-05 公网下载的客户端默认连本机中心服导致登录失败
 - 现象：从公网下载安装 Windows 客户端后，登录页报 `HTTPConnectionPool(host='127.0.0.1', port=9080)`、`NewConnectionError` 或 `WinError 10061`。
 - 根因：`backend/matrix_native_client.py` 的 `CENTRAL` 默认值是 `http://127.0.0.1:9080`。9080 是中心服端口（本机执行引擎用 9081，见 `backend/agent_launcher.py`），普通用户机器上没有中心服进程，TCP 连接被拒。2026-08-04 的记录写了此问题已修复为公网地址，但代码里始终没有这次改动，回归用例 `test_central_defaults_to_local_loopback` 反而把回环默认值断言成了正确行为。
 - 修复：`backend/matrix_native_client.py` 默认中心服改为 `http://120.26.194.174:9080`；`backend/.env.example` 和 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 说明同步；`tests/test_video_breakdown.py` 的两条用例改回 `test_central_defaults_to_public_production_server` / `test_central_env_override_still_supports_local_development`。
