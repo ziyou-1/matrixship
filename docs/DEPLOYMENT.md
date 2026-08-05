@@ -315,7 +315,7 @@ tesseract --list-langs
 | `PUBLIC_MEDIA_BASE_URL` | 无 | 公网 HTTPS 素材代理地址；临时测试可用 Cloudflare Tunnel 的 `https://*.trycloudflare.com` |
 | `PUBLIC_MEDIA_TOKEN_SECRET` | 无 | 素材公网链接 HMAC 签名密钥；不配置时不生成 `publicUrls` |
 | `PUBLIC_MEDIA_TTL_SEC` | `3600` | 素材公网链接有效期，最低 60 秒 |
-| `MATRIX_CENTRAL` | `http://127.0.0.1:9080` | 客户端连接的中心服，默认与本机自启的中心服一致（出厂 `start-visible-client.bat` 也设为此值）；连接远程中心服时显式覆盖 |
+| `MATRIX_CENTRAL` | `http://120.26.194.174:9080` | 客户端连接的中心服，默认指向公网生产中心服，公网下载安装的客户端开箱即可登录；本机开发调试必须显式设置为 `http://127.0.0.1:9080`（出厂 `start-visible-client.bat` 已这样设置） |
 | `API_HOST` | `127.0.0.1` | 本地执行引擎监听地址 |
 | `API_PORT` | 客户端内置 `9081` | 本地执行引擎端口 |
 | `MATRIX_AGENT_DATA_DIR` | `backend/datas` | 本地素材、生成任务、日志、账号注册表和每账号抖音 profile 根目录；Windows 源码部署默认不再使用 `%APPDATA%\MatrixShipAgent\data` |

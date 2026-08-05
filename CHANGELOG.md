@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-05 客户端默认连接公网中心服
+### Fixed
+- 本地客户端 `CENTRAL` 默认值由 `http://127.0.0.1:9080` 改为公网生产中心服 `http://120.26.194.174:9080`。公网下载安装的客户端所在机器没有中心服进程，旧默认值会让登录页直接报 `WinError 10061` / `NewConnectionError`。本机开发调试改为显式设置 `MATRIX_CENTRAL`。
+
+### Changed
+- `backend/.env.example` 与 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 默认值与说明同步。
+- `tests/test_video_breakdown.py` 的两条用例改回断言公网默认值；旧用例 `test_central_defaults_to_local_loopback` 把回环默认值当成正确行为，正是这个回归一直没被发现的原因。
+
+### Verification And Operations
+- `tests.test_video_breakdown tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes` 91/91 通过，`py_compile` 通过。
+- 仅改源码不生效，必须重新打包 `MatrixShipAgent-Setup.exe` 并重传到服务器；已装旧包的用户需重装或临时设置 `MATRIX_CENTRAL`。不涉及中心服 API、OpenAPI、数据库或 `migration.sql`。
+
 ## 2026-08-04 视频替换共享服务熔断、可观测事件与契约
 ### Added
 - 本地终态任务度量与共享模式熔断：`backend/replacement_service.py` 新增 `record_terminal_result`、`circuit_breaker_state`、`shared_mode_allowed`，在 agent 数据目录持久化最近至多 500 条终态任务（仅存 job 哈希）。累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时新任务切回 `legacy`；正好 1% 不熔断，取消不计为失败，运行中的任务绝不中断。

@@ -61,8 +61,11 @@ def validate_central_service_url(value):
     return url
 
 
+# 默认必须是公网中心服。普通用户机器上没有中心服进程,默认指向 127.0.0.1 会让
+# 公网下载安装的客户端在登录页直接报 WinError 10061 / NewConnectionError。
+# 本机开发调试请显式设置 MATRIX_CENTRAL=http://127.0.0.1:9080。
 CENTRAL = validate_central_service_url(
-    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://127.0.0.1:9080"
+    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://120.26.194.174:9080"
 ).rstrip("/")
 APP_NAME = "MatrixShipAgent"
 APP_VERSION = "1.1.16"

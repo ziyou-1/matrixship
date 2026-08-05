@@ -1,4 +1,12 @@
-﻿## 2026-08-04 视频替换共享模式自动回退到 legacy（熔断）
+﻿## 2026-08-05 公网下载的客户端默认连本机中心服导致登录失败
+- 现象：从公网下载安装 Windows 客户端后，登录页报 `HTTPConnectionPool(host='127.0.0.1', port=9080)`、`NewConnectionError` 或 `WinError 10061`。
+- 根因：`backend/matrix_native_client.py` 的 `CENTRAL` 默认值是 `http://127.0.0.1:9080`。9080 是中心服端口（本机执行引擎用 9081，见 `backend/agent_launcher.py`），普通用户机器上没有中心服进程，TCP 连接被拒。2026-08-04 的记录写了此问题已修复为公网地址，但代码里始终没有这次改动，回归用例 `test_central_defaults_to_local_loopback` 反而把回环默认值断言成了正确行为。
+- 修复：`backend/matrix_native_client.py` 默认中心服改为 `http://120.26.194.174:9080`；`backend/.env.example` 和 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 说明同步；`tests/test_video_breakdown.py` 的两条用例改回 `test_central_defaults_to_public_production_server` / `test_central_env_override_still_supports_local_development`。
+- 排查：客户端启动日志有一行 `MatrixShipAgent 启动 v<版本> · 中心服 <URL>`，先确认它显示的是公网地址还是 `127.0.0.1:9080`。装了旧包的用户可临时设置环境变量 `MATRIX_CENTRAL` 后重启客户端顶一下，长期方案是重装新包。本机开发调试必须显式设置 `MATRIX_CENTRAL=http://127.0.0.1:9080`，出厂 `start-visible-client.bat` 已这样设置。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes` 91/91 通过，`py_compile` 通过。改动只在源码层，**必须重新打包安装包并重传到服务器**才对下载用户生效。
+- 回滚：回滚 `backend/matrix_native_client.py`、`backend/.env.example`、`tests/test_video_breakdown.py`、`docs/DEPLOYMENT.md` 和本条记录；服务器端把 `MatrixShipAgent-Setup.exe` 恢复为部署时备份的 `.bak-*` 文件。不涉及中心服 API、OpenAPI、数据库或 `migration.sql`。
+
+## 2026-08-04 视频替换共享模式自动回退到 legacy（熔断）
 - 现象：设置了 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 并重启后，新的视频替换任务仍走旧 Qt 链路；日志出现 `replacement_shared_mode_circuit_opened` 和 `replacement_rollback_requested`。
 - 根因：本机自动熔断已触发。本地执行端在 `<agent-data-dir>/replacement_metrics.json` 持久化最近至多 500 条终态任务，当累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时，新任务自动切回 `legacy`；正好 1%（100 个里 1 个失败）不熔断，取消（cancelled）不计为失败，运行中的任务不会被打断。
 - 修复：先按 `video_failed` 事件的 `failureStage`、`model` 和 provider-task 哈希定位真实失败原因（来源下载、分析、生成或计费）；修复后失败率随新终态样本回落到 1% 以内即自动恢复 `shared`。需要立即恢复时可清空或轮转该本机 `replacement_metrics.json`（仅影响熔断统计窗口，不影响任何 job 数据），再重启本地执行端。
