@@ -37,6 +37,7 @@ import hashlib
 import secrets
 import datetime
 import hmac
+import io
 import ipaddress
 import shutil
 import struct
@@ -353,6 +354,100 @@ AICANVAS_MATRIX_SSO_EXCHANGE_PATH = "/api/v2/auth/exchange-matrix-ticket"
 _matrix_sso_replay_lock = threading.Lock()
 _matrix_sso_consumed_tickets = {}
 DIRECTORY = os.path.abspath(os.path.dirname(__file__))   # v2/ 绝对路径
+
+
+def _agent_installer_candidates():
+    return [
+        os.path.abspath(os.path.expandvars(os.environ.get("AICANVAS_AGENT_INSTALLER", ""))),
+        os.path.abspath(os.path.expandvars(os.environ.get("MATRIXSHIP_AGENT_INSTALLER", ""))),
+        os.path.abspath(os.path.join(DIRECTORY, "MatrixShipAgent-Setup.exe")),
+        os.path.abspath(os.path.join(DIRECTORY, "backend", "dist", "installer", "MatrixShipAgent-Setup.exe")),
+        os.path.abspath(os.path.join(DIRECTORY, "..", "..", "backend", "dist", "installer", "MatrixShipAgent-Setup.exe")),
+    ]
+
+
+def _resolve_agent_installer_path():
+    for candidate in _agent_installer_candidates():
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _comic_tool_download_card_script():
+    return r'''<script id="yunling-download-card-injector">
+(function () {
+  var downloadHref = "/MatrixShipAgent-Setup.exe";
+  function textOf(node) {
+    return (node && node.textContent || "").replace(/\s+/g, " ").trim();
+  }
+  function hasText(node, value) {
+    return textOf(node).indexOf(value) !== -1;
+  }
+  function smallestTextElement(root, value) {
+    var nodes = Array.prototype.slice.call(root.querySelectorAll("h1,h2,h3,h4,strong,p,span,button,a,div"));
+    return nodes.filter(function (node) { return hasText(node, value); }).sort(function (a, b) {
+      return textOf(a).length - textOf(b).length;
+    })[0] || null;
+  }
+  function ancestors(node) {
+    var result = [];
+    while (node && node !== document.documentElement) {
+      result.push(node);
+      node = node.parentElement;
+    }
+    return result;
+  }
+  function commonAncestor(a, b) {
+    if (!a || !b) return null;
+    var chain = ancestors(a);
+    var current = b;
+    while (current) {
+      if (chain.indexOf(current) !== -1) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+  function findToolContainer() {
+    var agent = smallestTextElement(document, "漫剧Agent");
+    var canvas = smallestTextElement(document, "漫剧画布");
+    var shared = commonAncestor(agent, canvas);
+    if (shared && shared !== document.body) return shared;
+    var heading = smallestTextElement(document, "创作工具");
+    return heading && (heading.parentElement || document.body);
+  }
+  function createFallbackCard() {
+    var card = document.createElement("section");
+    card.setAttribute("data-yunling-download-card", "1");
+    card.style.cssText = "display:flex;gap:22px;align-items:center;width:min(760px,calc(100% - 32px));margin:20px auto 0;padding:30px;border:1px solid rgba(64,221,230,.85);border-radius:22px;background:linear-gradient(135deg,rgba(255,255,255,.22),rgba(28,126,122,.34));box-shadow:0 18px 60px rgba(0,0,0,.28);color:#fff;";
+    card.innerHTML = '<div aria-hidden="true" style="width:96px;height:96px;flex:0 0 auto;border-radius:22px;border:1px solid rgba(255,255,255,.55);display:grid;place-items:center;background:radial-gradient(circle at 30% 20%,#7dd3fc,transparent 38%),linear-gradient(135deg,#0f172a,#155e75);font-size:42px;font-weight:900;">Win</div><div style="min-width:0;"><h2 style="margin:0 0 12px;font-size:24px;line-height:1.25;">Windows 客户端</h2><p style="margin:0 0 28px;color:rgba(255,255,255,.86);line-height:1.7;">云灵星图 AI爆款复刻平台 Windows 桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。</p><a href="/MatrixShipAgent-Setup.exe" download="MatrixShipAgent-Setup.exe" aria-label="下载 Windows 客户端安装包" style="display:inline-flex;align-items:center;min-height:44px;padding:0 18px;border-radius:10px;border:1px solid rgba(255,255,255,.55);background:rgba(255,255,255,.22);color:#fff;text-decoration:none;font-weight:800;">下载客户端  &gt;</a></div>';
+    return card;
+  }
+  function install() {
+    if (document.querySelector("[data-yunling-download-card]")) return true;
+    var target = findToolContainer();
+    if (target) {
+      target.appendChild(createFallbackCard());
+      return true;
+    }
+    return false;
+  }
+  if (install()) return;
+  var observer = new MutationObserver(function () {
+    if (install()) observer.disconnect();
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>'''
+
+
+def _inject_comic_tool_download_card_html(html_text):
+    if "yunling-download-card-injector" in html_text:
+        return html_text
+    script = _comic_tool_download_card_script()
+    body_close = re.search(r"</body\s*>", html_text, flags=re.IGNORECASE)
+    if body_close:
+        return html_text[:body_close.start()] + script + html_text[body_close.start():]
+    return html_text + script
 BASE_DIR = DIRECTORY
 AI_API_PROVIDER = str(os.environ.get("AI_API_PROVIDER", "") or "").strip().lower()
 # --- 版本号 ---
@@ -25687,6 +25782,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404, "File not found")
             return None
 
+        if (
+            os.path.basename(path) == "platform-index.html"
+            and raw_request_path.rstrip("/") in ("/comic-tool", "/comic-tool/agent")
+        ):
+            try:
+                html_text = f.read().decode("utf-8")
+            finally:
+                f.close()
+            body = _inject_comic_tool_download_card_html(html_text).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.end_headers()
+            return io.BytesIO(body)
+
         fs = os.fstat(f.fileno())
         size = fs.st_size
         range_header = self.headers.get("Range", "")
@@ -25752,6 +25863,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 break
             outputfile.write(chunk)
             remaining -= len(chunk)
+
+    def serve_agent_installer(self, method="GET"):
+        fp = _resolve_agent_installer_path()
+        if not fp:
+            _json_err(self, 404, "installer_not_found")
+            return
+        try:
+            size = os.path.getsize(fp)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", 'attachment; filename="MatrixShipAgent-Setup.exe"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if method != "HEAD":
+                with open(fp, "rb") as f:
+                    shutil.copyfileobj(f, self.wfile)
+        except Exception as e:
+            _json_err(self, 500, "installer_download_failed")
 
     # ┢┢ OPTIONS 预检（CORS）─┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢┢
     def do_OPTIONS(self):
@@ -25837,6 +25967,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         if not _enforce_local_api_access(self, path):
             return
+        if path == "/MatrixShipAgent-Setup.exe":
+            self.serve_agent_installer(method="HEAD")
+            return
         if _handle_comic_video_url_proxy(self, path, "HEAD"):
             return
         if _handle_platform_media_proxy(self, path, "HEAD"):
@@ -25851,6 +25984,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not _enforce_local_api_access(self, path):
             return
         if _handle_comic_video_url_proxy(self, path, "GET"):
+            return
+        if path == "/MatrixShipAgent-Setup.exe":
+            self.serve_agent_installer(method="GET")
             return
         if not _prepare_request_storage_context(self, path):
             return

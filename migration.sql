@@ -23,3 +23,23 @@ COMMIT;
 -- central pending-task state and remote AI Canvas JSON task/project state.
 -- Runtime rollback restores the prior remote server.py backup and removes the
 -- local H3 adapter/routes if needed.
+-- Release: 2026-08-04 local replacement web MVP.
+-- Database schema/data changes: none. Replacement web MVP jobs are stored as
+-- local JSON under the local executor data directory; image-note save-draft
+-- writes through the existing local material library JSON/files only.
+-- Runtime rollback switch: MATRIX_REPLACEMENT_WEB_ENABLED=0 and restart the
+-- local executor. Authenticated thumbnail reads use the same local JSON/upload
+-- directories and require no SQL migration.
+-- Release: 2026-08-04 local replacement web video handoff.
+-- Database schema/data changes: none. Native-to-web video handoffs are short-lived
+-- local JSON files under replacement_web_handoffs and are feature-gated with the
+-- existing MATRIX_REPLACEMENT_WEB_ENABLED switch.
+-- Release: 2026-08-04 shared video replacement service, mode switch and circuit breaker.
+-- Database schema/data changes: none. Terminal-job metrics for the shared-service
+-- circuit breaker are stored as a bounded local JSON window (replacement_metrics.json,
+-- hashed job id only) under the local executor agent data directory; job state stays
+-- in existing local job.json files. No central-server, remote AI Canvas, resident port,
+-- or database changes are introduced.
+-- Runtime switch: VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared (restart the local
+-- executor to take effect). Rollback: set VIDEO_REPLACEMENT_SERVICE_MODE=legacy and
+-- restart; no SQL migration is required.

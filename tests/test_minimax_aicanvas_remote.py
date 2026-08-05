@@ -1,4 +1,6 @@
 import importlib.util
+import io
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -285,6 +287,102 @@ class MiniMaxH3RemoteComicTest(unittest.TestCase):
                         )
 
         request.assert_not_called()
+
+
+class AiCanvasComicToolDownloadEntryTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def test_comic_tool_download_card_script_links_installer_as_fourth_tool(self):
+        script = self.remote._comic_tool_download_card_script()
+
+        self.assertIn("Windows 客户端", script)
+        self.assertIn("AI爆款复刻平台", script)
+        self.assertIn("下载客户端", script)
+        self.assertIn("下载的是客户端安装包", script)
+        self.assertIn("不包含漫剧项目文件", script)
+        self.assertIn("/MatrixShipAgent-Setup.exe", script)
+        self.assertIn("MutationObserver", script)
+        self.assertIn("data-yunling-download-card", script)
+
+    def test_comic_tool_download_card_does_not_clone_or_reorder_existing_tools(self):
+        script = self.remote._comic_tool_download_card_script()
+
+        self.assertNotIn("cloneNode", script)
+        self.assertNotIn("insertBefore", script)
+        self.assertIn("findToolContainer", script)
+
+    def test_comic_tool_index_html_is_injected_idempotently(self):
+        html = "<!doctype html><html><body><main>创作工具</main></body></html>"
+
+        injected = self.remote._inject_comic_tool_download_card_html(html)
+        reinjected = self.remote._inject_comic_tool_download_card_html(injected)
+
+        self.assertIn("yunling-download-card-injector", injected)
+        self.assertIn("Windows 客户端", injected)
+        self.assertEqual(injected, reinjected)
+
+    def test_installer_path_resolver_honors_environment_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installer = Path(tmp) / "MatrixShipAgent-Setup.exe"
+            installer.write_bytes(b"installer")
+            previous = os.environ.get("AICANVAS_AGENT_INSTALLER")
+            os.environ["AICANVAS_AGENT_INSTALLER"] = str(installer)
+            try:
+                self.assertEqual(
+                    self.remote._resolve_agent_installer_path(),
+                    str(installer.resolve()),
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("AICANVAS_AGENT_INSTALLER", None)
+                else:
+                    os.environ["AICANVAS_AGENT_INSTALLER"] = previous
+
+    def test_handler_serves_installer_without_auth_gate(self):
+        source = SERVER_PATH.read_text(encoding="utf-8")
+        route_index = source.index('if path == "/MatrixShipAgent-Setup.exe":')
+        auth_index = source.index(
+            "if not _prepare_request_storage_context(self, path):",
+            route_index,
+        )
+
+        self.assertLess(route_index, auth_index)
+
+    def test_installer_response_is_attachment(self):
+        handler = object.__new__(self.remote.Handler)
+        handler.wfile = io.BytesIO()
+        handler.headers = {}
+        sent = []
+
+        def send_response(status):
+            sent.append(("status", status))
+
+        def send_header(name, value):
+            sent.append(("header", name, value))
+
+        handler.send_response = send_response
+        handler.send_header = send_header
+        handler.end_headers = lambda: sent.append(("end",))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            installer = Path(tmp) / "MatrixShipAgent-Setup.exe"
+            installer.write_bytes(b"installer")
+            with patch.object(
+                self.remote,
+                "_resolve_agent_installer_path",
+                return_value=str(installer),
+            ):
+                self.remote.Handler.serve_agent_installer(handler)
+
+        self.assertIn(("status", 200), sent)
+        self.assertIn(("header", "Content-Type", "application/octet-stream"), sent)
+        self.assertIn(
+            ("header", "Content-Disposition", 'attachment; filename="MatrixShipAgent-Setup.exe"'),
+            sent,
+        )
+        self.assertEqual(handler.wfile.getvalue(), b"installer")
 
 
 if __name__ == "__main__":

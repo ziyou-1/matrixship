@@ -34,7 +34,8 @@ class LoginCenteredLayoutTest(unittest.TestCase):
         self.assertIn("Agent.模式", hero)
         self.assertIn("混剪短视频", hero)
         self.assertIn("工作流助手", hero)
-        self.assertIn('title = QtWidgets.QLabel("登录 / 加入企业")', build_card)
+        self.assertIn('title = QtWidgets.QLabel("账号登录")', build_card)
+        self.assertIn("使用漫剧账号密码登录 AI爆款复刻", build_card)
         self.assertNotIn('brand_title = QtWidgets.QLabel("云灵星图")', build_card)
 
     def test_success_evil_eye_transition_is_not_restored_by_layout_changes(self):

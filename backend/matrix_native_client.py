@@ -52,8 +52,20 @@ from platform_features import (
 import requests
 from PySide6 import QtCore, QtGui, QtWidgets
 
-CENTRAL = validate_service_url(
-    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://127.0.0.1:9080"
+
+def validate_central_service_url(value):
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("central URL must be an absolute http/https URL")
+    return url
+
+
+# 默认必须是公网中心服。普通用户机器上没有中心服进程,默认指向 127.0.0.1 会让
+# 公网下载安装的客户端在登录页直接报 WinError 10061 / NewConnectionError。
+# 本机开发调试请显式设置 MATRIX_CENTRAL=http://127.0.0.1:9080。
+CENTRAL = validate_central_service_url(
+    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://120.26.194.174:9080"
 ).rstrip("/")
 APP_NAME = "MatrixShipAgent"
 APP_VERSION = "1.1.16"
@@ -660,6 +672,55 @@ def set_auth_context(payload):
         _SHARED["roleScope"] = payload.get("roleScope") or ("all" if role == "platform_admin" else ("org" if role == "enterprise_admin" else "self"))
         _SHARED["organizations"] = payload.get("organizations") or []
         _SHARED["memberships"] = payload.get("memberships") or []
+
+
+def replacement_web_user_context():
+    with _SLOCK:
+        user = _SHARED.get("user") if isinstance(_SHARED.get("user"), dict) else {}
+        return {
+            "userId": str(user.get("id") or user.get("userId") or "").strip(),
+            "displayName": str(
+                user.get("displayName")
+                or user.get("display_name")
+                or user.get("name")
+                or _SHARED.get("account")
+                or ""
+            ).strip(),
+            "orgId": str(_SHARED.get("org") or "org-default").strip() or "org-default",
+            "account": account_key(_SHARED.get("account") or "default"),
+            "appRole": str(_SHARED.get("appRole") or "normal_user").strip() or "normal_user",
+            "roleScope": str(_SHARED.get("roleScope") or "self").strip() or "self",
+        }
+
+
+def create_replacement_web_handoff(source, ttl_sec=3600):
+    import replacement_web
+
+    return replacement_web.create_video_handoff(
+        data_dir(),
+        source if isinstance(source, dict) else {},
+        user=replacement_web_user_context(),
+        ttl_sec=ttl_sec,
+    )
+
+
+def replacement_web_launch_url(handoff_id=""):
+    import json as _json
+
+    port = str(os.environ.get("API_PORT") or "9081").strip() or "9081"
+    token = str(os.environ.get("MATRIX_AGENT_TOKEN") or "").strip()
+    params = {}
+    if token:
+        params["token"] = token
+    params["user"] = _json.dumps(replacement_web_user_context(), ensure_ascii=False, separators=(",", ":"))
+    handoff_id = str(handoff_id or "").strip()
+    if handoff_id:
+        params["handoffId"] = handoff_id
+    return "http://127.0.0.1:%s/replacement#%s" % (port, urlencode(params))
+
+
+def open_replacement_web_page(handoff_id=""):
+    _open_url(replacement_web_launch_url(handoff_id))
 
 
 def product_role():
@@ -5770,7 +5831,7 @@ class EnterpriseMembersPage(BasePage):
             elif action == "invite":
                 self._show_copy_dialog(
                     "邀请已创建",
-                    "邀请码：\n%s\n\n请通过可信渠道发送给对方，对方在本地客户端登录页选择“加入企业”。"
+                    "邀请码：\n%s\n\n当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。"
                     % (response.get("inviteCode") or "-"),
                 )
             elif action == "add":
@@ -5943,7 +6004,7 @@ class EnterpriseMembersPage(BasePage):
         form.addRow("成员角色", role)
         form.addRow("邀请码有效期", ttl)
         layout.addLayout(form)
-        tip = QtWidgets.QLabel("创建后复制邀请码发送给对方；对方在登录页输入邀请码、姓名和密码即可加入所选企业。")
+        tip = QtWidgets.QLabel("当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。")
         tip.setObjectName("sub")
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -11615,8 +11676,200 @@ def _replacement_hybrid_pipeline():
     return HybridReplacementPipeline(helpers=_REPLACEMENT_HELPERS, runtime=time)
 
 
+def _replacement_comic_pipeline():
+    from replacement_pipeline import ComicProjectReplacementPipeline
+    return ComicProjectReplacementPipeline(helpers=_REPLACEMENT_HELPERS, runtime=time)
+
+
+def _replacement_pipeline_for_job(job=None):
+    if _replacement_job_mode(job) == "comic_project" or str((job or {}).get("pipeline") or "").strip() == "comic_project":
+        return _replacement_comic_pipeline()
+    return _replacement_hybrid_pipeline()
+
+
+class _ReplacementServicePipeline:
+    """Route each ReplacementService call to the hybrid or comic pipeline by job mode.
+
+    The /replacement web path and the Qt shared-service adapter both drive a
+    ReplacementService built from a single pipeline. Using only the hybrid
+    pipeline ignored comic_project jobs, which is the product default
+    (VIDEO_REPLACE_DEFAULT_MODE). This router mirrors _replacement_pipeline_for_job
+    so both surfaces honor comic vs legacy exactly like the native Qt page.
+
+    A job that carries no explicit replacementMode (e.g. a fresh web job) is
+    defaulted to the product default at plan time so the choice persists in
+    job.json and later execute/retry/concat route to the same pipeline. Jobs that
+    already carry a mode (Qt shared-mode jobs) are never overridden.
+    """
+
+    def _for(self, job):
+        return _replacement_pipeline_for_job(job)
+
+    def build_plan(self, job):
+        job = job if isinstance(job, dict) else {}
+        if not str(job.get("replacementMode") or "").strip():
+            job["replacementMode"] = _video_replacement_default_mode()
+        return self._for(job).build_plan(job)
+
+    def execute(self, job, selected_segments=None, progress=None):
+        return self._for(job).execute(job, selected_segments, progress=progress)
+
+    def retry(self, job, segment_indices, progress=None):
+        return self._for(job).retry(job, segment_indices, progress=progress)
+
+    def concat(self, job):
+        return self._for(job).concat(job)
+
+    def regenerate_frame(self, job, segment_index, frame_kind, progress=None):
+        return self._for(job).regenerate_frame(job, segment_index, frame_kind, progress=progress)
+
+
+def _replacement_service_pipeline():
+    return _ReplacementServicePipeline()
+
+
 def _replacement_public_job(job):
-    return _replacement_hybrid_pipeline().public_job(job)
+    return _replacement_pipeline_for_job(job).public_job(job)
+
+
+def replacement_mode_for_new_job():
+    """Return the video-replacement service mode for a *new* job.
+
+    Controlled by ``VIDEO_REPLACEMENT_SERVICE_MODE`` (``legacy`` | ``shared``).
+    Defaults to ``legacy`` for safety. A new job uses ``shared`` only when BOTH
+    the env opt-in AND the local circuit breaker (``shared_mode_allowed``) agree;
+    when the breaker is open we emit ``shared_mode_circuit_opened`` /
+    ``rollback_requested`` and fall back to ``legacy``. A job already in flight
+    keeps whatever path it started on — the breaker only gates new jobs.
+    """
+    mode = str(os.getenv("VIDEO_REPLACEMENT_SERVICE_MODE", "") or "").strip().lower()
+    if mode != "shared":
+        return "legacy"
+    try:
+        import replacement_service
+    except Exception:
+        return "shared"
+    try:
+        base_dir = data_dir()
+    except Exception:
+        base_dir = None
+    try:
+        if replacement_service.shared_mode_allowed(base_dir):
+            return "shared"
+    except Exception:
+        # Fail open to shared only if the breaker itself is unavailable; any
+        # decision error must not silently strand an opted-in operator.
+        return "shared"
+    try:
+        state = replacement_service.circuit_breaker_state(base_dir)
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "shared_mode_circuit_opened", level="warning",
+            stage="new_job_gate", status="open",
+            detail={
+                "total": state.get("total"),
+                "failures": state.get("failures"),
+                "failureRate": round(float(state.get("failureRate") or 0.0), 6),
+            },
+        )
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "rollback_requested", level="warning",
+            stage="new_job_gate", status="legacy",
+        )
+    except Exception:
+        pass
+    return "legacy"
+
+
+def video_replacement_service_shared():
+    return replacement_mode_for_new_job() == "shared"
+
+
+class ReplacementServiceAdapter:
+    """Bridge the Qt VideoReplacementPage onto the shared ReplacementService.
+
+    The adapter only forwards request overrides built from Qt page controls and
+    reads job state back through the service's public (scrubbed) job. Provider
+    task IDs and billing refs live in job.json / the pipeline and are never
+    mutated here, so Qt never sees or rewrites internal paths, credentials or
+    provider task identifiers. Existing BRIDGE event shapes are preserved.
+    """
+
+    def __init__(self, data_dir=None, service=None, bridge=None):
+        self._data_dir = data_dir
+        self._service = service
+        self._bridge = bridge
+
+    def _resolve_service(self):
+        if self._service is None:
+            import replacement_web
+            self._service = replacement_web.build_video_service(self._data_dir or data_dir())
+        return self._service
+
+    def _emit(self, event, payload):
+        bridge = self._bridge if self._bridge is not None else BRIDGE
+        if bridge is not None:
+            bridge.payload.emit(event, payload)
+
+    def prepare(self, job_id, request, files, progress=None):
+        job = self._resolve_service().prepare(job_id, request, files, progress=progress)
+        self._emit("video_replace_plan_ready", {"jobId": job_id, "job": job})
+        return job
+
+    def execute(self, job_id, overrides=None, progress=None):
+        job = self._resolve_service().execute(job_id, overrides=overrides or {}, progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def retry(self, job_id, segment_indices, progress=None):
+        job = self._resolve_service().retry(job_id, segment_indices or [], progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def concat(self, job_id, progress=None):
+        job = self._resolve_service().concat(job_id, progress=progress)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "替换生成完成，已存入资产库",
+            "job": job,
+        })
+        return job
+
+    def cancel(self, job_id):
+        job = self._resolve_service().cancel(job_id)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "任务已取消",
+            "job": job,
+        })
+        return job
+
+    def _emit_run_result(self, job_id, job):
+        job = job if isinstance(job, dict) else {}
+        status = str(job.get("status") or "")
+        if status == "partial":
+            failed = [
+                segment for segment in (job.get("segments") or [])
+                if isinstance(segment, dict) and segment.get("status") in ("failed", "download_failed")
+            ]
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
+                "job": job,
+                "failedSegments": failed,
+            })
+        elif status in ("completed", "done"):
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成完成，已存入资产库",
+                "job": job,
+            })
+        elif status == "failed":
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成失败",
+                "job": job,
+            })
+        # running / awaiting_review are surfaced through progress events only.
 
 
 def _replacement_cancel_requested(job):
@@ -11713,6 +11966,13 @@ class XhsNoteReplacementPage(BasePage):
         self._copy_updating = False
         self.v.addWidget(make_header("图文同款", "小红书图文结构复刻 · 先预览替换方案，再保存到素材发布和资产库"))
         self.v.addWidget(prereq_banner("图文同款 V1 只生成草稿，不自动发布；缺图必须手动选择替换图片后才能生成预览和保存草稿。"))
+        web_row = QtWidgets.QHBoxLayout()
+        self.b_open_replacement_web = QtWidgets.QPushButton("打开网页版替换")
+        self.b_open_replacement_web.setObjectName("ghost")
+        self.b_open_replacement_web.clicked.connect(open_replacement_web_page)
+        web_row.addWidget(self.b_open_replacement_web)
+        web_row.addStretch()
+        self.v.addLayout(web_row)
 
         source = QtWidgets.QFrame()
         source.setObjectName("card")
@@ -14377,6 +14637,13 @@ class VideoReplacementPage(BasePage):
         super().__init__()
         self.v.addWidget(make_header("同款替换", "先提取原片人物/产品/场景槽位，再按上传素材替换生成新视频"))
         self.v.addWidget(prereq_banner("真人脸图必须确认授权；不支持未授权真人、公众人物或明星脸。生成会先提取原片人物/产品/场景槽位：上传人物/产品/场景则强制替换，未上传则保留原片对应槽位。"))
+        web_row = QtWidgets.QHBoxLayout()
+        self.b_open_replacement_web = QtWidgets.QPushButton("打开网页版替换")
+        self.b_open_replacement_web.setObjectName("ghost")
+        self.b_open_replacement_web.clicked.connect(self.open_replacement_web)
+        web_row.addWidget(self.b_open_replacement_web)
+        web_row.addStretch()
+        self.v.addLayout(web_row)
         self._source = {}
         self._product_paths = []
         self._product_urls = []
@@ -14905,6 +15172,20 @@ class VideoReplacementPage(BasePage):
         self._set_generation_feedback(False)
         self._sync_audio_controls()
 
+    def open_replacement_web(self):
+        if not self._source:
+            QtWidgets.QMessageBox.information(self, "网页版替换", "请先从『分解视频』载入分解结果。")
+            return
+        source_path = str(self._source.get("sourceVideoPath") or "").strip()
+        if not (source_path and os.path.isfile(source_path)):
+            QtWidgets.QMessageBox.information(self, "网页版替换", "当前分解结果缺少可用的本地视频文件。")
+            return
+        result = create_replacement_web_handoff(self._source)
+        if not result.get("ok"):
+            QtWidgets.QMessageBox.warning(self, "网页版替换", "创建网页交接失败：" + str(result.get("error") or "unknown"))
+            return
+        open_replacement_web_page(result.get("handoffId") or "")
+
     def retry_source_transcription(self):
         if self._busy:
             self.status.setText("当前任务尚未完成，请稍后再重试口播识别。")
@@ -15260,7 +15541,7 @@ class VideoReplacementPage(BasePage):
             "outputPath": "",
             "assetId": "",
         }
-        return _replacement_hybrid_pipeline().build_plan(job)
+        return _replacement_pipeline_for_job(job).build_plan(job)
 
     def start_generation(self):
         if self._busy:
@@ -15479,7 +15760,58 @@ class VideoReplacementPage(BasePage):
                     "message": "替换生成失败（错误编号 %s）:%s" % (error_id or "-", str(exc)[:120]),
                     "job": _replacement_public_job(failure_job),
                 })
+        if video_replacement_service_shared():
+            self._ensure_service_adapter()
+            run_bg(self._start_shared_service_job)
+            return
         run_bg(work)
+
+    def _ensure_service_adapter(self):
+        adapter = getattr(self, "_service_adapter", None)
+        if adapter is None:
+            adapter = ReplacementServiceAdapter(data_dir=data_dir())
+            self._service_adapter = adapter
+        return adapter
+
+    def _emit_service_progress(self, job_id, stage, message, segment_index, segments):
+        """Translate a shared-service pipeline progress callback into the
+        existing ``video_replace_progress`` BRIDGE event (same payload shape as
+        the legacy path). Only scrubbed, page-side data is emitted."""
+        job = self._job if isinstance(self._job, dict) else {}
+        segment = None
+        if segment_index is not None:
+            for item in (job.get("segments") or []):
+                if int(item.get("index") or 0) == int(segment_index or 0):
+                    segment = item
+                    break
+        timing = _replacement_timing_snapshot(job, segment, stage=stage)
+        prompt = ""
+        if segment_index is not None:
+            for item in segments or []:
+                if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                    prompt = str((item or {}).get("prompt") or "")
+                    break
+        BRIDGE.payload.emit("video_replace_progress", {
+            "jobId": job_id,
+            "stage": timing.get("stage") or stage or "",
+            "message": message or _replacement_stage_label(stage),
+            "timing": timing,
+            "segments": segments or [],
+            "prompt": prompt,
+        })
+
+    def _start_shared_service_job(self):
+        """Route generation through the shared ReplacementService adapter.
+
+        Qt only forwards plan overrides and reads job state back from job.json
+        via the adapter; it never mutates provider task IDs or billing refs."""
+        job = self._job if isinstance(self._job, dict) else {}
+        overrides = dict(getattr(self, "_service_overrides", None) or {})
+        return self._service_adapter.execute(
+            str(job.get("id") or ""),
+            overrides,
+            progress=self._emit_service_progress,
+        )
 
     def _run_job_segments(self, job, selected_segments):
         if _replacement_job_mode(job) == "comic_project":
@@ -15537,325 +15869,31 @@ class VideoReplacementPage(BasePage):
             })
 
     def _run_comic_project_segments(self, job, selected_segments, emit_progress):
-        adapter = ComicProjectAdapter()
-        segments = job.get("segments") or []
-        selected_segments = list(selected_segments or [])
-        job["status"] = "running"
-        if not job.get("comicProjectId"):
-            emit_progress(None, "comic_project", "创建漫剧项目…")
-            created = adapter.create_project(job)
-            project_id = _comic_extract_id(created)
-            if not project_id:
-                raise RuntimeError("comic_project_id_missing")
-            job["comicProjectId"] = int(project_id)
-            job["comicProjectUrl"] = _comic_base_url() + "/comic-drama/editor?projectId=%s" % project_id
-            _save_replacement_job(job)
-        project_id = int(job.get("comicProjectId") or 0)
-        if any(not segment.get("comicStoryboardId") for segment in segments):
-            emit_progress(None, "comic_project", "读取漫剧项目分镜…")
-            storyboards = _comic_storyboards_from_payload(adapter.get_project(project_id))
-            if storyboards:
-                _comic_assign_storyboard_ids(job, storyboards)
-                _save_replacement_job(job)
-        if any(not segment.get("comicStoryboardId") for segment in segments):
-            emit_progress(None, "comic_project", "分析剧本并生成分镜…")
-            analyzed = adapter.analyze_project(int(project_id))
-            storyboards = _comic_storyboards_from_payload(analyzed)
-            if storyboards:
-                _comic_assign_storyboard_ids(job, storyboards)
-            if any(not segment.get("comicStoryboardId") for segment in segments):
-                analyze_task_id = _comic_extract_task_id(analyzed)
-                if analyze_task_id:
-                    adapter.wait_task_done(
-                        analyze_task_id,
-                        cancel_check=_replacement_cancel_check(job),
-                        progress=lambda _attempt, _payload: emit_progress(
-                            None, "comic_project", "分析剧本并生成分镜…"
-                        ),
-                    )
-                storyboards = _comic_storyboards_from_payload(adapter.get_project(project_id))
-                _comic_assign_storyboard_ids(job, storyboards)
-            _save_replacement_job(job)
-        if not job.get("comicAssets") and hasattr(adapter, "upsert_manual_assets"):
-            emit_progress(None, "comic_assets", "写入人物、场景和道具到漫剧项目库…")
-            job["comicAssets"] = adapter.upsert_manual_assets(int(project_id), job)
-            _save_replacement_job(job)
-        elif not job.get("comicAssets"):
-            job["comicAssets"] = {}
-        assets = job.get("comicAssets") or {}
-        total = len(segments)
-        for seg in selected_segments:
-            if self._cancel_requested or _replacement_cancel_requested(job):
-                _mark_replacement_job_canceled(job)
-                return
-            storyboard_id = seg.get("comicStoryboardId")
-            frame_billings = []
-            video_billing = {}
-            try:
-                if not storyboard_id:
-                    raise RuntimeError("comic_storyboard_id_missing:segment_%s" % (seg.get("index") or "?"))
-                existing_video_url = _comic_absolute_media_url(seg.get("videoUrl") or "")
-                if existing_video_url:
-                    emit_progress(
-                        seg,
-                        "comic_download_video",
-                        "片段 %s/%s：恢复已生成视频…" % (seg.get("index"), total),
-                    )
-                    remote_storyboard = _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-                    start_frame_url, end_frame_url = _comic_storyboard_frame_urls(remote_storyboard)
-                    seg["startFrameUrl"] = _comic_absolute_media_url(
-                        seg.get("startFrameUrl") or start_frame_url
-                    )
-                    seg["endFrameUrl"] = _comic_absolute_media_url(
-                        seg.get("endFrameUrl") or end_frame_url
-                    )
-                    seg["flowchartUrl"] = seg.get("startFrameUrl") or seg.get("flowchartUrl") or ""
-                    _comic_download_frame_image(job, seg, "start", seg.get("startFrameUrl"), adapter)
-                    _comic_download_frame_image(job, seg, "end", seg.get("endFrameUrl"), adapter)
-                    if _comic_recover_completed_media(job, seg, adapter):
-                        _save_replacement_job(job)
-                        emit_progress(seg, "done", "片段 %s/%s：视频完成" % (seg.get("index"), total))
-                        continue
-                seg["status"] = "running"
-                seg["stage"] = "comic_update_storyboard"
-                emit_progress(seg, "comic_update_storyboard", "片段 %s/%s：写入口播稿和素材绑定…" % (seg.get("index"), total))
-                adapter.update_storyboard(int(storyboard_id), job, seg, assets)
-                for stale_audio_key in (
-                    "audioUrl", "audioDurationSeconds", "audioPrepareStatus", "audioWarning"
-                ):
-                    seg.pop(stale_audio_key, None)
-                seg["stage"] = "comic_generate_flowchart"
-                emit_progress(seg, "comic_generate_flowchart", "片段 %s/%s：生成首尾帧…" % (seg.get("index"), total))
-                recovered_frame_urls = []
-                recovered_image_payload = {}
-                try:
-                    image_task = adapter.submit_storyboard_image(int(storyboard_id), job, seg)
-                    image_task_ids = _comic_extract_task_ids(image_task)
-                except Exception as submit_exc:
-                    if not _comic_generation_submit_can_recover(submit_exc):
-                        raise
-                    recovered = _comic_recover_storyboard_media(
-                        adapter, project_id, storyboard_id, "image", submit_exc
-                    )
-                    image_task_ids = list(recovered.get("task_ids") or [])
-                    if not image_task_ids and recovered.get("task_id"):
-                        image_task_ids = [recovered.get("task_id")]
-                    recovered_frame_urls = [
-                        _comic_absolute_media_url(value)
-                        for value in (recovered.get("frame_urls") or [])
-                        if value
-                    ]
-                    if not recovered_frame_urls and recovered.get("url"):
-                        recovered_frame_urls = [_comic_absolute_media_url(recovered.get("url"))]
-                    recovered_image_payload = recovered.get("payload") or {}
-                    seg["comicRecoveryStatus"] = "recovered"
-                    seg["comicRecoveryReason"] = str(submit_exc)[:180]
-                    emit_progress(
-                        seg,
-                        "comic_generate_flowchart",
-                        "片段 %s/%s：远程已接收，正在回查首尾帧任务…" % (seg.get("index"), total),
-                    )
-                if not image_task_ids and not recovered_frame_urls:
-                    raise RuntimeError("comic_image_task_id_missing:storyboard_%s" % storyboard_id)
-                seg["startFrameTaskId"] = image_task_ids[0] if image_task_ids else ""
-                seg["endFrameTaskId"] = image_task_ids[1] if len(image_task_ids) > 1 else ""
-                seg["flowchartTaskId"] = seg["startFrameTaskId"]
-                frame_urls = list(recovered_frame_urls[:2])
-                frame_payloads = [recovered_image_payload] if recovered_image_payload else []
-                if recovered_image_payload:
-                    recovered_task_id = (
-                        (image_task_ids or [""])[0]
-                        or _comic_extract_task_id(recovered_image_payload)
-                    )
-                    frame_billings.append(_settle_comic_keyframe_actual_billing(
-                        job, seg, recovered_image_payload, frame_index=1,
-                        task_id=recovered_task_id,
-                    ))
-                for frame_index, image_task_id in enumerate(image_task_ids[:2]):
-                    if frame_index < len(frame_urls) and frame_urls[frame_index]:
-                        continue
-                    frame_url, frame_payload = adapter.wait_task_result(
-                        image_task_id,
-                        cancel_check=_replacement_cancel_check(job),
-                        progress=lambda _attempt, _payload, s=seg: emit_progress(
-                            s, "comic_generate_flowchart", "片段 %s/%s：首尾帧生成中…" % (s.get("index"), total)
-                        ),
-                    )
-                    while len(frame_urls) <= frame_index:
-                        frame_urls.append("")
-                    frame_urls[frame_index] = _comic_absolute_media_url(frame_url)
-                    frame_payloads.append(frame_payload)
-                    frame_billings.append(_settle_comic_keyframe_actual_billing(
-                        job, seg, frame_payload, frame_index=frame_index + 1,
-                        task_id=image_task_id,
-                    ))
-                if len(frame_urls) < 2 or not frame_urls[1]:
-                    remote_storyboard = _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-                    remote_frame_urls = _comic_storyboard_frame_urls(remote_storyboard)
-                    for frame_index, frame_url in enumerate(remote_frame_urls):
-                        if frame_url and (len(frame_urls) <= frame_index or not frame_urls[frame_index]):
-                            while len(frame_urls) <= frame_index:
-                                frame_urls.append("")
-                            frame_urls[frame_index] = frame_url
-                frame_urls = (frame_urls + ["", ""])[:2]
-                seg["startFrameUrl"] = frame_urls[0]
-                seg["endFrameUrl"] = frame_urls[1]
-                seg["flowchartUrl"] = frame_urls[0]
-                seg["flowchartResult"] = _comic_response_data(frame_payloads[0]) if frame_payloads else {}
-                seg["comicFrameResults"] = [
-                    _comic_response_data(payload) for payload in frame_payloads
-                ]
-                seg["comicFrameBillings"] = list(frame_billings)
-                _comic_download_frame_image(job, seg, "start", seg.get("startFrameUrl"), adapter)
-                _comic_download_frame_image(job, seg, "end", seg.get("endFrameUrl"), adapter)
-                if _comic_model_is_seedance(_comic_video_model(job)):
-                    emit_progress(
-                        seg,
-                        "comic_colored_pencil_refs",
-                        "片段 %s/%s：生成隐藏彩铅参考图…" % (seg.get("index"), total),
-                    )
-                    _prepare_comic_colored_pencil_references(job, seg)
-                _save_replacement_job(job)
-                seg["stage"] = "comic_generate_video"
-                emit_progress(seg, "comic_generate_video", "片段 %s/%s：生成视频…" % (seg.get("index"), total))
-                recovered_video_url = ""
-                recovered_video_payload = {}
-                video_url = ""
-                video_payload = {}
-                video_models = _comic_project_video_model_candidates(job)
-                safety_fallback_active = False
-                last_video_exc = None
-                for video_model_index, video_model in enumerate(video_models):
-                    job["comicVideoModel"] = video_model
-                    job["model"] = video_model
-                    seg["model"] = video_model
-                    recovered_video_url = ""
-                    recovered_video_payload = {}
-                    video_billing = {}
-                    try:
-                        video_task = adapter.submit_storyboard_video(int(storyboard_id), job, seg)
-                        video_task_id = _comic_extract_task_id(video_task)
-                    except Exception as submit_exc:
-                        if not _comic_generation_submit_can_recover(submit_exc):
-                            raise
-                        recovered = _comic_recover_storyboard_media(
-                            adapter, project_id, storyboard_id, "video", submit_exc
-                        )
-                        video_task_id = recovered.get("task_id") or ""
-                        recovered_video_url = recovered.get("url") or ""
-                        recovered_video_payload = recovered.get("payload") or {}
-                        seg["comicRecoveryStatus"] = "recovered"
-                        seg["comicRecoveryReason"] = str(submit_exc)[:180]
-                        emit_progress(
-                            seg,
-                            "comic_generate_video",
-                            "片段 %s/%s：远程已接收，正在回查视频任务…" % (seg.get("index"), total),
-                        )
-                    seg["comicVideoTaskId"] = video_task_id
-                    try:
-                        if recovered_video_url:
-                            video_url, video_payload = recovered_video_url, recovered_video_payload
-                        else:
-                            video_url, video_payload = adapter.wait_task_result(
-                                video_task_id,
-                                cancel_check=_replacement_cancel_check(job),
-                                progress=lambda _attempt, _payload, s=seg: emit_progress(
-                                    s,
-                                    "comic_generate_video",
-                                    _comic_task_progress_message(
-                                        _payload,
-                                        "片段 %s/%s：视频生成中…" % (s.get("index"), total),
-                                    ),
-                                ),
-                                tries=int(job.get("tries") or 240),
-                                sleep_sec=5,
-                            )
+        pipeline = _replacement_comic_pipeline()
+
+        def bridge_progress(job_id, stage, message, segment_index, segments):
+            actual_segment = None
+            prompt = ""
+            if segment_index is not None:
+                for item in (job.get("segments") or []):
+                    if int(item.get("index") or 0) == int(segment_index or 0):
+                        actual_segment = item
                         break
-                    except Exception as video_exc:
-                        last_video_exc = video_exc
-                        fallback_reason = _comic_seedance_safety_fallback_reason(video_exc)
-                        fallback_item = {
-                            "model": video_model,
-                            "taskId": video_task_id,
-                            "fallbackReason": fallback_reason,
-                            "error": str(video_exc)[:240],
-                        }
-                        seg.setdefault("comicVideoFallbacks", []).append(fallback_item)
-                        raise
-                else:
-                    if last_video_exc:
-                        raise last_video_exc
-                    raise RuntimeError("comic_video_task_id_missing:storyboard_%s" % storyboard_id)
-                fallback_metadata = _comic_task_fallback_metadata(video_payload)
-                requested_model = fallback_metadata.get("requestedModel") or str(job.get("model") or "").strip()
-                actual_model = fallback_metadata.get("actualModel") or requested_model
-                seg["requestedModel"] = requested_model
-                seg["actualModel"] = actual_model
-                seg["modelFallbackReason"] = fallback_metadata.get("modelFallbackReason") or ""
-                seg["modelFallbackApplied"] = bool(fallback_metadata.get("modelFallbackApplied"))
-                video_url = _comic_absolute_media_url(video_url)
-                if not video_url:
-                    raise RuntimeError("comic_video_url_missing")
-                video_billing = _settle_comic_video_actual_billing({}, job, seg, video_payload)
-                seg["comicVideoBilling"] = dict(video_billing)
-                seg["videoUrl"] = video_url
-                seg["comicVideoResult"] = _comic_response_data(video_payload)
-                seg["stage"] = "comic_download_video"
-                emit_progress(seg, "comic_download_video", "片段 %s/%s：下载视频结果…" % (seg.get("index"), total))
-                _comic_download_segment_video(job, seg, video_url, adapter)
-                _save_replacement_job(job)
-                emit_progress(seg, "done", "片段 %s/%s：视频完成" % (seg.get("index"), total))
-            except Exception as exc:
-                if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
-                    seg.update({"status": "cancel_requested", "stage": "cancel_requested",
-                                "stageLabel": "取消中", "etaSec": 0})
-                    _mark_replacement_job_canceled(job)
-                    return
-                error_id = _replacement_error_id(
-                    "video_replace_comic_segment_failed",
-                    exc,
-                    job_id=job.get("id") or "",
-                    segment_index=seg.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                )
-                failure_update = {
-                    "status": "failed",
-                    "stage": "failed",
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": _comic_task_failure_message({"data": {"errorMessage": str(exc)}})[:240],
-                    "errorId": error_id,
-                    "qcStatus": "failed",
-                }
-                if seg.get("stage") != "download_failed":
-                    failure_update["audioStatus"] = "failed"
-                seg.update(failure_update)
-                _save_replacement_job(job)
-                emit_progress(
-                    seg,
-                    "failed",
-                    "片段 %s/%s 生成失败，可单段重试" % (seg.get("index"), total),
-                )
-        failed = [s for s in segments if s.get("status") == "failed"]
-        if failed:
-            job["status"] = "partial"
-            job["diagnostics"] = _replacement_diagnostics_summary(job)
-            _save_replacement_job(job)
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
+            emit_progress(actual_segment, stage, message, prompt=prompt or ((actual_segment or {}).get("prompt") or ""))
+
+        result = pipeline.execute(job, selected_segments, progress=bridge_progress)
+        if result.get("status") == "partial":
+            failed = [segment for segment in (job.get("segments") or []) if segment.get("status") == "failed"]
             BRIDGE.payload.emit("video_replace_done", {
-                "jobId": job["id"],
+                "jobId": job.get("id") or "",
                 "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
                 "job": job,
                 "failedSegments": failed,
             })
-            return
-        job["status"] = "awaiting_review"
-        _save_replacement_job(job)
-        BRIDGE.payload.emit("video_replace_progress", {
-            "jobId": job["id"],
-            "stage": "awaiting_review",
-            "message": "漫剧片段已生成，请审核后合成。",
-            "timing": _replacement_timing_snapshot(job, None, stage="awaiting_review"),
-            "segments": job.get("segments") or [],
-        })
 
     def _collect_plan_edits(self):
         segments = self._job.get("segments") or []
@@ -16133,223 +16171,72 @@ class VideoReplacementPage(BasePage):
         run_bg(work)
 
     def _run_comic_frame_regeneration(self, job, segment, frame_kind):
+        pipeline = _replacement_comic_pipeline()
         job = job if isinstance(job, dict) else {}
         segment = segment if isinstance(segment, dict) else {}
-        kind = str(frame_kind or "").strip().lower()
-        if kind not in ("start", "end"):
-            raise ValueError("comic_frame_kind_invalid")
-        project_id = int(job.get("comicProjectId") or 0)
-        storyboard_id = int(segment.get("comicStoryboardId") or 0)
-        if not project_id:
-            raise RuntimeError("comic_project_id_missing")
-        if not storyboard_id:
-            raise RuntimeError("comic_storyboard_id_missing")
-        adapter = ComicProjectAdapter()
-        # Refresh the remote project before writing the current script and asset bindings.
-        _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-        assets = job.get("comicAssets") or {}
-        if not assets and hasattr(adapter, "upsert_manual_assets"):
-            assets = adapter.upsert_manual_assets(project_id, job)
-            job["comicAssets"] = assets
-        adapter.update_storyboard(storyboard_id, job, segment, assets, include_audio=False)
-        frame_index = 1 if kind == "start" else 2
-        submitted = adapter.submit_storyboard_image(
-            storyboard_id, job, segment, frame_index=frame_index
+        original_segments = job.get("segments") if isinstance(job.get("segments"), list) else None
+        original_skip_persist = job.get("_replacementSkipPersist")
+        has_target_segment = any(
+            int((item or {}).get("index") or 0) == int(segment.get("index") or 0)
+            for item in (original_segments or [])
+            if isinstance(item, dict)
         )
-        task_id = _comic_extract_task_id(submitted)
-        if not task_id:
-            raise RuntimeError("comic_frame_task_id_missing")
-        image_url, payload = adapter.wait_task_result(
-            task_id,
-            cancel_check=_replacement_cancel_check(job),
-        )
-        frame_billing = _settle_comic_keyframe_actual_billing(
-            job, segment, payload, frame_index=frame_index, task_id=task_id
-        )
-        segment["%sFrameBilling" % kind] = dict(frame_billing)
-        image_url = _comic_absolute_media_url(image_url)
-        if not image_url:
-            raise RuntimeError("comic_frame_url_missing")
-        path_key = "startFramePath" if kind == "start" else "endFramePath"
-        candidate = dict(segment)
-        candidate[path_key] = ""
-        image_path = _comic_download_frame_image(job, candidate, kind, image_url, adapter)
-        if not image_path:
-            raise RuntimeError("comic_frame_download_failed")
-        return _apply_comic_frame_regeneration_result(
-            segment, kind, task_id, image_url, image_path
-        )
+        if not has_target_segment:
+            job["segments"] = [segment]
+            job["_replacementSkipPersist"] = True
+        try:
+            result = pipeline.regenerate_frame(
+                job,
+                segment.get("index"),
+                frame_kind,
+            )
+        finally:
+            if not has_target_segment:
+                if original_segments is None:
+                    job.pop("segments", None)
+                else:
+                    job["segments"] = original_segments
+                if original_skip_persist is None:
+                    job.pop("_replacementSkipPersist", None)
+                else:
+                    job["_replacementSkipPersist"] = original_skip_persist
+        return result.get("segment") or segment
 
     def _run_comic_video_regeneration(self, job, selected_segments, allow_pending_recovery=False):
-        job = job if isinstance(job, dict) else {}
-        selected_segments = [segment for segment in (selected_segments or []) if isinstance(segment, dict)]
-        adapter = ComicProjectAdapter()
-        assets = job.get("comicAssets") or {}
-        total = len(job.get("segments") or selected_segments)
-        job["status"] = "running"
+        pipeline = _replacement_comic_pipeline()
+        segment_lookup = {
+            int(item.get("index") or 0): item
+            for item in (job.get("segments") or [])
+            if isinstance(item, dict)
+        }
 
-        def emit_progress(segment, stage, message):
-            timing = _replacement_timing_snapshot(job, segment, stage=stage)
+        def bridge_progress(job_id, stage, message, segment_index, segments):
+            actual_segment = segment_lookup.get(int(segment_index or 0)) if segment_index is not None else None
+            prompt = ""
+            if segment_index is not None:
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
+            timing = _replacement_timing_snapshot(job, actual_segment, stage=stage)
             BRIDGE.payload.emit("video_replace_progress", {
-                "jobId": job.get("id") or "",
-                "stage": stage,
+                "jobId": job_id,
+                "stage": timing.get("stage") or stage or "",
                 "message": message,
                 "timing": timing,
-                "segments": job.get("segments") or selected_segments,
-                "prompt": (segment or {}).get("prompt") or "",
+                "segments": segments or [],
+                "prompt": prompt or ((actual_segment or {}).get("prompt") or ""),
             })
 
+        selected_segments = [segment for segment in (selected_segments or []) if isinstance(segment, dict)]
+        selected_indexes = [segment.get("index") for segment in selected_segments]
+        job["_comicAllowPendingVideoRecovery"] = bool(allow_pending_recovery)
+        try:
+            result = pipeline.retry(job, selected_indexes, progress=bridge_progress)
+        finally:
+            job.pop("_comicAllowPendingVideoRecovery", None)
         for segment in selected_segments:
-            if self._cancel_requested or _replacement_cancel_requested(job):
-                _mark_replacement_job_canceled(job)
-                return
-            storyboard_id = segment.get("comicStoryboardId")
-            new_task_id = ""
-            new_video_url = ""
-            download_started = False
-            video_billing = {}
-            pending_recovery = (
-                _comic_pending_video_recovery(segment)
-                if allow_pending_recovery and segment.get("status") == "download_failed"
-                else {}
-            )
-            missing_message = "" if pending_recovery else _comic_video_missing_frames_message(segment)
-            if missing_message:
-                error_id = _replacement_error_id(
-                    "video_replace_comic_video_frames_missing",
-                    RuntimeError("comic_video_frames_missing"),
-                    job_id=job.get("id") or "",
-                    segment_index=segment.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                )
-                segment.update({
-                    "status": "failed",
-                    "stage": "video_retry_blocked_missing_frames",
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": missing_message,
-                    "errorId": error_id or segment.get("errorId") or "",
-                    "retryPrompt": missing_message,
-                })
-                _save_replacement_job(job)
-                continue
-            try:
-                if pending_recovery:
-                    new_task_id = str(pending_recovery.get("taskId") or "").strip()
-                    new_video_url = str(pending_recovery.get("videoUrl") or "").strip()
-                    candidate = _comic_video_candidate_from_pending(segment, pending_recovery)
-                    download_started = True
-                    segment.update({
-                        "status": "running",
-                        "stage": "comic_download_video",
-                        "stageLabel": _replacement_stage_label("comic_download_video"),
-                    })
-                    _save_replacement_job(job)
-                    emit_progress(
-                        segment,
-                        "comic_download_video",
-                        "片段 %s/%s：恢复下载并校验已生成视频…" % (
-                            segment.get("index"), total
-                        ),
-                    )
-                    _comic_download_segment_video(job, candidate, new_video_url, adapter)
-                    candidate.pop("pendingComicVideoRecovery", None)
-                    candidate.pop("comicRecoveryStatus", None)
-                    candidate.pop("comicRecoveryReason", None)
-                    segment.update(candidate)
-                    segment.pop("pendingComicVideoRecovery", None)
-                    _save_replacement_job(job)
-                    emit_progress(
-                        segment,
-                        "done",
-                        "片段 %s/%s：视频完成" % (segment.get("index"), total),
-                    )
-                    json_log(
-                        _CLIENT_JSON_LOGGER,
-                        "video_replace_comic_regeneration_completed",
-                        job_id=str(job.get("id") or ""),
-                        project_id=job.get("comicProjectId") or "",
-                        segment_index=segment.get("index") or "",
-                        media_kind="video",
-                    )
-                    continue
-                if not storyboard_id:
-                    raise RuntimeError("comic_storyboard_id_missing")
-                archived = _archive_comic_media_attempt(segment, "video")
-                if archived:
-                    history = list(segment.get("retryHistory") or [])
-                    history.append(archived)
-                    segment["retryHistory"] = history
-                segment.update({
-                    "status": "generating_video",
-                    "stage": "comic_update_storyboard",
-                    "stageLabel": _replacement_stage_label("comic_update_storyboard"),
-                })
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    "comic_update_storyboard",
-                    "片段 %s/%s：同步当前口播稿、素材和声音设置…" % (
-                        segment.get("index"), total
-                    ),
-                )
-                adapter.update_storyboard(
-                    int(storyboard_id), job, segment, assets, include_audio=True
-                )
-                segment["stage"] = "comic_generate_video"
-                emit_progress(
-                    segment,
-                    "comic_generate_video",
-                    "片段 %s/%s：重新生成视频…" % (segment.get("index"), total),
-                )
-                submitted = adapter.submit_storyboard_video(int(storyboard_id), job, segment)
-                new_task_id = _comic_extract_task_id(submitted)
-                if not new_task_id:
-                    raise RuntimeError("comic_video_task_id_missing")
-                new_video_url, video_payload = adapter.wait_task_result(
-                    new_task_id,
-                    cancel_check=_replacement_cancel_check(job),
-                    progress=lambda _attempt, _payload, s=segment: emit_progress(
-                        s,
-                        "comic_generate_video",
-                        _comic_task_progress_message(
-                            _payload,
-                            "片段 %s/%s：视频生成中…" % (s.get("index"), total),
-                        ),
-                    ),
-                    tries=int(job.get("tries") or 240),
-                    sleep_sec=5,
-                )
-                new_video_url = _comic_absolute_media_url(new_video_url)
-                if not new_video_url:
-                    raise RuntimeError("comic_video_url_missing")
-                video_billing = _settle_comic_video_actual_billing(
-                    {}, job, segment, video_payload
-                )
-                segment["comicVideoBilling"] = dict(video_billing)
-                pending_recovery = _comic_pending_video_recovery_metadata(
-                    job, new_task_id, new_video_url, video_payload
-                )
-                segment["pendingComicVideoRecovery"] = pending_recovery
-                _save_replacement_job(job)
-                candidate = _comic_video_candidate_from_pending(segment, pending_recovery)
-                download_started = True
-                emit_progress(
-                    segment,
-                    "comic_download_video",
-                    "片段 %s/%s：下载并校验新视频…" % (segment.get("index"), total),
-                )
-                _comic_download_segment_video(job, candidate, new_video_url, adapter)
-                candidate.pop("comicRecoveryStatus", None)
-                candidate.pop("comicRecoveryReason", None)
-                candidate.pop("pendingComicVideoRecovery", None)
-                segment.update(candidate)
-                segment.pop("pendingComicVideoRecovery", None)
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    "done",
-                    "片段 %s/%s：视频完成" % (segment.get("index"), total),
-                )
+            if segment.get("status") == "done":
                 json_log(
                     _CLIENT_JSON_LOGGER,
                     "video_replace_comic_regeneration_completed",
@@ -16358,65 +16245,7 @@ class VideoReplacementPage(BasePage):
                     segment_index=segment.get("index") or "",
                     media_kind="video",
                 )
-            except Exception as exc:
-                if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
-                    segment.update({
-                        "status": "cancel_requested",
-                        "stage": "cancel_requested",
-                        "stageLabel": "取消中",
-                    })
-                    _mark_replacement_job_canceled(job)
-                    return
-                error_id = _replacement_error_id(
-                    "video_replace_comic_video_regeneration_failed",
-                    exc,
-                    job_id=job.get("id") or "",
-                    segment_index=segment.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                    task_id=new_task_id,
-                    download_started=download_started,
-                )
-                failure_status = "download_failed" if download_started else "failed"
-                if failure_status == "download_failed" and pending_recovery:
-                    pending_recovery["downloadAttempts"] = int(
-                        pending_recovery.get("downloadAttempts") or 0
-                    ) + 1
-                    pending_recovery["lastDownloadAttemptAt"] = time.time()
-                    pending_recovery["lastErrorId"] = error_id
-                    pending_recovery["downloadStatus"] = "failed"
-                    segment["pendingComicVideoRecovery"] = pending_recovery
-                if new_task_id or new_video_url:
-                    history = list(segment.get("retryHistory") or [])
-                    history.append({
-                        "operationType": "comic_video_regeneration_attempt",
-                        "operationAt": time.time(),
-                        "mediaKind": "video",
-                        "taskId": new_task_id,
-                        "urlSummary": _comic_media_url_summary(new_video_url),
-                        "status": failure_status,
-                        "errorId": error_id,
-                    })
-                    segment["retryHistory"] = history
-                segment.update({
-                    "status": failure_status,
-                    "stage": failure_status,
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": (
-                        "远程视频已生成，本地获取失败"
-                        if failure_status == "download_failed"
-                        else "comic_video_regeneration_failed"
-                    ),
-                    "errorId": error_id,
-                    "qcStatus": "failed",
-                })
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    failure_status,
-                    "片段 %s/%s 视频重新生成失败（错误编号 %s）" % (
-                        segment.get("index"), total, error_id or "-"
-                    ),
-                )
+            elif segment.get("status") in ("failed", "download_failed"):
                 json_log(
                     _CLIENT_JSON_LOGGER,
                     "video_replace_comic_regeneration_failed",
@@ -16424,33 +16253,19 @@ class VideoReplacementPage(BasePage):
                     project_id=job.get("comicProjectId") or "",
                     segment_index=segment.get("index") or "",
                     media_kind="video",
-                    error_id=error_id or "",
+                    error_id=segment.get("errorId") or "",
                 )
-
-        failed = [
-            segment for segment in (job.get("segments") or selected_segments)
-            if segment.get("status") in ("failed", "download_failed")
-        ]
-        if failed:
-            job["status"] = "partial"
-            job["diagnostics"] = _replacement_diagnostics_summary(job)
-            _save_replacement_job(job)
+        if result.get("status") == "partial":
+            failed = [
+                segment for segment in (job.get("segments") or [])
+                if segment.get("status") in ("failed", "download_failed")
+            ]
             BRIDGE.payload.emit("video_replace_done", {
                 "jobId": job.get("id") or "",
                 "message": "有 %d 个片段的视频仍需处理" % len(failed),
                 "job": job,
                 "failedSegments": failed,
             })
-            return
-        job["status"] = "awaiting_review"
-        _save_replacement_job(job)
-        BRIDGE.payload.emit("video_replace_progress", {
-            "jobId": job.get("id") or "",
-            "stage": "awaiting_review",
-            "message": "漫剧视频已重新生成，请审核后合成。",
-            "timing": _replacement_timing_snapshot(job, None, stage="awaiting_review"),
-            "segments": job.get("segments") or selected_segments,
-        })
 
     def regenerate_selected_segment(self):
         row = self.table.currentRow() if hasattr(self, "table") else -1
@@ -17732,6 +17547,43 @@ def _wf_download(url, path):
     r.raise_for_status()  # 非 2xx(签名过期403/5xx/HTML错误页)直接抛错,别把错误页当成 mp4 存下来入队
     with open(path, "wb") as f:
         f.write(r.content)
+    return path
+
+
+def _replacement_source_extension(url):
+    ext = os.path.splitext(urlparse(str(url or "")).path)[1].lower()
+    return ext if ext in (".mp4", ".mov", ".webm", ".m4v") else ".mp4"
+
+
+def _replacement_web_download_source(source_url, job_dir):
+    """Direct-URL source downloader for the shared replacement service.
+
+    Reuses the breakdown/reference download path so production direct-URL
+    prepare works: it downloads into the job dir with the same helper the
+    reference-video analysis uses (``_wf_download``, which raises on non-2xx so
+    HTML/expired-signature error bodies are never stored), then validates the
+    media via ``_breakdown_source_validation`` before returning. Invalid media
+    is rejected and the partial file removed. Returns the local video path;
+    never logs the URL or the absolute path.
+    """
+    url = str(source_url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("replacement_invalid_source_url")
+    out_dir = os.path.abspath(str(job_dir or "").strip())
+    if not out_dir:
+        raise ValueError("replacement_source_job_dir_required")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(
+        out_dir, "source-%s%s" % (uuid.uuid4().hex[:12], _replacement_source_extension(url))
+    )
+    _wf_download(url, path)
+    validation = _breakdown_source_validation(path) or {}
+    if not validation.get("ok"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError(str(validation.get("code") or "replacement_source_media_invalid"))
     return path
 
 
@@ -30235,29 +30087,26 @@ class LoginView(QtWidgets.QWidget):
         self._card_layout = cv
         cv.setContentsMargins(32, 30, 32, 28)
         cv.setSpacing(13)
-        title = QtWidgets.QLabel("登录 / 加入企业")
+        title = QtWidgets.QLabel("账号登录")
         title.setStyleSheet("color:#f4f7ff;font-size:21px;font-weight:800;background:transparent;")
-        self.sub = QtWidgets.QLabel("使用用户名和密码登录，或通过邀请码加入企业")
+        self.sub = QtWidgets.QLabel("使用漫剧账号密码登录 AI爆款复刻")
         self.sub.setStyleSheet("color:rgba(160,172,196,0.9);font-size:12.5px;background:transparent;")
         cv.addWidget(title)
         cv.addWidget(self.sub)
         cv.addSpacing(4)
-        # 顶部切换:登录 / 加入企业；注册入口保留内部兼容但不在首页暴露。
-        tabrow = QtWidgets.QHBoxLayout()
-        tabrow.setSpacing(8)
-        self.tab_login = QtWidgets.QPushButton("登录")
-        self.tab_reg = QtWidgets.QPushButton("注册")
-        self.tab_invite = QtWidgets.QPushButton("加入企业")
+        # 登录页只暴露账号登录；注册/邀请控件保留为隐藏对象兼容既有内部流程。
+        self.tab_login = QtWidgets.QPushButton("登录", card)
+        self.tab_reg = QtWidgets.QPushButton("注册", card)
+        self.tab_invite = QtWidgets.QPushButton("加入企业", card)
+        self.tab_login.setVisible(False)
         self.tab_reg.setVisible(False)
+        self.tab_invite.setVisible(False)
         for tb in (self.tab_login, self.tab_reg, self.tab_invite):
             tb.setCursor(QtCore.Qt.PointingHandCursor)
             tb.setMinimumHeight(34)
         self.tab_login.clicked.connect(lambda: self._set_mode("login"))
         self.tab_reg.clicked.connect(lambda: self._set_mode("register"))
         self.tab_invite.clicked.connect(lambda: self._set_mode("invite"))
-        tabrow.addWidget(self.tab_login, 1)
-        tabrow.addWidget(self.tab_invite, 1)
-        cv.addLayout(tabrow)
         self.invite_code_row = QtWidgets.QWidget()
         self.invite_code_row.setStyleSheet("background:transparent;")
         invite_code_layout = QtWidgets.QHBoxLayout(self.invite_code_row)

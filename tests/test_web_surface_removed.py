@@ -26,7 +26,10 @@ class WebSurfaceRemovedTest(unittest.TestCase):
                 self.assertFalse((ROOT / relative).exists())
 
     def test_no_active_product_html_remains(self):
-        excluded = {"backups", "node_modules", ".git", ".playwright-cli", ".tmp-validation"}
+        excluded = {
+            "backups", "node_modules", ".git", ".worktrees",
+            ".playwright-cli", ".tmp-validation", "build", "dist",
+        }
         html = [
             path for path in ROOT.rglob("*.html")
             if not excluded.intersection(path.relative_to(ROOT).parts)
@@ -94,6 +97,14 @@ class WebSurfaceRemovedTest(unittest.TestCase):
         self.assertNotIn("frontend\\downloads", build)
         self.assertNotIn("frontend\\downloads", installer)
         self.assertIn("dist\\installer\\MatrixShipAgent-Setup.exe", build)
+        self.assertIn("$env:LOCALAPPDATA\\Programs\\Inno Setup 6\\ISCC.exe", build)
+
+    def test_installer_allows_user_to_choose_install_directory(self):
+        installer = (ROOT / "backend" / "installer" / "MatrixShipAgent.iss").read_text(encoding="utf-8")
+
+        self.assertIn("DefaultDirName={localappdata}\\MatrixShipAgent\\app", installer)
+        self.assertIn("DisableDirPage=no", installer)
+        self.assertIn("PrivilegesRequired=lowest", installer)
 
 
 if __name__ == "__main__":

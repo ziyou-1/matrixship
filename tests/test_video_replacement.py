@@ -1162,6 +1162,57 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             self.assertEqual(segment["audioMixStatus"], "not_requested")
             self.assertTrue(old_video.is_file())
 
+    def test_comic_run_job_segments_uses_shared_pipeline_execute(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._cancel_requested = False
+        job = {
+            "id": "job-comic-shared-execute",
+            "replacementMode": "comic_project",
+            "comicProjectId": 88,
+            "segments": [{"index": 1, "status": "planned"}],
+        }
+        pipeline = mock.Mock()
+        pipeline.execute.return_value = job
+        bridge = type("BridgeStub", (), {
+            "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
+        })()
+
+        with mock.patch.object(self.client, "_replacement_comic_pipeline", return_value=pipeline), \
+                mock.patch.object(self.client, "BRIDGE", bridge):
+            page._run_job_segments(job, job["segments"])
+
+        pipeline.execute.assert_called_once_with(
+            job,
+            job["segments"],
+            progress=mock.ANY,
+        )
+
+    def test_comic_video_regeneration_uses_shared_pipeline_retry(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._cancel_requested = False
+        segment = {"index": 3, "status": "failed", "comicStoryboardId": 201}
+        job = {
+            "id": "job-comic-shared-retry",
+            "replacementMode": "comic_project",
+            "comicProjectId": 88,
+            "segments": [segment],
+        }
+        pipeline = mock.Mock()
+        pipeline.retry.return_value = job
+        bridge = type("BridgeStub", (), {
+            "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
+        })()
+
+        with mock.patch.object(self.client, "_replacement_comic_pipeline", return_value=pipeline), \
+                mock.patch.object(self.client, "BRIDGE", bridge):
+            page._run_comic_video_regeneration(job, [segment], allow_pending_recovery=True)
+
+        pipeline.retry.assert_called_once_with(
+            job,
+            [3],
+            progress=mock.ANY,
+        )
+
     def test_comic_retry_entries_use_video_only_runner_and_keep_legacy_runner(self):
         src = CLIENT.read_text(encoding="utf-8")
         retry_block = src[

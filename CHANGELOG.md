@@ -1,5 +1,90 @@
 ﻿# Changelog
 
+## 2026-08-05 客户端默认连接公网中心服
+### Fixed
+- 本地客户端 `CENTRAL` 默认值由 `http://127.0.0.1:9080` 改为公网生产中心服 `http://120.26.194.174:9080`。公网下载安装的客户端所在机器没有中心服进程，旧默认值会让登录页直接报 `WinError 10061` / `NewConnectionError`。本机开发调试改为显式设置 `MATRIX_CENTRAL`。
+
+### Changed
+- `backend/.env.example` 与 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 默认值与说明同步。
+- `tests/test_video_breakdown.py` 的两条用例改回断言公网默认值；旧用例 `test_central_defaults_to_local_loopback` 把回环默认值当成正确行为，正是这个回归一直没被发现的原因。
+
+### Verification And Operations
+- `tests.test_video_breakdown tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes` 91/91 通过，`py_compile` 通过。
+- 仅改源码不生效，必须重新打包 `MatrixShipAgent-Setup.exe` 并重传到服务器；已装旧包的用户需重装或临时设置 `MATRIX_CENTRAL`。不涉及中心服 API、OpenAPI、数据库或 `migration.sql`。
+
+## 2026-08-04 视频替换共享服务熔断、可观测事件与契约
+### Added
+- 本地终态任务度量与共享模式熔断：`backend/replacement_service.py` 新增 `record_terminal_result`、`circuit_breaker_state`、`shared_mode_allowed`，在 agent 数据目录持久化最近至多 500 条终态任务（仅存 job 哈希）。累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时新任务切回 `legacy`；正好 1% 不熔断，取消不计为失败，运行中的任务绝不中断。
+- 脱敏结构化边界事件：`build_replacement_event`/`emit_replacement_event` 输出 `prepare_started`、`analysis_completed`、`provider_submitted`、`provider_recovered`、`billing_settled`、`video_completed`、`video_failed`、`shared_mode_circuit_opened`、`rollback_requested`，只含 job id、stage、model、provider-task 哈希、status、media-URL 形状和 cost/ref。
+### Changed
+- `backend/matrix_native_client.py` 的 `replacement_mode_for_new_job()` 现在同时校验 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 与 `shared_mode_allowed()`：熔断打开时发出 `shared_mode_circuit_opened`/`rollback_requested` 并回退 `legacy`。
+- `backend/replacement_web.py::build_video_service` 传入共享 metrics 目录与本地日志器，使网页与 Qt 共用一致的失败率统计；`public_job` 脱敏扩展为丢弃并清洗 provider task id / 媒体 URL 字段，API 响应永不暴露原始 provider task id 或签名 URL。
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service`（含 `ReplacementCircuitBreakerTests` 100/2⇒legacy、100/1⇒shared、<100⇒shared、cancelled 不计失败、活动任务不中断、窗口有界；`ReplacementEventRedactionTests` provider 哈希与签名 URL 脱敏）和 `tests.test_replacement_web_mvp`、`tests.test_openapi_contract`。
+- 仅本地执行端生效，无中心服/远程/Docker/数据库变更；`migration.sql` 记为无迁移。切换 `VIDEO_REPLACEMENT_SERVICE_MODE` 需重启本地执行端；回滚设为 `legacy` 并重启，保留 job 文件与生成媒体，不删除数据、不重复提交已完成 provider task、不重复结算。发布侧保留上一稳定安装包/Tag 以决定客户端版本回滚。
+
+## 2026-08-04 客户端默认连接公网中心服
+### Fixed
+- Windows 客户端无 `MATRIX_CENTRAL` / `CENTRAL_URL` 环境变量时，默认中心服从 `http://127.0.0.1:9080` 改为 `http://120.26.194.174:9080`，避免用户从浏览器下载安装后登录请求打到本机空端口并显示 `WinError 10061`。
+- 中心服地址改用独立校验，允许生产 HTTP 中心服地址；远程素材和模型服务 URL 仍保留原有 HTTPS/loopback 限制。
+- `backend/.env.example` 和部署文档同步公网默认值；本地开发仍可显式设置 `MATRIX_CENTRAL=http://127.0.0.1:9080` 覆盖。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_defaults_to_public_production_server` 和 `test_central_env_override_still_supports_local_development`。
+- 生效需要重新构建 `MatrixShipAgent-Setup.exe` 并替换远程 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`；回滚时恢复 `backend/matrix_native_client.py` 默认值和上一版安装包备份。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+
+## 2026-08-04 登录页只保留漫剧账号登录
+### Changed
+- 本地客户端登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”，不再展示“加入企业”入口或登录页顶部模式切换。
+- 注册和邀请码加入企业控件仅保留为隐藏兼容对象，不加入首页布局；企业中心的邀请提示同步改为建议管理员使用“添加成员”或“重置密码”交付新成员账号。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_native_enterprise_invite.NativeEnterpriseInviteTest.test_login_home_shows_only_account_login_entry`、`test_enterprise_invite_copy_does_not_point_to_login_page` 和 `tests.test_login_centered_layout.LoginCenteredLayoutTest.test_marketing_copy_is_restored_outside_login_card`。
+- 本次只影响本地客户端 UI 和测试文档；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端或重新打包安装包后生效；回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧入口。
+- 安装包已刷新到远程 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`：旧包备份为 `.bak-20260804_160000`，新包 SHA-256 `b7bf94a1f2d6ded8fbaade9b613bf091cacfb4deab1d90835b82f17cd58df096`，公网 `http://120.26.194.174/MatrixShipAgent-Setup.exe` 返回 `Content-Length: 181371458`。
+
+## 2026-08-04 Installer directory selection
+### Fixed
+- Windows 安装包不再隐藏安装目录选择页；运行 `MatrixShipAgent-Setup.exe` 时，用户可以在安装向导中修改安装位置。
+- 默认安装目录仍保持 `{localappdata}\MatrixShipAgent\app`，默认不需要管理员权限，避免影响普通用户安装。
+- 打包脚本会同时查找用户级 Inno Setup 路径 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`，本机用户安装版也能直接生成安装包。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory` 和 `test_build_stays_native_only`，锁定目录选择页开启、默认目录、用户态权限和用户级 Inno Setup 编译器路径。
+- 本次只影响 Inno Setup 安装脚本、测试和文档；不改变安装包下载路由、中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+- 生效需要重新运行 `backend\build_matrix_agent.ps1` 生成新的 `backend\dist\installer\MatrixShipAgent-Setup.exe` 并重新发布；回滚把 `backend\installer\MatrixShipAgent.iss` 的 `DisableDirPage` 改回 `yes` 后重新打包即可。
+
+## 2026-08-04 Local replacement web MVP
+### Added
+- 本地执行端新增 `/replacement` 网页 MVP，默认由 `MATRIX_REPLACEMENT_WEB_ENABLED=0` 关闭；开启后提供“视频替换”和“图文替换”两个页签，直接通过本机 `/api/replacement/*` 创建本地任务。
+- 新增本地 Phase 0 job skeleton：视频替换创建 `rvw_...` queued JSON job；图文替换创建 `xnr_...` preview JSON job，并复用既有图文同款 smoke helper 生成候选文案。
+- 新增 OpenAPI/API_REFERENCE 契约，覆盖 `/replacement`、`/api/replacement/video/start`、`/api/replacement/video/job`、`/api/replacement/note/start` 和 `/api/replacement/note/job`。
+- `/replacement` 页面外壳支持直接打开链接；真正提交 `/api/replacement/*` 时仍使用本机 agent token，并通过页面输入或 URL hash 写入 `sessionStorage` 后发送 `X-Matrix-Agent-Token`。job 查询响应补齐脱敏 `source/files/createdAt/updatedAt`，图文 `copyCandidates` 保持对象数组结构。
+- 原生“同款替换”和“图文同款”页面新增“打开网页版替换”入口，由本地客户端生成 `/replacement#token=...&user=...` 跳转链接；hash 只包含本机执行端 token 和脱敏用户上下文，页面读取后清理地址栏。页面现在会把缺 token、401、校验失败、非 JSON 和网络错误显示为中文提示；视频提交成功时明确提示当前客户预览版只创建本地任务，不执行真实视频生成。
+- 原生“同款替换”视频页在已载入分解结果后会写入短期 `rwh_...` 本地 handoff，并打开 `/replacement#token=...&user=...&handoffId=...`；网页通过 token 保护的 `/api/replacement/video/handoff` 读取脱敏摘要，提交视频替换时可用 `handoffId` 绑定真实本地分解上下文。
+- handoff 响应和视频 job 只暴露 `source.host/pathHash`、`sourceVideo.available/pathHash`、`analysis.duration/transcriptSegmentCount` 与 `sourceContext` 摘要，不返回本地 `sourceVideoPath`、来源链接查询串、中心 token、手机号、Cookie、签名 URL 或平台授权。
+- 图文替换预览现在可通过 `/api/replacement/note/save-draft` 保存为本机 `image_note` 草稿素材；该流程复用既有图文同款草稿保存逻辑，只复制已校验上传图片到本地素材库，不发布、不中心同步、不调用 LK888、不计费。
+- `/replacement` 图文页新增本地可视化预览编辑区：生成后展示图片槽位和 3 套候选文案，用户可选择候选、编辑标题/正文/标签，再保存本地草稿。
+- 图文替换上传图片现在通过 `/api/replacement/file` 安全加载本地缩略图：job 响应只返回 `files[].previewUrl` 和 `slotMappings[].hasFile`，不暴露本地 `filePath`；页面用带 `X-Matrix-Agent-Token` 的 fetch 转成 blob URL 显示。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_web_mvp` 的 feature gate、页面 HTML、客户化错误提示、客户端跳转 URL 脱敏、图文预览编辑控件、本地 job 创建/脱敏、图文预览保存本地草稿、API route 和文档契约。
+- 本次只影响本地客户端入口、本地执行端、OpenAPI/API 文档、四级文档、CHANGELOG 和 no-op `migration.sql`；`/api/replacement/file` 与 `/api/replacement/video/handoff` 仍受功能开关和本机 token 保护，不触发真实 LK888、远程 AI Canvas、发布、扣费、数据库 DDL/DML、Docker 镜像或密钥配置。
+- 生效需要设置 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 并重启本地执行器，同时重启本地客户端以显示“打开网页版替换”按钮；回滚优先把开关恢复为 `0` 并重启。代码级回滚恢复 `backend/matrix_native_client.py`、`backend/api_server.py`、`backend/replacement_web.py`、`backend/platform_features.py`、`tests/test_replacement_web_mvp.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、四级文档、`CHANGELOG.md` 和 `migration.sql`。
+
+## 2026-08-04 Comic tool Windows client download card
+### Added
+- 远程 AI Canvas `/comic-tool` 创作工具页现在会注入第 4 个「Windows 客户端」工具卡片，按钮直连同源 `/MatrixShipAgent-Setup.exe`，点击后真实下载安装包，不再停留在“即将开放”状态。
+- 远程 AI Canvas 新增公开安装包下载路由 `GET/HEAD /MatrixShipAgent-Setup.exe`，响应为 attachment，文件名固定为 `MatrixShipAgent-Setup.exe`；安装包默认从 `AICANVAS_AGENT_INSTALLER`、`MATRIXSHIP_AGENT_INSTALLER` 或项目内 `backend/dist/installer/MatrixShipAgent-Setup.exe` 解析。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest`，验证第 4 个工具卡片注入、幂等注入、环境变量安装包路径、无鉴权下载和 attachment 响应头。
+- 本次影响远程 AI Canvas 镜像与测试/文档；不改变中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+- 已部署到远程 `/root/AI-CanvasPro/server.py`，备份为 `/root/AI-CanvasPro/server.py.bak.download-card-test-20260804_094216`；新 `server.py` SHA-256 为 `f086408ce1ad2682fd2ad4133683a02a080441744d7f9e75d3a65bb02e992796`。安装包 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe` SHA-256 为 `89c52a2f24c082e128ce989d3912a89067540ae5040565a04e2b6378a946a41f`，大小 `181360180` 字节。`ai-canvas.service` 重启后 active，公网 `/comic-tool` 已包含下载卡片注入脚本，公网 `/MatrixShipAgent-Setup.exe` 返回 attachment。
+- 二次修复：线上发现“漫剧Agent / Windows客户端 / 漫剧画布”顺序异常和重复风险后，下载卡片注入不再克隆或插入到现有 Agent 卡片后面，改为寻找工具容器并追加独立 Windows 卡片。修复版部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-append-fix-20260804_101249`；新 `server.py` SHA-256 为 `b3ecc6ebe22e10e7e88a06e4e9a67f26a88bebc9b0415a50acc54703d215540e`。
+- 文案修复：Windows 卡片说明改为“云灵星图桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”，避免用户误以为下载的是整个漫剧项目。文案修复备份为 `/root/AI-CanvasPro/server.py.bak.download-card-copy-fix-20260804_102740`；新 `server.py` SHA-256 为 `e8644cbc79429d0fbd8fbfacb58c0037a7f4d8572e39c58e22ab763672ce5cc8`。
+- 产品定位文案更新：Windows 卡片说明调整为“云灵星图 AI爆款复刻平台 Windows 桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”。部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-platform-copy-20260804_103700`；新 `server.py` SHA-256 为 `ebe4cd1f4810257985c81bc3641b7a870b2d4721f818019b60fc3613d1ec3306`。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

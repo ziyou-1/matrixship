@@ -240,6 +240,55 @@ def load_replacement_pipeline():
     return mod
 
 
+SERVICE = ROOT / "backend" / "replacement_service.py"
+
+
+def load_replacement_service():
+    spec = importlib.util.spec_from_file_location("replacement_service_for_video_replacement_v2", SERVICE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _recording_bridge():
+    events = []
+    bridge = types.SimpleNamespace(payload=types.SimpleNamespace(
+        emit=lambda tag, payload: events.append((tag, payload))
+    ))
+    return bridge, events
+
+
+class _AdapterFakeSourceResolver:
+    def prepare(self, job, request, progress=None):
+        job["sourceVideoPath"] = os.path.join(job["outDir"], "source.mp4")
+        Path(job["sourceVideoPath"]).write_bytes(b"fake-video")
+        job["breakdownAnalysis"] = {"meta": {"duration": 8.0}}
+        return job
+
+
+class _AdapterFakePipeline:
+    def build_plan(self, job):
+        job["segments"] = [{"index": 1, "start": 0.0, "end": 8.0, "status": "planned"}]
+        return job
+
+    def execute(self, job, selected_segments=None, progress=None):
+        segment = job["segments"][0]
+        output = os.path.join(job["outDir"], "segment-01.mp4")
+        Path(output).write_bytes(b"fake-output")
+        segment.update({"status": "done", "videoPath": output, "qcStatus": "passed"})
+        job["status"] = "awaiting_review"
+        return job
+
+    def concat(self, job):
+        output = os.path.join(job["outDir"], "final.mp4")
+        Path(output).write_bytes(b"fake-final")
+        job.update({"status": "completed", "outputPath": output})
+        return job
+
+    def retry(self, job, segment_indices, progress=None):
+        return job
+
+
 def fake_qt_multimedia_backend():
     from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
@@ -1601,6 +1650,304 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(job["lastRetryPreparation"]["segments"], [{"index": 3, "demotedCodes": []}])
         self.assertTrue(any(event["segmentIndex"] == 3 for event in progress_events))
 
+    def test_comic_pipeline_execute_reuses_existing_remote_video_without_resubmit(self):
+        class ExistingVideoComicAdapter:
+            def get_project(self, project_id):
+                return {"data": {"id": project_id, "storyboards": [{
+                    "id": 201,
+                    "sequence": 1,
+                    "start_frame_url": "/uploads/existing-start.png",
+                    "end_frame_url": "/uploads/existing-end.png",
+                    "video_url": "/uploads/existing-video.mp4",
+                }]}}
+
+            def upsert_manual_assets(self, *_args, **_kwargs):
+                return {}
+
+            def submit_storyboard_image(self, *_args, **_kwargs):
+                raise AssertionError("existing video must not regenerate images")
+
+            def submit_storyboard_video(self, *_args, **_kwargs):
+                raise AssertionError("existing video must not be resubmitted")
+
+            def download_media(self, url, path, **_kwargs):
+                downloads.append(url)
+                Path(path).write_bytes(b"video")
+                return path
+
+        with tempfile.TemporaryDirectory() as td:
+            downloads = []
+            segment = {
+                "index": 1,
+                "status": "failed",
+                "script": "test script",
+                "comicStoryboardId": 201,
+                "videoUrl": "/uploads/existing-video.mp4",
+                "comicVideoResult": {"status": "completed"},
+            }
+            job = {
+                "id": "job-comic-existing-video-pipeline",
+                "replacementMode": "comic_project",
+                "comicProjectId": 88,
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "outDir": td,
+                "comicAssets": {},
+                "segments": [segment],
+            }
+            pipeline = self.pipeline_module.ComicProjectReplacementPipeline(helpers=self.client)
+
+            with mock.patch.object(self.client, "ComicProjectAdapter", ExistingVideoComicAdapter), \
+                    mock.patch.object(self.client, "_comic_base_url", return_value="https://manju.yunlingai.net"), \
+                    mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
+                    mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", return_value={
+                        "stage": "comic_download_video",
+                        "stageLabel": "comic_download_video",
+                        "segmentElapsedSec": 0,
+                        "segmentEtaSec": 0,
+                    }):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(segment["status"], "done")
+        self.assertEqual(segment["startFrameUrl"], "https://manju.yunlingai.net/uploads/existing-start.png")
+        self.assertEqual(segment["endFrameUrl"], "https://manju.yunlingai.net/uploads/existing-end.png")
+        self.assertEqual(segment["videoUrl"], "https://manju.yunlingai.net/uploads/existing-video.mp4")
+        self.assertEqual(downloads, [
+            "https://manju.yunlingai.net/uploads/existing-start.png",
+            "https://manju.yunlingai.net/uploads/existing-end.png",
+            "https://manju.yunlingai.net/uploads/existing-video.mp4",
+        ])
+
+    def test_comic_pipeline_execute_recovers_image_submit_timeout_without_duplicate_submit(self):
+        class RecoveringFrameComicAdapter:
+            submit_image_calls = 0
+            waited = []
+
+            def get_project(self, project_id):
+                return {"data": {"id": project_id, "storyboards": [{
+                    "id": 201,
+                    "sequence": 1,
+                    "startFrameTaskId": "start-task",
+                    "endFrameTaskId": "end-task",
+                }]}}
+
+            def upsert_manual_assets(self, *_args, **_kwargs):
+                return {}
+
+            def update_storyboard(self, *_args, **_kwargs):
+                return {"ok": True}
+
+            def submit_storyboard_image(self, *_args, **_kwargs):
+                self.__class__.submit_image_calls += 1
+                raise RuntimeError(
+                    "HTTPConnectionPool(host='127.0.0.1', port=7897): Read timed out. (read timeout=120)"
+                )
+
+            def submit_storyboard_video(self, *_args, **_kwargs):
+                return {"data": {"task_id": "video-task"}}
+
+            def wait_task_result(self, task_id, **_kwargs):
+                self.__class__.waited.append(task_id)
+                if task_id == "start-task":
+                    return "/uploads/start.png", {
+                        "data": {"status": "completed", "task_id": "start-task", "cost": 0.031, "actual_model": "gpt-image-2"}
+                    }
+                if task_id == "end-task":
+                    return "/uploads/end.png", {
+                        "data": {"status": "completed", "task_id": "end-task", "cost": 0.032, "actual_model": "gpt-image-2"}
+                    }
+                return "/uploads/video.mp4", {
+                    "data": {
+                        "status": "completed",
+                        "task_id": "video-task",
+                        "requested_model": "seedance-requested",
+                        "actual_model": "kling-fallback",
+                        "fallback_model": "kling-fallback",
+                        "fallback_reason": "provider-rejected",
+                        "fallback_applied": True,
+                        "cost": 0.42,
+                    }
+                }
+
+            def download_media(self, _url, path, **_kwargs):
+                Path(path).write_bytes(b"video")
+                return path
+
+        with tempfile.TemporaryDirectory() as td:
+            segment = {
+                "index": 1,
+                "status": "pending",
+                "script": "test script",
+                "comicStoryboardId": 201,
+            }
+            job = {
+                "id": "job-comic-frame-recovery-pipeline",
+                "replacementMode": "comic_project",
+                "comicProjectId": 88,
+                "comicVideoModel": "seedance-requested",
+                "model": "seedance-requested",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "outDir": td,
+                "comicAssets": {},
+                "segments": [segment],
+            }
+            charges = []
+            pipeline = self.pipeline_module.ComicProjectReplacementPipeline(helpers=self.client)
+
+            def fake_charge(amount, **kwargs):
+                charges.append((amount, dict(kwargs)))
+                return True, 88.0, None
+
+            with mock.patch.object(self.client, "ComicProjectAdapter", RecoveringFrameComicAdapter), \
+                    mock.patch.object(self.client, "_comic_base_url", return_value="https://manju.yunlingai.net"), \
+                    mock.patch.object(self.client, "charge", side_effect=fake_charge), \
+                    mock.patch.object(self.client, "_comic_download_frame_image", return_value="frame.local"), \
+                    mock.patch.object(self.client, "_prepare_comic_colored_pencil_references", lambda _job, _segment: _segment), \
+                    mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
+                    mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", return_value={
+                        "stage": "comic_generate_flowchart",
+                        "stageLabel": "comic_generate_flowchart",
+                        "segmentElapsedSec": 0,
+                        "segmentEtaSec": 0,
+                    }):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(RecoveringFrameComicAdapter.submit_image_calls, 1)
+        self.assertEqual(
+            RecoveringFrameComicAdapter.waited,
+            ["start-task", "end-task", "video-task"],
+        )
+        self.assertEqual(segment["status"], "done")
+        self.assertEqual(segment["comicRecoveryStatus"], "recovered")
+        self.assertEqual(segment["requestedModel"], "seedance-requested")
+        self.assertEqual(segment["actualModel"], "kling-fallback")
+        self.assertEqual(segment["modelFallbackReason"], "provider-rejected")
+        self.assertTrue(segment["modelFallbackApplied"])
+        self.assertEqual([call[0] for call in charges], [0.031, 0.032, 0.42])
+
+    def test_service_pipeline_defaults_missing_mode_to_product_default_and_routes_comic(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "comic_project"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_a", "segments": []}
+            router.build_plan(job)
+        self.assertEqual(job["replacementMode"], "comic_project")
+        comic.build_plan.assert_called_once_with(job)
+        hybrid.build_plan.assert_not_called()
+
+    def test_service_pipeline_default_legacy_routes_to_hybrid(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "legacy"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_b"}
+            router.build_plan(job)
+        self.assertEqual(job["replacementMode"], "legacy")
+        hybrid.build_plan.assert_called_once_with(job)
+        comic.build_plan.assert_not_called()
+
+    def test_service_pipeline_preserves_explicit_mode_and_routes_execute_to_comic(self):
+        client = self.client
+        comic, hybrid = mock.Mock(), mock.Mock()
+        with mock.patch.object(client, "_replacement_comic_pipeline", return_value=comic), \
+                mock.patch.object(client, "_replacement_hybrid_pipeline", return_value=hybrid), \
+                mock.patch.dict(os.environ, {"VIDEO_REPLACE_DEFAULT_MODE": "legacy"}, clear=False):
+            router = client._replacement_service_pipeline()
+            job = {"id": "rvw_c", "replacementMode": "comic_project"}
+            router.execute(job, selected_segments=[{"index": 1}], progress=None)
+        # explicit comic mode wins over the legacy default, and is not rewritten
+        comic.execute.assert_called_once()
+        hybrid.execute.assert_not_called()
+        self.assertEqual(job["replacementMode"], "comic_project")
+
+    def test_build_video_service_uses_job_routing_pipeline(self):
+        import tempfile
+        import replacement_web
+        with tempfile.TemporaryDirectory() as td:
+            svc = replacement_web.build_video_service(td)
+        self.assertEqual(type(svc.pipeline).__name__, "_ReplacementServicePipeline")
+
+    def test_settle_actual_cost_is_idempotent_and_ignores_submit_estimate(self):
+        charge_calls = []
+        helper = types.SimpleNamespace(
+            charge=lambda amount, **kwargs: charge_calls.append((amount, dict(kwargs))) or (True, 88.0, None),
+            json_log=lambda *_args, **_kwargs: None,
+            _CLIENT_JSON_LOGGER=object(),
+            COMIC_VIDEO_GENERATION_CAP="comic_video_generation",
+            COMIC_KEYFRAME_IMAGE_CAP="comic_keyframe_image",
+        )
+        job = {"id": "job-billing", "comicProjectId": 88, "_pipelineHelpers": helper}
+        segment = {"index": 1}
+        payload = {
+            "task_id": "provider-1",
+            "cost": 0.42,
+            "estimated_cost": 9.99,
+            "actual_model": "vidu/viduq3-mix_reference2video",
+        }
+
+        first = self.pipeline_module.settle_actual_cost(job, segment, payload, "video", "provider-1")
+        second = self.pipeline_module.settle_actual_cost(job, segment, payload, "video", "provider-1")
+
+        self.assertEqual(first["ref"], second["ref"])
+        self.assertEqual(first["actualAmount"], 0.42)
+        self.assertEqual(second["actualAmount"], 0.42)
+        self.assertEqual(len(charge_calls), 1)
+        self.assertEqual(charge_calls[0][0], 0.42)
+        self.assertEqual(charge_calls[0][1]["capability"], "comic_video_generation")
+        self.assertNotIn("estimated_cost", charge_calls[0][1]["meta"])
+
+    def test_settle_actual_cost_returns_awaiting_actual_cost_and_keeps_refs_distinct(self):
+        charge_calls = []
+        helper = types.SimpleNamespace(
+            charge=lambda amount, **kwargs: charge_calls.append((amount, dict(kwargs))) or (True, 88.0, None),
+            json_log=lambda *_args, **_kwargs: None,
+            _CLIENT_JSON_LOGGER=object(),
+            COMIC_VIDEO_GENERATION_CAP="comic_video_generation",
+            COMIC_KEYFRAME_IMAGE_CAP="comic_keyframe_image",
+        )
+        job = {"id": "job-awaiting", "comicProjectId": 301, "_pipelineHelpers": helper}
+        segment = {"index": 2}
+
+        awaiting = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "video-task", "estimated_cost": 12.34, "actual_model": "viduq3-cankaosheng"},
+            "video",
+            "video-task",
+        )
+        start = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "frame-start", "cost": 0.11, "actual_model": "gpt-image-2"},
+            "keyframe",
+            "frame-start",
+            frame_index=1,
+        )
+        end = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "frame-end", "cost": 0.12, "actual_model": "gpt-image-2"},
+            "keyframe",
+            "frame-end",
+            frame_index=2,
+        )
+
+        self.assertEqual(awaiting["status"], "awaiting_actual_cost")
+        self.assertEqual(awaiting["taskId"], "video-task")
+        self.assertIn(":frame:1:actual", start["ref"])
+        self.assertIn(":frame:2:actual", end["ref"])
+        self.assertNotEqual(start["ref"], end["ref"])
+        self.assertNotEqual(start["ref"], awaiting.get("ref", ""))
+        self.assertEqual([call[0] for call in charge_calls], [0.11, 0.12])
+
     def test_talking_segment_reuses_existing_tts_and_kling_digital_human(self):
         segment = {"index": 1, "segmentType": "talking", "script": "新的产品口播", "keyframeUrl": "https://x/key.png"}
         job = {"voiceId": "Zephyr", "digitalHumanMode": "std", "sceneImageUrl": "https://x/scene.png"}
@@ -1663,19 +2010,25 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertFalse(any("127.0.0.1" in ref for ref in refs))
 
     def test_keyframe_references_migrate_existing_central_library_urls_in_memory(self):
+        # The download-and-inline migration only applies to loopback central-library
+        # URLs (a public central serves remotely-fetchable URLs that pass straight
+        # through). Pin CENTRAL to loopback so this branch is exercised regardless of
+        # the shipped default central host (public vs loopback).
+        base = "http://127.0.0.1:9080"
         job = {
             "productImageUrls": [
-                "http://127.0.0.1:9080/api/library/file/product/product.png"
+                base + "/api/library/file/product/product.png"
             ],
-            "modelFaceUrl": "http://127.0.0.1:9080/api/library/file/face/face.png",
-            "sceneImageUrl": "http://127.0.0.1:9080/api/library/file/scene/scene.png",
+            "modelFaceUrl": base + "/api/library/file/face/face.png",
+            "sceneImageUrl": base + "/api/library/file/scene/scene.png",
         }
         response = mock.Mock(
             status_code=200,
             content=b"existing-library-image",
             headers={"Content-Type": "image/png"},
         )
-        with mock.patch.object(self.client.requests, "get", return_value=response) as get:
+        with mock.patch.object(self.client, "CENTRAL", base), \
+                mock.patch.object(self.client.requests, "get", return_value=response) as get:
             refs = self.client._build_replacement_keyframe_references(job, {}, "", "")
 
         self.assertEqual(len(refs), 3)
@@ -6506,6 +6859,199 @@ class VideoReplacementV2Test(unittest.TestCase):
             preview_dialog.return_value.exec.assert_called_once_with()
             root.close()
             app.processEvents()
+
+    # --- Task 6: Qt shared-service adapter and rollback switch ---
+
+    def test_new_job_mode_defaults_to_legacy_when_unset(self):
+        env = dict(os.environ)
+        env.pop("VIDEO_REPLACEMENT_SERVICE_MODE", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self.client.replacement_mode_for_new_job(), "legacy")
+            self.assertFalse(self.client.video_replacement_service_shared())
+
+    def test_legacy_mode_keeps_old_path(self):
+        with mock.patch.dict(os.environ, {"VIDEO_REPLACEMENT_SERVICE_MODE": "legacy"}):
+            self.assertEqual(self.client.replacement_mode_for_new_job(), "legacy")
+            self.assertFalse(self.client.video_replacement_service_shared())
+
+    def test_shared_mode_selected_only_by_explicit_env(self):
+        with mock.patch.dict(os.environ, {"VIDEO_REPLACEMENT_SERVICE_MODE": "SHARED"}):
+            self.assertEqual(self.client.replacement_mode_for_new_job(), "shared")
+            self.assertTrue(self.client.video_replacement_service_shared())
+        with mock.patch.dict(os.environ, {"VIDEO_REPLACEMENT_SERVICE_MODE": "bogus"}):
+            self.assertEqual(self.client.replacement_mode_for_new_job(), "legacy")
+            self.assertFalse(self.client.video_replacement_service_shared())
+
+    def test_shared_mode_routes_qt_to_service(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._job = {"id": "rvw_test", "status": "planned", "segments": [{"index": 1}]}
+        page._service_adapter = mock.Mock()
+
+        page._start_shared_service_job()
+
+        page._service_adapter.execute.assert_called_once_with(
+            "rvw_test", {}, progress=page._emit_service_progress
+        )
+
+    def test_emit_service_progress_keeps_video_replace_progress_shape(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._job = {"id": "rvw_test", "segments": [{"index": 1, "status": "editing"}]}
+        bridge, events = _recording_bridge()
+        segments = [{"index": 1, "status": "editing", "prompt": "镜头1"}]
+        with mock.patch.object(self.client, "BRIDGE", bridge):
+            page._emit_service_progress("rvw_test", "editing", "生成片段 1/1", 1, segments)
+
+        self.assertEqual(len(events), 1)
+        tag, payload = events[0]
+        self.assertEqual(tag, "video_replace_progress")
+        self.assertEqual(payload["jobId"], "rvw_test")
+        self.assertEqual(payload["segments"], segments)
+        self.assertEqual(payload["prompt"], "镜头1")
+        self.assertIn("timing", payload)
+        self.assertIn("message", payload)
+        self.assertIn("stage", payload)
+
+    def test_start_generation_gates_shared_service_and_preserves_legacy_dispatch(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        start = src.index("    def start_generation(self):")
+        body = src[start:src.index("\n    def _run_job_segments", start)]
+
+        self.assertIn("if video_replacement_service_shared():", body)
+        self.assertIn("run_bg(self._start_shared_service_job)", body)
+        self.assertIn("run_bg(work)", body)
+        self.assertLess(
+            body.index("run_bg(self._start_shared_service_job)"),
+            body.index("        run_bg(work)"),
+        )
+
+    def test_service_adapter_maps_lifecycle_and_emits_redacted_bridge_events(self):
+        service_mod = load_replacement_service()
+        with tempfile.TemporaryDirectory() as td:
+            service = service_mod.ReplacementService(
+                data_dir=td,
+                source_resolver=_AdapterFakeSourceResolver(),
+                pipeline=_AdapterFakePipeline(),
+            )
+            bridge, events = _recording_bridge()
+            adapter = self.client.ReplacementServiceAdapter(service=service, bridge=bridge)
+
+            prepared = adapter.prepare(
+                "job-adapter-1",
+                {"sourceUrl": "https://example.test/video.mp4"},
+                [("characterImage", "face.png", b"img")],
+            )
+            self.assertEqual(prepared["status"], "planned")
+            self.assertNotIn("outDir", prepared)
+            self.assertNotIn("sourceVideoPath", prepared)
+
+            running = adapter.execute("job-adapter-1", {"note": "keep"}, progress=None)
+            self.assertEqual(running["status"], "awaiting_review")
+
+            completed = adapter.concat("job-adapter-1")
+            self.assertEqual(completed["status"], "completed")
+
+            tags = [tag for tag, _ in events]
+            self.assertIn("video_replace_plan_ready", tags)
+            # awaiting_review is surfaced through progress, not a done event
+            self.assertEqual(tags.count("video_replace_done"), 1)
+            dump = json.dumps(events, ensure_ascii=False)
+            for leak in ("outDir", "sourceVideoPath", "videoPath", "outputPath", td):
+                self.assertNotIn(leak, dump)
+
+    def test_service_adapter_execute_partial_emits_failed_segments(self):
+        service = mock.Mock()
+        service.execute.return_value = {
+            "id": "job-x",
+            "status": "partial",
+            "segments": [
+                {"index": 1, "status": "done"},
+                {"index": 2, "status": "failed", "error": "provider failed"},
+            ],
+        }
+        bridge, events = _recording_bridge()
+        adapter = self.client.ReplacementServiceAdapter(service=service, bridge=bridge)
+        progress = lambda *args, **kwargs: None
+
+        adapter.execute("job-x", {}, progress=progress)
+
+        service.execute.assert_called_once_with("job-x", overrides={}, progress=progress)
+        done = [payload for tag, payload in events if tag == "video_replace_done"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual(len(done[0]["failedSegments"]), 1)
+        self.assertEqual(done[0]["failedSegments"][0]["index"], 2)
+
+    def test_service_adapter_retry_and_cancel_map_to_service(self):
+        service = mock.Mock()
+        service.retry.return_value = {"id": "job-x", "status": "partial", "segments": []}
+        service.cancel.return_value = {"id": "job-x", "status": "cancelled", "segments": []}
+        bridge, events = _recording_bridge()
+        adapter = self.client.ReplacementServiceAdapter(service=service, bridge=bridge)
+        progress = lambda *args, **kwargs: None
+
+        adapter.retry("job-x", [2], progress=progress)
+        adapter.cancel("job-x")
+
+        service.retry.assert_called_once_with("job-x", [2], progress=progress)
+        service.cancel.assert_called_once_with("job-x")
+        tags = [tag for tag, _ in events]
+        self.assertIn("video_replace_done", tags)
+
+    def test_replacement_web_download_source_returns_validated_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = os.path.join(td, "rvw_job")
+
+            def fake_download(url, path):
+                Path(path).write_bytes(b"fake-video-bytes")
+                return path
+
+            with mock.patch.object(self.client, "_wf_download", side_effect=fake_download) as download, \
+                    mock.patch.object(
+                        self.client,
+                        "_breakdown_source_validation",
+                        return_value={"ok": True, "duration": 8.0, "width": 720, "height": 1280},
+                    ) as validate:
+                path = self.client._replacement_web_download_source(
+                    "https://www.douyin.com/video/abc.mp4", job_dir
+                )
+
+            self.assertEqual(download.call_count, 1)
+            self.assertEqual(validate.call_count, 1)
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.path.abspath(path).startswith(os.path.abspath(job_dir) + os.sep))
+
+    def test_replacement_web_download_source_rejects_invalid_media(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_dir = os.path.join(td, "rvw_job")
+
+            def fake_download(url, path):
+                Path(path).write_bytes(b"<html>403</html>")
+                return path
+
+            with mock.patch.object(self.client, "_wf_download", side_effect=fake_download), \
+                    mock.patch.object(
+                        self.client,
+                        "_breakdown_source_validation",
+                        return_value={"ok": False, "code": "download_html_body"},
+                    ):
+                with self.assertRaises(Exception) as ctx:
+                    self.client._replacement_web_download_source(
+                        "https://www.douyin.com/video/bad", job_dir
+                    )
+
+            self.assertIn("download_html_body", str(ctx.exception))
+            leftovers = [
+                name for name in os.listdir(job_dir)
+                if name.lower().endswith((".mp4", ".mov", ".webm", ".m4v"))
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_replacement_web_download_source_rejects_non_http_url(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(self.client, "_wf_download", side_effect=AssertionError("must not download")):
+                with self.assertRaises(ValueError):
+                    self.client._replacement_web_download_source(
+                        "file:///etc/passwd", os.path.join(td, "rvw_job")
+                    )
 
 
 if __name__ == "__main__":

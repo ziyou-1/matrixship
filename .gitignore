@@ -65,3 +65,10 @@ Thumbs.db
 
 # Local rollback snapshots remain on disk but are not source artifacts
 backups/
+
+# Migrated Codex conversation history (local reference only, not source)
+docs/codex-history/
+
+# Transient local run artifacts (screenshots, run logs, cleanup manifests)
+output/
+.cleanup_reports/
