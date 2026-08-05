@@ -673,7 +673,16 @@ class HybridReplacementPipeline(ReplacementPipeline):
             return
         saver = getattr(self._helpers(), "_save_replacement_job", None)
         if callable(saver):
-            saver(job)
+            # _pipelineHelpers is a transient, non-JSON-serializable proxy that some
+            # stages leave on the job while persisting mid-run (e.g. comic project
+            # setup). Never write it to job.json; restore it for the caller after.
+            had = isinstance(job, dict) and "_pipelineHelpers" in job
+            helpers = job.pop("_pipelineHelpers", None) if had else None
+            try:
+                saver(job)
+            finally:
+                if had:
+                    job["_pipelineHelpers"] = helpers
 
     def _job_duration(self, job, analysis):
         meta = (analysis or {}).get("meta") or {}

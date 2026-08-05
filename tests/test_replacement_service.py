@@ -195,6 +195,54 @@ class ReplacementServiceContractTests(unittest.TestCase):
         self.assertTrue(hasattr(self.pipeline_module, "ComicProjectReplacementPipeline"))
         self.assertTrue(callable(getattr(self.pipeline_module, "settle_actual_cost", None)))
 
+    def test_write_job_never_persists_transient_pipeline_helper_proxy(self):
+        # Regression: comic stages leave a non-JSON-serializable _pipelineHelpers
+        # proxy on the job while it is persisted mid-run. Persisting must not raise
+        # (that surfaced as "Object of type _ReplacementHelperProxy is not JSON
+        # serializable" and masked the real execute error).
+        import json as _json
+        import tempfile
+
+        class _Proxy:
+            def __repr__(self):
+                return "<proxy>"
+
+        class HelperLeakingPipeline(FakePipeline):
+            def build_plan(self, job):
+                job = super().build_plan(job)
+                job["_pipelineHelpers"] = _Proxy()
+                return job
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            service = self._service(data_dir, pipeline=HelperLeakingPipeline())
+            job_id = "rvw_" + "a" * 24
+            public = service.prepare(job_id, {"sourceUrl": "https://example.test/v"}, [])
+            self.assertEqual(public.get("status"), "planned")
+            saved = _json.load(
+                open(os.path.join(data_dir, job_id, "job.json"), encoding="utf-8"))
+            self.assertNotIn("_pipelineHelpers", saved)
+
+    def test_pipeline_persist_strips_and_restores_helper_proxy(self):
+        import json as _json
+
+        class _Proxy:
+            def __repr__(self):
+                return "<proxy>"
+
+        seen = {}
+
+        class Saver:
+            def _save_replacement_job(self, job):
+                _json.dumps(job, ensure_ascii=False)  # mirrors the native atomic writer
+                seen["had_helpers"] = "_pipelineHelpers" in job
+
+        pipeline = self.pipeline_module.HybridReplacementPipeline(
+            helpers=Saver(), runtime=None)
+        job = {"id": "x", "_pipelineHelpers": _Proxy(), "outDir": "/tmp"}
+        pipeline._persist(job)  # must not raise
+        self.assertFalse(seen["had_helpers"])       # stripped during save
+        self.assertIn("_pipelineHelpers", job)      # restored for the caller
+
     def _service(self, data_dir, pipeline=None):
         return self.ReplacementService(
             data_dir=data_dir,

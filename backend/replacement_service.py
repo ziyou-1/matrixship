@@ -535,7 +535,11 @@ class ReplacementService:
         return job
 
     def _write_job(self, job):
-        payload = copy.deepcopy(job or {})
+        source = dict(job or {})
+        # Never persist transient, non-JSON-serializable runtime objects (e.g. the
+        # pipeline helper proxy some stages leave on the job mid-run).
+        source.pop("_pipelineHelpers", None)
+        payload = copy.deepcopy(source)
         payload["updatedAt"] = self._now()
         if not payload.get("createdAt"):
             payload["createdAt"] = payload["updatedAt"]
@@ -543,7 +547,7 @@ class ReplacementService:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
         os.replace(tmp_path, path)
         job.clear()
         job.update(payload)
