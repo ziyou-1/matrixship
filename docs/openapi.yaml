@@ -142,6 +142,243 @@ paths:
                   cookieReady: {type: boolean}
                 onlineNodes: {type: integer, minimum: 0}
               additionalProperties: true
+  /replacement:
+    get:
+      summary: Local replacement web MVP page
+      description: Local execution-engine HTML page enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It provides Phase 0 video replacement and image-note replacement forms, accepts the local agent token in the page or URL hash for API submits, and does not submit real LK888/provider generation.
+      security: []
+      responses:
+        "200":
+          description: Replacement MVP page
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/start:
+    post:
+      summary: Start a local Phase 0 video replacement job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It stores a queued local job and never triggers real LK888/provider generation in the MVP. When handoffId is supplied, the job is bound to a native-client video breakdown handoff instead of requiring sourceUrl.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoStartRequest"
+      responses:
+        "200":
+          description: Local replacement job was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementStartResponse"
+        "400":
+          description: Missing source URL, invalid URL, or missing required character image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/handoff:
+    get:
+      summary: Read a local native-client video replacement handoff
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It returns a redacted summary for an already-loaded native video breakdown context and never exposes local file paths or source URL query strings.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: handoffId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rwh_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Redacted handoff context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoHandoffResponse"
+        "404":
+          description: Replacement web surface is disabled or handoff is missing or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/job:
+    get:
+      summary: Read a local Phase 0 video replacement job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rvw_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Local job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementJobResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/start:
+    post:
+      summary: Start a local Phase 0 image-note replacement preview job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It creates a safe local preview using existing image-note smoke logic and does not publish to Xiaohongshu.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplacementNoteStartRequest"
+      responses:
+        "200":
+          description: Local replacement preview job was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementStartResponse"
+        "400":
+          description: Missing source URL, invalid URL, or missing replacement image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/save-draft:
+    post:
+      summary: Save a local replacement note preview as an image-note draft
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It reuses the existing image-note draft material flow, copies validated uploaded images into the local material library, and does not publish to Xiaohongshu or sync to the center material library.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementNoteSaveDraftRequest"
+      responses:
+        "200":
+          description: Local image-note draft material was created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id, material, job]
+                properties:
+                  ok: {const: true}
+                  id: {type: string}
+                  material:
+                    type: object
+                    additionalProperties: true
+                  job:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: true
+        "400":
+          description: Replacement images are missing or invalid for draft material creation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/job:
+    get:
+      summary: Read a local Phase 0 image-note replacement preview job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^xnr_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Local preview job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementJobResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/file:
+    get:
+      summary: Read a local uploaded replacement image thumbnail
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It serves only image files stored under a known replacement upload job directory, rejects path traversal, and does not expose local filesystem paths in JSON job responses.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: taskType
+          in: query
+          required: true
+          schema: {type: string, enum: [note]}
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^xnr_[A-Za-z0-9_-]+$"}
+        - name: filename
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: Local uploaded image bytes
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid task, job, filename, path, or unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Requested filename is outside the replacement upload directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or the uploaded image is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/minimax/video/generate:
     post:
       summary: Submit an authenticated MiniMax direct video task
@@ -2080,6 +2317,175 @@ components:
         guestMode: {type: boolean, default: false}
         accountCollectionConfirmed: {type: boolean, default: false}
       additionalProperties: false
+    ReplacementVideoStartRequest:
+      type: object
+      required: [characterImage]
+      properties:
+        sourceUrl:
+          type: string
+          format: uri
+          pattern: "^https?://"
+          description: Public source video URL. Required when handoffId is not supplied. Userinfo credentials, local paths, data URLs, and query secrets are not persisted.
+        handoffId:
+          type: string
+          pattern: "^rwh_[A-Za-z0-9_-]+$"
+          description: Optional native-client handoff id for an already-loaded local video breakdown context.
+        characterImage: {type: string, format: binary}
+        productImage: {type: string, format: binary}
+        sceneImage: {type: string, format: binary}
+        script: {type: string, maxLength: 4000}
+        sellingPoints: {type: string, maxLength: 4000}
+      additionalProperties: true
+    ReplacementNoteStartRequest:
+      type: object
+      required: [sourceUrl, replacementImages]
+      properties:
+        sourceUrl:
+          type: string
+          format: uri
+          pattern: "^https?://"
+          description: Source image-note URL. Userinfo credentials, local paths, data URLs, and query secrets are not persisted.
+        replacementImages:
+          type: array
+          minItems: 1
+          items: {type: string, format: binary}
+        businessName: {type: string, maxLength: 500}
+        region: {type: string, maxLength: 500}
+        sellingPoints: {type: string, maxLength: 4000}
+        audience: {type: string, maxLength: 1000}
+        tone: {type: string, maxLength: 500}
+      additionalProperties: true
+    ReplacementNoteSaveDraftRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          pattern: "^xnr_[A-Za-z0-9_-]+$"
+        selectedCopyIndex:
+          type: integer
+          minimum: 0
+          default: 0
+        copyOverride:
+          type: object
+          properties:
+            title: {type: string, maxLength: 100}
+            body: {type: string, maxLength: 5000}
+            tags:
+              oneOf:
+                - type: string
+                - type: array
+                  items: {type: string}
+          additionalProperties: false
+      additionalProperties: false
+    ReplacementStartResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        jobId: {type: string}
+        taskType: {type: string, enum: [video, note]}
+        status: {type: string, enum: [queued, preview, draft, failed]}
+        error:
+          type: string
+          enum:
+            - replacement_web_disabled
+            - replacement_invalid_source_url
+            - replacement_video_missing_character_image
+            - replacement_video_handoff_not_found
+            - replacement_note_missing_images
+            - replacement_note_preview_failed
+            - replacement_job_not_found
+            - ""
+      additionalProperties: true
+    ReplacementVideoHandoffResponse:
+      type: object
+      required: [ok, handoffId, source, sourceVideo, analysis]
+      properties:
+        ok: {const: true}
+        handoffId: {type: string, pattern: "^rwh_[A-Za-z0-9_-]+$"}
+        source:
+          type: object
+          description: Redacted source URL shape. Query strings, userinfo, signed URLs, cookies, and tokens are not returned.
+          additionalProperties: true
+        sourceVideo:
+          type: object
+          required: [available]
+          properties:
+            available: {type: boolean}
+            pathHash:
+              type: string
+              description: Non-reversible hash of the local source video path for diagnostics; the path itself is never returned.
+          additionalProperties: false
+        platform: {type: string}
+        analysis:
+          type: object
+          properties:
+            duration: {type: number}
+            transcriptSegmentCount: {type: integer, minimum: 0}
+            hasBreakdownAnalysis: {type: boolean}
+          additionalProperties: true
+        user:
+          type: object
+          additionalProperties: true
+        createdAt: {type: number}
+        expiresAt: {type: number}
+      additionalProperties: true
+    ReplacementJobResponse:
+      type: object
+      required: [ok, jobId, taskType, status]
+      properties:
+        ok: {const: true}
+        jobId: {type: string}
+        taskType: {type: string, enum: [video, note]}
+        status: {type: string, enum: [queued, preview, failed]}
+        source:
+          type: object
+          description: Redacted source URL shape. Query strings, userinfo, signed URLs, cookies, and tokens are not returned.
+          additionalProperties: true
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              field: {type: string}
+              filename: {type: string}
+              size: {type: integer, minimum: 0}
+              previewUrl:
+                type: string
+                description: Relative /api/replacement/file URL for authenticated thumbnail loading. Present only for note preview upload images.
+            additionalProperties: true
+        imageSlots:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        slotMappings:
+          type: array
+          items:
+            type: object
+            properties:
+              slotIndex: {type: integer}
+              slotRole: {type: string}
+              source: {type: string}
+              assetId: {type: string}
+              confirmationStatus: {type: string}
+              hasFile:
+                type: boolean
+                description: True when the internal compatible note job has a local filePath; the path itself is not returned.
+            additionalProperties: false
+        copyCandidates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        sourceContext:
+          type: object
+          description: Present for video jobs created from a native handoff. Contains only handoff id, platform, duration, booleans, and a non-reversible path hash.
+          additionalProperties: true
+        createdAt: {type: number}
+        updatedAt: {type: number}
+      additionalProperties: true
     DownloadFile:
       type: object
       required: [path]

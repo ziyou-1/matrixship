@@ -146,9 +146,14 @@ class ReplacementServiceContractTests(unittest.TestCase):
     def setUp(self):
         self.module = load_replacement_service_module()
         self.analysis_module = load_replacement_analysis_module()
+        self.pipeline_module = load_replacement_pipeline_module()
         self.ReplacementService = self.module.ReplacementService
         self.SourceResolver = self.module.SourceResolver
         self.ReplacementAnalysis = self.analysis_module.ReplacementAnalysis
+
+    def test_pipeline_module_exports_comic_project_pipeline_contract(self):
+        self.assertTrue(hasattr(self.pipeline_module, "ComicProjectReplacementPipeline"))
+        self.assertTrue(callable(getattr(self.pipeline_module, "settle_actual_cost", None)))
 
     def _service(self, data_dir, pipeline=None):
         return self.ReplacementService(

@@ -1601,6 +1601,257 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(job["lastRetryPreparation"]["segments"], [{"index": 3, "demotedCodes": []}])
         self.assertTrue(any(event["segmentIndex"] == 3 for event in progress_events))
 
+    def test_comic_pipeline_execute_reuses_existing_remote_video_without_resubmit(self):
+        class ExistingVideoComicAdapter:
+            def get_project(self, project_id):
+                return {"data": {"id": project_id, "storyboards": [{
+                    "id": 201,
+                    "sequence": 1,
+                    "start_frame_url": "/uploads/existing-start.png",
+                    "end_frame_url": "/uploads/existing-end.png",
+                    "video_url": "/uploads/existing-video.mp4",
+                }]}}
+
+            def upsert_manual_assets(self, *_args, **_kwargs):
+                return {}
+
+            def submit_storyboard_image(self, *_args, **_kwargs):
+                raise AssertionError("existing video must not regenerate images")
+
+            def submit_storyboard_video(self, *_args, **_kwargs):
+                raise AssertionError("existing video must not be resubmitted")
+
+            def download_media(self, url, path, **_kwargs):
+                downloads.append(url)
+                Path(path).write_bytes(b"video")
+                return path
+
+        with tempfile.TemporaryDirectory() as td:
+            downloads = []
+            segment = {
+                "index": 1,
+                "status": "failed",
+                "script": "test script",
+                "comicStoryboardId": 201,
+                "videoUrl": "/uploads/existing-video.mp4",
+                "comicVideoResult": {"status": "completed"},
+            }
+            job = {
+                "id": "job-comic-existing-video-pipeline",
+                "replacementMode": "comic_project",
+                "comicProjectId": 88,
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "outDir": td,
+                "comicAssets": {},
+                "segments": [segment],
+            }
+            pipeline = self.pipeline_module.ComicProjectReplacementPipeline(helpers=self.client)
+
+            with mock.patch.object(self.client, "ComicProjectAdapter", ExistingVideoComicAdapter), \
+                    mock.patch.object(self.client, "_comic_base_url", return_value="https://manju.yunlingai.net"), \
+                    mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
+                    mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", return_value={
+                        "stage": "comic_download_video",
+                        "stageLabel": "comic_download_video",
+                        "segmentElapsedSec": 0,
+                        "segmentEtaSec": 0,
+                    }):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(segment["status"], "done")
+        self.assertEqual(segment["startFrameUrl"], "https://manju.yunlingai.net/uploads/existing-start.png")
+        self.assertEqual(segment["endFrameUrl"], "https://manju.yunlingai.net/uploads/existing-end.png")
+        self.assertEqual(segment["videoUrl"], "https://manju.yunlingai.net/uploads/existing-video.mp4")
+        self.assertEqual(downloads, [
+            "https://manju.yunlingai.net/uploads/existing-start.png",
+            "https://manju.yunlingai.net/uploads/existing-end.png",
+            "https://manju.yunlingai.net/uploads/existing-video.mp4",
+        ])
+
+    def test_comic_pipeline_execute_recovers_image_submit_timeout_without_duplicate_submit(self):
+        class RecoveringFrameComicAdapter:
+            submit_image_calls = 0
+            waited = []
+
+            def get_project(self, project_id):
+                return {"data": {"id": project_id, "storyboards": [{
+                    "id": 201,
+                    "sequence": 1,
+                    "startFrameTaskId": "start-task",
+                    "endFrameTaskId": "end-task",
+                }]}}
+
+            def upsert_manual_assets(self, *_args, **_kwargs):
+                return {}
+
+            def update_storyboard(self, *_args, **_kwargs):
+                return {"ok": True}
+
+            def submit_storyboard_image(self, *_args, **_kwargs):
+                self.__class__.submit_image_calls += 1
+                raise RuntimeError(
+                    "HTTPConnectionPool(host='127.0.0.1', port=7897): Read timed out. (read timeout=120)"
+                )
+
+            def submit_storyboard_video(self, *_args, **_kwargs):
+                return {"data": {"task_id": "video-task"}}
+
+            def wait_task_result(self, task_id, **_kwargs):
+                self.__class__.waited.append(task_id)
+                if task_id == "start-task":
+                    return "/uploads/start.png", {
+                        "data": {"status": "completed", "task_id": "start-task", "cost": 0.031, "actual_model": "gpt-image-2"}
+                    }
+                if task_id == "end-task":
+                    return "/uploads/end.png", {
+                        "data": {"status": "completed", "task_id": "end-task", "cost": 0.032, "actual_model": "gpt-image-2"}
+                    }
+                return "/uploads/video.mp4", {
+                    "data": {
+                        "status": "completed",
+                        "task_id": "video-task",
+                        "requested_model": "seedance-requested",
+                        "actual_model": "kling-fallback",
+                        "fallback_model": "kling-fallback",
+                        "fallback_reason": "provider-rejected",
+                        "fallback_applied": True,
+                        "cost": 0.42,
+                    }
+                }
+
+            def download_media(self, _url, path, **_kwargs):
+                Path(path).write_bytes(b"video")
+                return path
+
+        with tempfile.TemporaryDirectory() as td:
+            segment = {
+                "index": 1,
+                "status": "pending",
+                "script": "test script",
+                "comicStoryboardId": 201,
+            }
+            job = {
+                "id": "job-comic-frame-recovery-pipeline",
+                "replacementMode": "comic_project",
+                "comicProjectId": 88,
+                "comicVideoModel": "seedance-requested",
+                "model": "seedance-requested",
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "outDir": td,
+                "comicAssets": {},
+                "segments": [segment],
+            }
+            charges = []
+            pipeline = self.pipeline_module.ComicProjectReplacementPipeline(helpers=self.client)
+
+            def fake_charge(amount, **kwargs):
+                charges.append((amount, dict(kwargs)))
+                return True, 88.0, None
+
+            with mock.patch.object(self.client, "ComicProjectAdapter", RecoveringFrameComicAdapter), \
+                    mock.patch.object(self.client, "_comic_base_url", return_value="https://manju.yunlingai.net"), \
+                    mock.patch.object(self.client, "charge", side_effect=fake_charge), \
+                    mock.patch.object(self.client, "_comic_download_frame_image", return_value="frame.local"), \
+                    mock.patch.object(self.client, "_prepare_comic_colored_pencil_references", lambda _job, _segment: _segment), \
+                    mock.patch.object(self.client, "_save_replacement_job", lambda _value: None), \
+                    mock.patch.object(self.client, "_breakdown_source_validation", return_value={"ok": True}), \
+                    mock.patch.object(self.client, "_replacement_timing_snapshot", return_value={
+                        "stage": "comic_generate_flowchart",
+                        "stageLabel": "comic_generate_flowchart",
+                        "segmentElapsedSec": 0,
+                        "segmentEtaSec": 0,
+                    }):
+                result = pipeline.execute(job, selected_segments=job["segments"])
+
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(RecoveringFrameComicAdapter.submit_image_calls, 1)
+        self.assertEqual(
+            RecoveringFrameComicAdapter.waited,
+            ["start-task", "end-task", "video-task"],
+        )
+        self.assertEqual(segment["status"], "done")
+        self.assertEqual(segment["comicRecoveryStatus"], "recovered")
+        self.assertEqual(segment["requestedModel"], "seedance-requested")
+        self.assertEqual(segment["actualModel"], "kling-fallback")
+        self.assertEqual(segment["modelFallbackReason"], "provider-rejected")
+        self.assertTrue(segment["modelFallbackApplied"])
+        self.assertEqual([call[0] for call in charges], [0.031, 0.032, 0.42])
+
+    def test_settle_actual_cost_is_idempotent_and_ignores_submit_estimate(self):
+        charge_calls = []
+        helper = types.SimpleNamespace(
+            charge=lambda amount, **kwargs: charge_calls.append((amount, dict(kwargs))) or (True, 88.0, None),
+            json_log=lambda *_args, **_kwargs: None,
+            _CLIENT_JSON_LOGGER=object(),
+            COMIC_VIDEO_GENERATION_CAP="comic_video_generation",
+            COMIC_KEYFRAME_IMAGE_CAP="comic_keyframe_image",
+        )
+        job = {"id": "job-billing", "comicProjectId": 88, "_pipelineHelpers": helper}
+        segment = {"index": 1}
+        payload = {
+            "task_id": "provider-1",
+            "cost": 0.42,
+            "estimated_cost": 9.99,
+            "actual_model": "vidu/viduq3-mix_reference2video",
+        }
+
+        first = self.pipeline_module.settle_actual_cost(job, segment, payload, "video", "provider-1")
+        second = self.pipeline_module.settle_actual_cost(job, segment, payload, "video", "provider-1")
+
+        self.assertEqual(first["ref"], second["ref"])
+        self.assertEqual(first["actualAmount"], 0.42)
+        self.assertEqual(second["actualAmount"], 0.42)
+        self.assertEqual(len(charge_calls), 1)
+        self.assertEqual(charge_calls[0][0], 0.42)
+        self.assertEqual(charge_calls[0][1]["capability"], "comic_video_generation")
+        self.assertNotIn("estimated_cost", charge_calls[0][1]["meta"])
+
+    def test_settle_actual_cost_returns_awaiting_actual_cost_and_keeps_refs_distinct(self):
+        charge_calls = []
+        helper = types.SimpleNamespace(
+            charge=lambda amount, **kwargs: charge_calls.append((amount, dict(kwargs))) or (True, 88.0, None),
+            json_log=lambda *_args, **_kwargs: None,
+            _CLIENT_JSON_LOGGER=object(),
+            COMIC_VIDEO_GENERATION_CAP="comic_video_generation",
+            COMIC_KEYFRAME_IMAGE_CAP="comic_keyframe_image",
+        )
+        job = {"id": "job-awaiting", "comicProjectId": 301, "_pipelineHelpers": helper}
+        segment = {"index": 2}
+
+        awaiting = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "video-task", "estimated_cost": 12.34, "actual_model": "viduq3-cankaosheng"},
+            "video",
+            "video-task",
+        )
+        start = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "frame-start", "cost": 0.11, "actual_model": "gpt-image-2"},
+            "keyframe",
+            "frame-start",
+            frame_index=1,
+        )
+        end = self.pipeline_module.settle_actual_cost(
+            job,
+            segment,
+            {"task_id": "frame-end", "cost": 0.12, "actual_model": "gpt-image-2"},
+            "keyframe",
+            "frame-end",
+            frame_index=2,
+        )
+
+        self.assertEqual(awaiting["status"], "awaiting_actual_cost")
+        self.assertEqual(awaiting["taskId"], "video-task")
+        self.assertIn(":frame:1:actual", start["ref"])
+        self.assertIn(":frame:2:actual", end["ref"])
+        self.assertNotEqual(start["ref"], end["ref"])
+        self.assertNotEqual(start["ref"], awaiting.get("ref", ""))
+        self.assertEqual([call[0] for call in charge_calls], [0.11, 0.12])
+
     def test_talking_segment_reuses_existing_tts_and_kling_digital_human(self):
         segment = {"index": 1, "segmentType": "talking", "script": "新的产品口播", "keyframeUrl": "https://x/key.png"}
         job = {"voiceId": "Zephyr", "digitalHumanMode": "std", "sceneImageUrl": "https://x/scene.png"}

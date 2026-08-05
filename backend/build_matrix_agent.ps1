@@ -103,7 +103,11 @@ Write-Host "  $Root\dist\$Name\$Name.exe"
 Write-Host "Verify signing in the frozen bundle by running:"
 Write-Host "  $Root\dist\SignSelfTest\SignSelfTest.exe   (expect FROZEN_SIGNER_OK)"
 Write-Host "[7/7] Building installer (Inno Setup)..."
-$iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+$iscc = @(
+  "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+  "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+  "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($iscc) {
   & $iscc "installer\MatrixShipAgent.iss"
   $setup = Join-Path $Root "dist\installer\MatrixShipAgent-Setup.exe"
@@ -113,6 +117,7 @@ if ($iscc) {
 } else {
   Write-Host "Inno Setup not found. Install once (winget install JRSoftware.InnoSetup), then:"
   Write-Host "  & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer\MatrixShipAgent.iss"
+  Write-Host "  or & '%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe' installer\MatrixShipAgent.iss"
 }
 
 Write-Host ""

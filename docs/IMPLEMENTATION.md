@@ -1,4 +1,17 @@
-﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+﻿## 2026-08-04 Comic tool Windows client download card
+- `tools/aicanvas_remote/server_current.py#L359-L374`: `_agent_installer_candidates()` and `_resolve_agent_installer_path()` resolve the public Windows installer from `AICANVAS_AGENT_INSTALLER`, `MATRIXSHIP_AGENT_INSTALLER`, the remote AI Canvas root, or the local project installer output.
+- `tools/aicanvas_remote/server_current.py#L376-L450`: `_comic_tool_download_card_script()` and `_inject_comic_tool_download_card_html()` inject an idempotent `yunling-download-card-injector` script into `/comic-tool`; the script appends a standalone Windows client card that links to `/MatrixShipAgent-Setup.exe`.
+- `tools/aicanvas_remote/server_current.py#L392-L416`: append-fix removes cloning/reordering of existing cards. The script now finds the common tool container for `漫剧Agent` and `漫剧画布`, then appends a standalone Windows card; it no longer uses `cloneNode` or inserts immediately after Agent.
+- `tools/aicanvas_remote/server_current.py#L422-L422`: Windows card copy positions the product as `云灵星图 AI爆款复刻平台 Windows 桌面客户端` for the local executor, account matrix, and material tasks; it explicitly says the download is the client installer and does not include comic project files.
+- `tools/aicanvas_remote/server_current.py#L25793-L25798`: `Handler.send_head()` injects the download-card script into `platform-index.html` only for `/comic-tool` and `/comic-tool/agent` shell responses.
+- `tools/aicanvas_remote/server_current.py#L25867-L25883`: `Handler.serve_agent_installer()` serves the installer with attachment headers and supports HEAD without streaming the body.
+- `tools/aicanvas_remote/server_current.py#L25970-L25971` and `tools/aicanvas_remote/server_current.py#L25988-L25989`: `do_HEAD()` and `do_GET()` expose `/MatrixShipAgent-Setup.exe` before other routing.
+- `tests/test_minimax_aicanvas_remote.py#L292-L372`: `AiCanvasComicToolDownloadEntryTest` covers 4th-card script content, idempotent HTML injection, environment path resolution, unauthenticated route ordering, GET serving, and attachment headers.
+- `tests/test_minimax_aicanvas_remote.py#L306-L311`: regression coverage prevents the download-card script from cloning or reordering existing tool cards.
+- `tests/test_minimax_aicanvas_remote.py#L297-L305`: card-copy coverage requires `AI爆款复刻平台`, `下载的是客户端安装包`, and `不包含漫剧项目文件`.
+- Verification and rollback: focused RED/GREEN was run for `tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest`; final verification passed the focused test, full `tests.test_minimax_aicanvas_remote`, and `py_compile` for the touched remote mirror/test. Remote runtime was deployed to `/root/AI-CanvasPro/server.py`, installer copied to `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`, and `ai-canvas.service` restarted active; no OpenAPI, database, Docker, secret, or `migration.sql` impact. Roll back `tools/aicanvas_remote/server_current.py`, `tests/test_minimax_aicanvas_remote.py`, `CHANGELOG.md`, `docs/DEPLOYMENT.md`, `docs/TROUBLESHOOTING.md`, and this entry, plus restore `/root/AI-CanvasPro/server.py.bak.download-card-test-20260804_094216` to remote `server.py` and restart `ai-canvas.service`.
+
+## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
 - `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
 - `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。
@@ -872,12 +885,17 @@
 - 验证：先运行新增定向用例确认旧实现失败；修复后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_marks_xhs_account_violation_as_high_risk tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_applies_persisted_xhs_task_risk_to_same_platform -v`，2/2 通过。完整回归与编译检查见本次最终回复。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复旧逻辑；如需清理本地风险缓存，可删除运行数据目录下的 `account_risk_events.json`。本次只涉及本地客户端，不涉及 Web 端、中心服、OpenAPI、数据库迁移或 `migration.sql`。
 
-## 2026-07-28 登录首页隐藏注册入口
-- `backend/matrix_native_client.py#L21258-L21279`：登录卡标题改为“登录 / 加入企业”，顶部切换只把 `登录` 和 `加入企业` 加入按钮行；`self.tab_reg` 继续创建并 `setVisible(False)`，保留内部注册兼容逻辑但不在首页暴露。
-- `tests/test_native_enterprise_invite.py#L64-L72`：新增回归测试，锁定首页不再执行 `tabrow.addWidget(self.tab_reg, 1)`，并确认登录与加入企业入口仍保留。
-- `tests/test_login_centered_layout.py#L37-L37`：同步登录卡标题断言，避免旧“登录 / 注册”文案回归。
-- 验证：先运行新增测试确认旧实现失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`，19/19 通过；运行 `.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_native_enterprise_invite.py tests\test_login_centered_layout.py tests\test_auth_login_modes.py` 通过；Qt 冒烟输出 `LOGIN_HOME_TABS True False True`。
-- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_enterprise_invite.py`、`tests/test_login_centered_layout.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复首页显示注册按钮；本次不涉及中心服、OpenAPI、数据库迁移或 `migration.sql`。
+## 2026-08-04 客户端默认连接公网中心服
+- `backend/matrix_native_client.py#L56-L66`：`CENTRAL` 保持优先读取 `MATRIX_CENTRAL` / `CENTRAL_URL`，无环境变量时默认使用 `http://127.0.0.1:9080`（与出厂 `start-visible-client.bat` 自启的本地中心服一致）；中心服地址使用独立校验 `validate_central_service_url`，允许 HTTP 中心服，但不放宽远程素材 URL 的 HTTPS 校验。
+- `backend/.env.example#L2-L2`、`docs/DEPLOYMENT.md#L310-L310`：示例配置和部署环境变量表将中心服默认对齐本地 `http://127.0.0.1:9080`；连接远程中心服时显式覆盖。
+- `tests/test_video_breakdown.py#L42-L58`：RED/GREEN 覆盖默认公网中心服和本地开发覆盖能力。
+- 验证与影响：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_defaults_to_public_production_server tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_env_override_still_supports_local_development`。本次只影响本地客户端默认配置、测试和文档；不改变中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。生效需要重新打包并替换服务器安装包；回滚恢复默认值和上一版安装包。
+
+## 2026-08-04 登录页只保留漫剧账号登录
+- `backend/matrix_native_client.py#L30324-L30343`：登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”；`self.tab_login/self.tab_reg/self.tab_invite` 保留为隐藏兼容对象，但不再创建 `tabrow` 或加入登录页布局。
+- `backend/matrix_native_client.py#L5831-L5831`、`backend/matrix_native_client.py#L6004-L6004`：企业中心“邀请成员”的复制弹窗和提示文案不再引导用户到登录页选择“加入企业”，改为建议管理员用“添加成员”或“重置密码”交付成员账号。
+- `tests/test_native_enterprise_invite.py#L42-L84`、`tests/test_login_centered_layout.py#L26-L38`：覆盖登录页隐藏加入企业入口、企业邀请文案不再指向登录页，以及登录卡营销布局仍在卡片外。
+- 验证与影响：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes` 和 `.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py`。本次只影响本地客户端 UI 和测试文档，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；重启本地客户端或重新打包安装包后生效。回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧入口。
 
 ## 2026-07-28 同款替换漫剧画面描述与口播分离
 - `backend/matrix_native_client.py#L8466-L8496`：`_comic_visual_prompt_text()` 从旧 LK888 长提示词中剔除 `源视频锁定`、`原片拆解证据`、`字幕安全`、`人物参考图只用于`、`上传产品必须`、`口播对应`、`OCR/转写` 等控制语，去掉 `画面/镜头/动作/产品/场景` 前缀后只保留短视觉描述。
@@ -1009,9 +1027,9 @@
 - 回滚：回滚 `backend/platform_adapters.py`、`backend/api_server.py`、`backend/xhs_note_replacement.py`、`backend/matrix_native_client.py`、`tests/test_api_download_contract.py`、`tests/test_xhs_note_replacement.py`、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/ARCHITECTURE.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 和本条实现索引；不涉及数据库迁移，`migration.sql` 保持 no-op。
 
 ## 2026-07-27 Web 交付面移除
-- `tests/test_web_surface_removed.py#L8-L43`：锁定产品 Web 文件缺席、活动 HTML 缺席、中心服不再服务 `/admin` 或 `frontend/downloads` 安装包路径，同时保留 `/MatrixShipAgent-Setup.exe` 和 `MATRIXSHIP_AGENT_INSTALLER`。
+- `tests/test_web_surface_removed.py#L8-L48`：锁定产品 Web 文件缺席、活动 HTML 缺席（扫描排除 `.worktrees`、`build`、`dist` 等构建/嵌套 worktree 产物）、中心服不再服务 `/admin` 或 `frontend/downloads` 安装包路径，同时保留 `/MatrixShipAgent-Setup.exe` 和 `MATRIXSHIP_AGENT_INSTALLER`。
 - `backend/central_server.py#L13462-L13568`：安装包下载只保留环境变量、服务器固定路径和后端目录候选；`/admin` HTML 路由已移除，中心服继续提供 JSON API 与安装包下载。
-- `backend/build_matrix_agent.ps1#L109-L113`、`backend/installer/MatrixShipAgent.iss#L21-L22`：Windows 原生客户端安装包输出到 `backend\dist\installer\MatrixShipAgent-Setup.exe`，不再复制到 Web 下载目录。
+- `backend/build_matrix_agent.ps1#L105-L120`、`backend/installer/MatrixShipAgent.iss#L21-L22`：Windows 原生客户端安装包输出到 `backend\dist\installer\MatrixShipAgent-Setup.exe`，不再复制到 Web 下载目录；打包脚本同时查找 Program Files 和 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`，支持用户级 Inno Setup 安装。
 - `backend/agent_launcher.py#L45-L79`、`backend/matrix_native_client.py#L8-L8`、`backend/matrix_native_client.py#L5459-L5459`：运行时提示和模块注释改为原生客户端/中心服/本地执行引擎表述，不再把产品入口描述成网页前端。
 - 回滚：校验 `backups/web-removal-20260727/archive.sha256` 中的 `fbf0989fef5727f461d6424fa24eacea4385d73e078528266997af403b794097` 后，从 `web-surface.zip` 恢复被删除的 Web 文件；若新版本错误率超过 1%，回滚本阶段提交并恢复上一稳定安装包。
 
@@ -2623,5 +2641,30 @@
 ## 2026-08-03 公开下载页 `/download`
 - `backend/central_server.py#L15192-L15547`：内置“云灵星图 AI 爆款复刻平台 Windows 客户端下载”页面 HTML 和 `text/html; charset=utf-8` 响应头，下载按钮为禁用状态，不链接安装包。
 - `backend/central_server.py#L15658-L15659`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
-- `tests/test_web_surface_removed.py#L45-L90`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
+- `tests/test_web_surface_removed.py#L50-L92`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
 - 验证与影响：`tests.test_web_surface_removed.WebSurfaceRemovedTest` 先红后绿；本次无 OpenAPI JSON Schema、数据库、Docker、环境变量或 `migration.sql` 影响。中心服重启后生效，回滚上述文件和文档即可移除页面。
+## 2026-08-04 Local replacement web MVP
+- `backend/platform_features.py#L15-L44`: adds the reversible `MATRIX_REPLACEMENT_WEB_ENABLED` feature gate, defaulting off unless the environment value is truthy.
+- `backend/matrix_native_client.py#L683-L710`: writes short-lived native-to-web video handoffs through `create_replacement_web_handoff()`, then builds `/replacement#token=...&user=...&handoffId=...` from the local executor token plus redacted `userId/displayName/orgId/account/appRole/roleScope`, never from the center user session, phone, Cookie, platform auth, or local video path.
+- `backend/matrix_native_client.py#L11719-L11745` and `backend/matrix_native_client.py#L14406-L14416`: add "打开网页版替换" buttons to the native image-note replacement and same-style video replacement pages. The image-note page opens the plain local page; the video page uses the handoff-aware method.
+- `backend/matrix_native_client.py#L14947-L14959`: `VideoReplacementPage.open_replacement_web()` requires an already-loaded breakdown source and readable local source video before writing the `rwh_...` handoff and opening the web page.
+- `backend/replacement_web.py#L40-L392`: renders the local `/replacement` HTML page with video and image-note tabs, hash/input token handling, `handoffId` session storage, handoff loading from `/api/replacement/video/handoff`, redacted user context display, customer-facing 401/validation/network/non-JSON error text, Phase 0 video success copy, visual note preview slots, authenticated blob thumbnail loading, copy-candidate radio selection, editable title/body/tags fields, and a note save-draft button that submits `selectedCopyIndex` plus `copyOverride` to `/api/replacement/note/save-draft`.
+- `backend/replacement_web.py#L396-L565`: builds safe preview URLs, validates source URLs, rejects userinfo credentials, stores only host/pathHash, records file metadata, resolves uploaded note thumbnails only inside `replacement_web_uploads/note/<jobId>/`, and redacts Cookie/Token/Authorization/Bearer/data URL/signed URL/base64-like fragments from note inputs and filenames.
+- `backend/replacement_web.py#L567-L719`: creates, loads, expires, and redacts `rwh_...` video handoff JSON. `handoff_response()` returns source host/pathHash, `sourceVideo.available/pathHash`, analysis duration/transcript counts, and user context without exposing `sourceVideoPath` or source URL query strings.
+- `backend/replacement_web.py#L721-L809`: returns redacted job responses and creates video `rvw_...` jobs, optionally binding them to a valid handoff through `sourceContext`; neither path calls LK888, remote AI Canvas, publishing, center sync, or billing.
+- `backend/replacement_web.py#L811-L875`: creates `xnr_...` note preview state by reusing the existing image-note template/preview logic and compatible `xhs_note_replacements/<jobId>/replacement_job.json`.
+- `backend/api_server.py#L1038-L1123`: extracts `save_xhs_note_draft_payload()` so the old XHS note draft endpoint and new `/replacement` endpoint share copy override, image validation, local material copy, library insert, and compatible job persistence.
+- `backend/api_server.py#L5343-L5350`: adds `html_response()` for the local HTML page while preserving CORS and no-store headers.
+- `backend/api_server.py#L7185-L7207`: routes multipart `/api/replacement/video/start` and `/api/replacement/note/start` to local job factories, checks the feature gate before reading multipart bodies, and records structured info logs.
+- `backend/api_server.py#L7286-L7334`: routes `GET /replacement`, authenticated video/note job status reads, authenticated `/api/replacement/video/handoff` handoff reads, and authenticated `/api/replacement/file` thumbnail reads with disabled, missing-job, bad-path, and read-failure JSON errors.
+- `backend/api_server.py#L7466-L7496`: routes `/api/replacement/note/save-draft`, reuses the shared XHS draft save payload helper, replaces the internal XHS job in the HTTP response with the redacted web job response, marks the web job as `draft`, and records redacted `replacement_note_draft_saved` structured logs.
+- `backend/api_server.py#L7558-L7566`: keeps `/api/xhs-note-replacement/save-draft` compatible while delegating to the shared draft save helper.
+- `docs/openapi.yaml#L145-L357`: documents `/replacement` and the seven local `/api/replacement/*` routes, including video handoff, disabled, validation, thumbnail, and save-draft responses.
+- `docs/openapi.yaml#L2320-L2470`: documents replacement start, video handoff, save-draft, and job response schemas without secrets or full private URLs, including optional `handoffId`, `sourceContext`, object-array `copyCandidates`, `files[].previewUrl`, and note `slotMappings[].hasFile`.
+- `docs/API_REFERENCE.md#L829-L918`: documents runtime unit, feature flag, video handoff, request examples, authenticated thumbnail loading, visual preview editing, preview/save-draft boundary, token handling, observability, and rollback.
+- `tests/test_replacement_web_mvp.py#L49-L730`: covers feature gate behavior, page HTML, customer auth/Phase 0 status copy, native launch URL and handoff redaction, handoff response/job binding, note preview editing controls, job validation, upload persistence, safe thumbnail URLs/file serving, compatible XHS preview job creation, local draft saving without local path exposure, secret redaction, route wiring, disabled/missing responses, token-auth boundaries, disabled multipart reads, and docs contracts.
+- Verification and rollback: focused replacement tests, OpenAPI contract tests, adjacent XHS note tests, HTTP smoke, `py_compile`, and `git diff --check` are the release gate. Rollback first sets `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restarts the local executor; code rollback restores the files named in CHANGELOG. No database schema/data migration, Docker image change, LK888 call, remote AI Canvas deploy, publish action, center sync, or billing side effect is introduced.
+## 2026-08-04 Installer directory selection
+- `backend/installer/MatrixShipAgent.iss#L18-L25`: the installer keeps the default user-writable `{localappdata}\MatrixShipAgent\app` location and `PrivilegesRequired=lowest`, while `DisableDirPage=no` shows the Inno Setup directory page so users can choose another install path.
+- `tests/test_web_surface_removed.py#L102-L108`: regression coverage locks the default directory, visible directory page, and non-admin install permission.
+- Verification and rollback: RED/GREEN was run for `tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory` and `test_build_stays_native_only`; full relevant verification should include `tests.test_web_surface_removed` and `py_compile` for the touched test. The change requires rebuilding `backend\dist\installer\MatrixShipAgent-Setup.exe` before release. Roll back `backend/installer/MatrixShipAgent.iss`, `backend/build_matrix_agent.ps1`, `tests/test_web_surface_removed.py`, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`, and this entry; no center API, OpenAPI, database, Docker, secrets, environment variables, or `migration.sql` impact.

@@ -23,3 +23,14 @@ COMMIT;
 -- central pending-task state and remote AI Canvas JSON task/project state.
 -- Runtime rollback restores the prior remote server.py backup and removes the
 -- local H3 adapter/routes if needed.
+-- Release: 2026-08-04 local replacement web MVP.
+-- Database schema/data changes: none. Replacement web MVP jobs are stored as
+-- local JSON under the local executor data directory; image-note save-draft
+-- writes through the existing local material library JSON/files only.
+-- Runtime rollback switch: MATRIX_REPLACEMENT_WEB_ENABLED=0 and restart the
+-- local executor. Authenticated thumbnail reads use the same local JSON/upload
+-- directories and require no SQL migration.
+-- Release: 2026-08-04 local replacement web video handoff.
+-- Database schema/data changes: none. Native-to-web video handoffs are short-lived
+-- local JSON files under replacement_web_handoffs and are feature-gated with the
+-- existing MATRIX_REPLACEMENT_WEB_ENABLED switch.
