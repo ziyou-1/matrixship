@@ -7183,17 +7183,25 @@ class Handler(BaseHTTPRequestHandler):
         json_response(self, {'ok': True})
 
     def handle_multipart(self, path):
-        if path in ('/api/replacement/video/start', '/api/replacement/note/start'):
+        if path in ('/api/replacement/video/start', '/api/replacement/video/prepare', '/api/replacement/note/start'):
             if not replacement_web_enabled():
                 return json_response(self, replacement_web.replacement_disabled_payload(), 404)
             fields, files = parse_multipart(self)
-            if path == '/api/replacement/video/start':
+            if path == '/api/replacement/video/prepare':
+                result = replacement_web.prepare_video_job(DATA_DIR, fields, files)
+                task_type = 'video'
+                ok_status = 202
+            elif path == '/api/replacement/video/start':
+                # Compat alias: creates a queued Phase 0 skeleton only; it can never
+                # bypass plan confirmation because it does not execute generation.
                 result = replacement_web.start_video_job(DATA_DIR, fields, files)
                 task_type = 'video'
+                ok_status = 200
             else:
                 result = replacement_web.start_note_job(DATA_DIR, fields, files)
                 task_type = 'note'
-            status = 200 if result.get('ok') else 400
+                ok_status = 200
+            status = ok_status if result.get('ok') else (result.get('statusCode') or 400)
             json_log(
                 logger,
                 'replacement_web_job_started',
@@ -7283,6 +7291,28 @@ class Handler(BaseHTTPRequestHandler):
             raw_log = json_log(logger, 'replacement_file_read_failed', exc=e, taskType=task_type, jobId=job_id)
             return json_response(self, {'ok': False, 'error': 'replacement_file_read_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
 
+    def serve_replacement_video_download(self, qs):
+        job_id = (qs.get('jobId') or qs.get('id') or [''])[0]
+        filename = (qs.get('filename') or [''])[0]
+        fp, error, status = replacement_web.final_media_path(DATA_DIR, job_id, filename)
+        if error:
+            return json_response(self, {'ok': False, 'error': error}, status)
+        ctype = mimetypes.guess_type(fp)[0] or 'application/octet-stream'
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Disposition', 'attachment; filename="%s"' % os.path.basename(fp))
+            self.send_header('Cache-Control', 'no-store')
+            send_cors_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_download_failed', exc=e, jobId=job_id)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_download_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -7312,6 +7342,8 @@ class Handler(BaseHTTPRequestHandler):
             job = replacement_web.load_job(DATA_DIR, task_type, job_id)
             if not job:
                 return json_response(self, {'ok': False, 'error': 'replacement_job_not_found'}, 404)
+            if task_type == 'video':
+                return json_response(self, replacement_web.video_job_response(job))
             return json_response(self, replacement_web.job_response(job))
         if path == '/api/replacement/video/handoff':
             if not replacement_web_enabled():
@@ -7332,6 +7364,10 @@ class Handler(BaseHTTPRequestHandler):
             if not replacement_web_enabled():
                 return json_response(self, replacement_web.replacement_disabled_payload(), 404)
             return self.serve_replacement_file(qs)
+        if path == '/api/replacement/video/download':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return self.serve_replacement_video_download(qs)
         if path in ('/api/health', '/api/agent/status'):
             authorized = request_authorized(self)
             if not authorized:
@@ -7478,6 +7514,37 @@ class Handler(BaseHTTPRequestHandler):
         if payload_uses_xhs(body) and not xhs_enabled():
             return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
         try:
+            if path in (
+                    '/api/replacement/video/execute',
+                    '/api/replacement/video/retry',
+                    '/api/replacement/video/concat',
+                    '/api/replacement/video/cancel'):
+                if not replacement_web_enabled():
+                    return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+                job_id = str(body.get('jobId') or body.get('id') or '')
+                if path == '/api/replacement/video/execute':
+                    overrides = body.get('overrides') if isinstance(body.get('overrides'), dict) else {}
+                    result = replacement_web.execute_video_job(DATA_DIR, job_id, overrides)
+                elif path == '/api/replacement/video/retry':
+                    segment_indices = body.get('segmentIndices') or body.get('segment_indices') or []
+                    result = replacement_web.retry_video_job(DATA_DIR, job_id, segment_indices)
+                elif path == '/api/replacement/video/concat':
+                    result = replacement_web.concat_video_job(DATA_DIR, job_id)
+                else:
+                    result = replacement_web.cancel_video_job(DATA_DIR, job_id)
+                status = 202 if result.get('ok') else (result.get('statusCode') or 400)
+                json_log(
+                    logger,
+                    'replacement_video_lifecycle',
+                    level='info',
+                    endpoint=path,
+                    jobId=job_id,
+                    status=result.get('status') or '',
+                    ok=bool(result.get('ok')),
+                    error=result.get('error') or '',
+                )
+                return json_response(self, result, status)
+
             if path == '/api/replacement/note/save-draft':
                 if not replacement_web_enabled():
                     return json_response(self, replacement_web.replacement_disabled_payload(), 404)

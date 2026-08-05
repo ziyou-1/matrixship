@@ -93,6 +93,7 @@ def replacement_page_html():
     <button type="button" data-tab="note">\u56fe\u6587\u66ff\u6362</button>
   </div>
   <section id="video-panel">
+    <div id="video-source-mode" class="auth-context">\u6765\u6e90\u6a21\u5f0f\uff1a\u76f4\u63a5\u94fe\u63a5</div>
     <form id="video-form">
       <label>\u6765\u6e90\u89c6\u9891\u94fe\u63a5</label><input name="sourceUrl" required aria-label="\u6765\u6e90\u89c6\u9891\u94fe\u63a5\u793a\u4f8b https://example.com/video">
       <div class="grid">
@@ -102,8 +103,19 @@ def replacement_page_html():
       </div>
       <label>\u53e3\u64ad\u7a3f</label><textarea name="script"></textarea>
       <label>\u5356\u70b9/\u98ce\u683c\u8981\u6c42</label><textarea name="sellingPoints"></textarea>
-      <div class="actions"><button class="primary">\u5f00\u59cb\u66ff\u6362</button></div>
+      <div class="actions"><button class="primary">\u51c6\u5907\u66ff\u6362\u4efb\u52a1</button></div>
     </form>
+    <div id="video-plan" hidden>
+      <h2 style="font-size:15px;margin:16px 0 8px;">\u955c\u5934\u8ba1\u5212</h2>
+      <div id="video-segments" class="slot-list"></div>
+      <div class="actions">
+        <button class="primary" type="button" id="video-execute">\u5f00\u59cb\u751f\u6210</button>
+        <button type="button" id="video-retry" class="primary" hidden>\u91cd\u8bd5\u5931\u8d25\u7247\u6bb5</button>
+        <button type="button" id="video-cancel" hidden>\u53d6\u6d88\u4efb\u52a1</button>
+        <button type="button" id="video-concat" class="primary" hidden>\u5408\u6210\u6210\u7247</button>
+        <a id="video-download" href="#" hidden>\u4e0b\u8f7d\u6210\u7247</a>
+      </div>
+    </div>
     <pre id="video-status">{}</pre>
   </section>
   <section id="note-panel" hidden>
@@ -149,6 +161,10 @@ document.querySelectorAll('.tabs button').forEach(btn => btn.addEventListener('c
 const TOKEN_KEY = 'matrixReplacementAgentToken';
 const USER_KEY = 'matrixReplacementUserContext';
 const HANDOFF_KEY = 'matrixReplacementVideoHandoffId';
+const JOB_KEY = 'matrixReplacementVideoJobId';
+const VIDEO_PREP_POLL_MS = 1000;
+const VIDEO_GEN_POLL_MS = 2000;
+let videoPollTimer = null;
 const tokenInput = document.getElementById('agent-token');
 const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
 const hashToken = hashParams.get('token') || hashParams.get('agentToken') || '';
@@ -293,6 +309,8 @@ async function loadVideoHandoff() {
     status.textContent = '\u5df2\u63a5\u5165\u672c\u5730\u5206\u89e3\u7ed3\u679c\uff0c\u53ef\u4e0a\u4f20\u66ff\u6362\u7d20\u6750\u540e\u521b\u5efa\u66ff\u6362\u4efb\u52a1\u3002\n\n' + JSON.stringify(json, null, 2);
     const sourceInput = document.querySelector('#video-form input[name="sourceUrl"]');
     if (sourceInput) sourceInput.required = false;
+    const mode = document.getElementById('video-source-mode');
+    if (mode) mode.textContent = '\u6765\u6e90\u6a21\u5f0f\uff1a\u672c\u5730\u5206\u89e3\u4ea4\u63a5 (' + handoffId + ')';
   } catch (error) {
     status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
   }
@@ -318,9 +336,6 @@ function formatReplacementError(payload, statusCode = 0) {
   return error ? `\u66ff\u6362\u63d0\u4ea4\u5931\u8d25\uff1a${error}` : '\u66ff\u6362\u63d0\u4ea4\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
 }
 function formatReplacementSuccess(formId, payload) {
-  if (formId === 'video-form') {
-    return '\u672c\u5730\u89c6\u9891\u66ff\u6362\u4efb\u52a1\u5df2\u521b\u5efa\u3002\u5f53\u524d\u5ba2\u6237\u9884\u89c8\u7248\u6682\u4e0d\u6267\u884c\u771f\u5b9e\u89c6\u9891\u751f\u6210\u3002\n\n' + JSON.stringify(payload, null, 2);
-  }
   return JSON.stringify(payload, null, 2);
 }
 async function submitForm(formId, url, statusId) {
@@ -384,10 +399,191 @@ async function saveNoteDraft() {
     button.disabled = false;
   }
 }
-document.getElementById('video-form').addEventListener('submit', e => { e.preventDefault(); submitForm('video-form', '/api/replacement/video/start', 'video-status'); });
+function currentVideoJobId() {
+  return (sessionStorage.getItem(JOB_KEY) || '').trim();
+}
+function setVideoJobId(jobId) {
+  if (jobId) sessionStorage.setItem(JOB_KEY, jobId);
+  else sessionStorage.removeItem(JOB_KEY);
+}
+function videoStatusMessage(job) {
+  const map = {
+    planned: '镜头计划已生成，可编辑后点击开始生成。',
+    running: '正在生成片段，请稍候…',
+    awaiting_review: '片段已通过自动检查，请核对后合成成片。',
+    partial: '有片段失败，可重试失败片段。',
+    completed: '成片已合成，可下载。',
+    done: '成片已合成，可下载。',
+    failed: '任务失败，请检查来源或稍后重试。',
+    cancelled: '任务已取消。',
+    canceled: '任务已取消。'
+  };
+  return map[job && job.status] || (job && job.status) || '';
+}
+function videoHasFailedSegments(job) {
+  return (job && Array.isArray(job.segments) ? job.segments : []).some(s => s && s.status === 'failed');
+}
+function renderVideoSegments(job) {
+  const holder = document.getElementById('video-segments');
+  const segments = job && Array.isArray(job.segments) ? job.segments : [];
+  holder.innerHTML = '';
+  segments.forEach(segment => {
+    const title = '#' + escapeHtml(segment.index) + ' ' + escapeHtml(segment.status || 'planned');
+    const range = escapeHtml((segment.start || 0) + 's - ' + (segment.end || 0) + 's');
+    const note = escapeHtml(segment.stageLabel || segment.stage || '');
+    const err = segment.error ? '<div class="meta">' + escapeHtml(segment.error) + '</div>' : '';
+    holder.insertAdjacentHTML('beforeend',
+      '<div class="slot-item"><strong>' + title + '</strong>' +
+      '<div class="meta">' + range + '</div>' +
+      '<div class="meta">' + note + '</div>' + err +
+      '<input data-segment-index="' + escapeHtml(segment.index) + '" placeholder="可补充本段要求"></div>');
+  });
+}
+function collectVideoPlanOverrides() {
+  const inputs = Array.from(document.querySelectorAll('#video-segments input[data-segment-index]'));
+  const segments = inputs
+    .map(input => ({index: Number(input.dataset.segmentIndex), note: (input.value || '').trim()}))
+    .filter(item => item.note);
+  return segments.length ? {segments} : {};
+}
+function renderVideoJob(job) {
+  const plan = document.getElementById('video-plan');
+  const status = document.getElementById('video-status');
+  if (!job || !job.jobId) { plan.hidden = true; return; }
+  plan.hidden = false;
+  renderVideoSegments(job);
+  const failed = videoHasFailedSegments(job);
+  const running = job.status === 'running';
+  document.getElementById('video-execute').hidden = !(job.status === 'planned');
+  document.getElementById('video-retry').hidden = !(job.status === 'partial' && failed);
+  document.getElementById('video-cancel').hidden = !(job.status === 'planned' || running);
+  document.getElementById('video-concat').hidden = !(job.status === 'awaiting_review');
+  const download = document.getElementById('video-download');
+  const canDownload = !!(job.download && job.download.available);
+  download.hidden = !canDownload;
+  download.dataset.filename = canDownload ? (job.download.filename || '') : '';
+  status.textContent = videoStatusMessage(job) + '\n\n' + JSON.stringify(job, null, 2);
+}
+async function pollVideoJob() {
+  const jobId = currentVideoJobId();
+  if (!jobId || !authHeaders()['X-Matrix-Agent-Token']) return;
+  if (videoPollTimer) { clearTimeout(videoPollTimer); videoPollTimer = null; }
+  try {
+    const res = await fetch('/api/replacement/video/job?jobId=' + encodeURIComponent(jobId), {headers: authHeaders()});
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) {
+      document.getElementById('video-status').textContent = formatReplacementError(json, res.status);
+      return;
+    }
+    renderVideoJob(json);
+    const active = json.status === 'planned' || json.status === 'running';
+    if (active) {
+      const delay = json.status === 'running' ? VIDEO_GEN_POLL_MS : VIDEO_PREP_POLL_MS;
+      videoPollTimer = setTimeout(pollVideoJob, delay);
+    }
+  } catch (error) {
+    document.getElementById('video-status').textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
+  }
+}
+async function prepareVideoJob() {
+  const form = document.getElementById('video-form');
+  const status = document.getElementById('video-status');
+  const button = form.querySelector('button[type="submit"], button:not([type])');
+  if (!authHeaders()['X-Matrix-Agent-Token']) {
+    status.textContent = formatReplacementError({error: 'agent_token_required'}, 401);
+    return;
+  }
+  status.textContent = '准备中...';
+  if (button) button.disabled = true;
+  try {
+    const data = new FormData(form);
+    if (currentVideoHandoffId()) data.set('handoffId', currentVideoHandoffId());
+    const res = await fetch('/api/replacement/video/prepare', {method: 'POST', body: data, headers: authHeaders()});
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) {
+      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      return;
+    }
+    setVideoJobId(json.jobId);
+    status.textContent = '本地视频替换任务已创建。\n\n' + JSON.stringify(json, null, 2);
+    renderVideoJob(json);
+    pollVideoJob();
+  } catch (error) {
+    status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+async function videoLifecycleCall(url, payload, activeMessage) {
+  const jobId = currentVideoJobId();
+  const status = document.getElementById('video-status');
+  if (!jobId) return;
+  if (!authHeaders()['X-Matrix-Agent-Token']) {
+    status.textContent = formatReplacementError({error: 'agent_token_required'}, 401);
+    return;
+  }
+  status.textContent = activeMessage || '处理中...';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify(Object.assign({jobId}, payload || {}))
+    });
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) {
+      status.textContent = formatReplacementError(json, res.status) + '\n\n' + JSON.stringify(json, null, 2);
+      return;
+    }
+    renderVideoJob(json);
+    pollVideoJob();
+  } catch (error) {
+    status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
+  }
+}
+function executeVideoJob() {
+  videoLifecycleCall('/api/replacement/video/execute', {overrides: collectVideoPlanOverrides()}, '已提交生成...');
+}
+function retryVideoFailed() {
+  videoLifecycleCall('/api/replacement/video/retry', {}, '重试失败片段...');
+}
+function cancelVideoJob() {
+  videoLifecycleCall('/api/replacement/video/cancel', {}, '取消中...');
+}
+function concatVideoJob() {
+  videoLifecycleCall('/api/replacement/video/concat', {}, '合成成片...');
+}
+async function downloadVideoResult(event) {
+  if (event) event.preventDefault();
+  const jobId = currentVideoJobId();
+  const filename = (document.getElementById('video-download').dataset.filename || '').trim();
+  if (!jobId || !filename) return;
+  const status = document.getElementById('video-status');
+  try {
+    const url = '/api/replacement/video/download?jobId=' + encodeURIComponent(jobId) + '&filename=' + encodeURIComponent(filename);
+    const res = await fetch(url, {headers: authHeaders()});
+    if (!res.ok) { status.textContent = formatReplacementError({error: 'replacement_download_failed'}, res.status); return; }
+    const objectUrl = URL.createObjectURL(await res.blob());
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (error) {
+    status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
+  }
+}
+document.getElementById('video-form').addEventListener('submit', e => { e.preventDefault(); prepareVideoJob(); });
+document.getElementById('video-execute').addEventListener('click', executeVideoJob);
+document.getElementById('video-retry').addEventListener('click', retryVideoFailed);
+document.getElementById('video-cancel').addEventListener('click', cancelVideoJob);
+document.getElementById('video-concat').addEventListener('click', concatVideoJob);
+document.getElementById('video-download').addEventListener('click', downloadVideoResult);
 document.getElementById('note-form').addEventListener('submit', e => { e.preventDefault(); submitForm('note-form', '/api/replacement/note/start', 'note-status'); });
 document.getElementById('note-save').addEventListener('click', saveNoteDraft);
 loadVideoHandoff();
+if (currentVideoJobId()) pollVideoJob();
 </script>
 </body>
 </html>"""
@@ -806,6 +1002,286 @@ def start_video_job(data_dir, fields, files):
     }
     _write_job(data_dir, "video", job)
     return {"ok": True, "jobId": job_id, "taskType": "video", "status": "queued", "stage": "created"}
+
+
+def _video_service_data_dir(data_dir):
+    return _task_root(data_dir, "video")
+
+
+def _platform_from_source_url(url):
+    host = (urlparse(str(url or "").strip()).hostname or "").lower()
+    if "xiaohongshu" in host or "xhslink" in host:
+        return "xhs"
+    if "douyin" in host or "iesdouyin" in host:
+        return "douyin"
+    return ""
+
+
+class _SourceDownloader:
+    """Direct-URL source downloader backed by the native client helpers.
+
+    The handoff path never invokes this; direct-URL prepare depends on a
+    native download entry point that is wired by the shared-service adapter.
+    """
+
+    def __init__(self, helpers):
+        self._helpers = helpers
+
+    def download(self, source_url, job_dir):
+        for name in (
+                "_replacement_web_download_source",
+                "_download_reference_video",
+                "download_source_video"):
+            fn = getattr(self._helpers, name, None)
+            if callable(fn):
+                return fn(source_url, job_dir)
+        raise RuntimeError("replacement_source_download_unavailable")
+
+
+def _build_pipeline():
+    try:
+        import matrix_native_client as helpers
+    except Exception:
+        import replacement_pipeline
+        return replacement_pipeline.ReplacementPipeline()
+    return helpers._replacement_hybrid_pipeline()
+
+
+def _build_source_resolver():
+    import replacement_service
+    import replacement_analysis
+    try:
+        import matrix_native_client as helpers
+    except Exception:
+        helpers = None
+    if helpers is None:
+        # Degraded resolver: handoff reuse still works; direct-URL is unavailable
+        # until the shared-service adapter provides native download helpers.
+        return replacement_service.SourceResolver(replacement_analysis.ReplacementAnalysis())
+
+    def transcription_runner(source_path, out_dir, progress=None):
+        return helpers._transcribe_breakdown_audio(source_path, out_dir=out_dir, progress=None)
+
+    analysis = replacement_analysis.ReplacementAnalysis(
+        downloader=_SourceDownloader(helpers),
+        download_validator=helpers._breakdown_source_validation,
+        platform_from_url=_platform_from_source_url,
+        source_validator=helpers._breakdown_source_validation,
+        frame_extractor=helpers._extract_breakdown_frames,
+        ocr_runner=helpers._ocr_breakdown_frames,
+        transcription_runner=transcription_runner,
+        vision_runner=helpers.lk888_vision,
+        report_builder=helpers._generate_video_breakdown_report,
+        markdown_builder=helpers._video_breakdown_markdown,
+        image_data_url=helpers._image_data_url,
+        json_logger=lambda event, **fields: helpers.json_log(helpers._CLIENT_JSON_LOGGER, event, **fields),
+        log_event=lambda *args, **kwargs: None,
+    )
+    return replacement_service.SourceResolver(analysis)
+
+
+def build_video_service(data_dir):
+    """Construct the ReplacementService the web layer orchestrates.
+
+    Jobs persist under the same video task root that ``load_job`` reads, so
+    ``job.json`` stays the single cross-process source of truth. Tests patch
+    this factory to inject fake source resolver + pipeline (fake-provider).
+    """
+    import replacement_service
+    logger = None
+    try:
+        import matrix_native_client as helpers
+        logger = getattr(helpers, "_CLIENT_JSON_LOGGER", None)
+    except Exception:
+        logger = None
+    return replacement_service.ReplacementService(
+        data_dir=_video_service_data_dir(data_dir),
+        source_resolver=_build_source_resolver(),
+        pipeline=_build_pipeline(),
+        # Terminal metrics + the Qt new-job circuit breaker share the agent data
+        # root so the shared-service failure ratio is consistent across surfaces.
+        metrics_dir=data_dir,
+        logger=logger,
+    )
+
+
+def _video_prepare_request(fields, handoff):
+    fields = fields or {}
+    request = {}
+    source_url = str(fields.get("sourceUrl") or "").strip()
+    if source_url:
+        request["sourceUrl"] = source_url
+    if handoff:
+        request["handoff"] = handoff
+        request["handoffId"] = str(handoff.get("id") or "").strip()
+    request["inputs"] = {
+        "hasScript": bool(str(fields.get("script") or "").strip()),
+        "hasSellingPoints": bool(str(fields.get("sellingPoints") or "").strip()),
+        "script": _sanitize_note_text(fields.get("script") or ""),
+        "sellingPoints": _sanitize_note_text(fields.get("sellingPoints") or ""),
+    }
+    return request
+
+
+def _normalize_segment_indices(segment_indices):
+    values = []
+    for item in segment_indices or []:
+        try:
+            values.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def prepare_video_job(data_dir, fields, files):
+    fields = fields or {}
+    handoff_id = str(fields.get("handoffId") or "").strip()
+    handoff = load_video_handoff(data_dir, handoff_id) if handoff_id else None
+    if handoff_id and not handoff:
+        return _error("replacement_video_handoff_not_found")
+    if not handoff and not _safe_url_parts(fields.get("sourceUrl")):
+        return _error("replacement_invalid_source_url")
+    images = _image_files(files, {"characterImage", "productImage", "sceneImage"})
+    validation_error = _validate_images(images)
+    if validation_error:
+        return validation_error
+    if not any(field == "characterImage" for field, _filename, _data in images):
+        return _error("replacement_video_missing_character_image")
+    job_id = _new_video_job_id()
+    _write_upload_files(data_dir, "video", job_id, images)
+    request = _video_prepare_request(fields, handoff)
+    service = build_video_service(data_dir)
+    try:
+        service.prepare(job_id, request, [(field, filename, data) for field, filename, data in images])
+    except ValueError as exc:
+        return _error(str(exc) or "replacement_prepare_failed", stage="prepare", status=400)
+    except Exception:
+        return _error("replacement_prepare_failed", stage="prepare", status=500)
+    raw = load_job(data_dir, "video", job_id)
+    if not raw:
+        return _error("replacement_job_not_found", stage="prepare", status=500)
+    return video_job_response(raw)
+
+
+def execute_video_job(data_dir, job_id, overrides):
+    if not _valid_job_id("video", job_id) or not load_job(data_dir, "video", job_id):
+        return _error("replacement_job_not_found", stage="execute", status=404)
+    service = build_video_service(data_dir)
+    try:
+        service.execute(job_id, overrides=overrides or {})
+    except ValueError as exc:
+        return _error(str(exc) or "replacement_job_invalid_state", stage="execute", status=409)
+    except Exception:
+        return _error("replacement_execute_failed", stage="execute", status=500)
+    return video_job_response(load_job(data_dir, "video", job_id))
+
+
+def retry_video_job(data_dir, job_id, segment_indices):
+    if not _valid_job_id("video", job_id) or not load_job(data_dir, "video", job_id):
+        return _error("replacement_job_not_found", stage="retry", status=404)
+    service = build_video_service(data_dir)
+    try:
+        service.retry(job_id, _normalize_segment_indices(segment_indices))
+    except ValueError as exc:
+        code = str(exc) or "replacement_job_not_retryable"
+        status = 404 if code == "replacement_job_not_found" else 409
+        return _error(code, stage="retry", status=status)
+    except Exception:
+        return _error("replacement_retry_failed", stage="retry", status=500)
+    return video_job_response(load_job(data_dir, "video", job_id))
+
+
+def concat_video_job(data_dir, job_id):
+    if not _valid_job_id("video", job_id) or not load_job(data_dir, "video", job_id):
+        return _error("replacement_job_not_found", stage="concat", status=404)
+    service = build_video_service(data_dir)
+    try:
+        service.concat(job_id)
+    except ValueError as exc:
+        return _error(str(exc) or "replacement_job_not_ready_for_concat", stage="concat", status=409)
+    except Exception:
+        return _error("replacement_concat_failed", stage="concat", status=500)
+    return video_job_response(load_job(data_dir, "video", job_id))
+
+
+def cancel_video_job(data_dir, job_id):
+    if not _valid_job_id("video", job_id) or not load_job(data_dir, "video", job_id):
+        return _error("replacement_job_not_found", stage="cancel", status=404)
+    service = build_video_service(data_dir)
+    try:
+        service.cancel(job_id)
+    except ValueError as exc:
+        code = str(exc) or "replacement_job_not_found"
+        status = 404 if code == "replacement_job_not_found" else 409
+        return _error(code, stage="cancel", status=status)
+    except Exception:
+        return _error("replacement_cancel_failed", stage="cancel", status=500)
+    return video_job_response(load_job(data_dir, "video", job_id))
+
+
+_VIDEO_SEGMENT_FIELDS = (
+    "index", "start", "end", "status", "qcStatus", "audioStatus",
+    "segmentType", "stage", "stageLabel", "elapsedSec", "etaSec",
+    "error", "errorId", "progressText",
+)
+
+
+def _public_video_segments(segments):
+    result = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        result.append({key: segment.get(key) for key in _VIDEO_SEGMENT_FIELDS if key in segment})
+    return result
+
+
+def video_job_response(job):
+    job = job if isinstance(job, dict) else {}
+    import replacement_service
+    scrubbed = replacement_service.public_job(job)
+    output_path = str(job.get("outputPath") or "").strip()
+    available = bool(
+        str(job.get("status") or "") in ("completed", "done")
+        and output_path
+        and os.path.isfile(output_path)
+    )
+    output_filename = os.path.basename(output_path) if available else ""
+    return {
+        "ok": True,
+        "jobId": str(scrubbed.get("id") or job.get("id") or ""),
+        "taskType": "video",
+        "status": str(scrubbed.get("status") or ""),
+        "stage": str(scrubbed.get("stage") or ""),
+        "progressText": str(scrubbed.get("progressText") or ""),
+        "source": scrubbed.get("source") if isinstance(scrubbed.get("source"), dict) else {},
+        "sourceContext": scrubbed.get("sourceContext") if isinstance(scrubbed.get("sourceContext"), dict) else {},
+        "segments": _public_video_segments(scrubbed.get("segments")),
+        "diagnostics": scrubbed.get("diagnostics") if isinstance(scrubbed.get("diagnostics"), dict) else {},
+        "error": str(scrubbed.get("error") or ""),
+        "handoffId": str(scrubbed.get("handoffId") or job.get("handoffId") or ""),
+        "download": {"available": available, "filename": output_filename},
+        "createdAt": scrubbed.get("createdAt") or 0,
+        "updatedAt": scrubbed.get("updatedAt") or 0,
+    }
+
+
+def final_media_path(data_dir, job_id, filename):
+    if not _valid_job_id("video", job_id):
+        return None, "bad_path", 400
+    job = load_job(data_dir, "video", job_id)
+    if not job:
+        return None, "not_found", 404
+    output_path = str(job.get("outputPath") or "").strip()
+    if not output_path or not os.path.isfile(output_path):
+        return None, "not_found", 404
+    resolved = os.path.abspath(output_path)
+    name = str(filename or "").strip()
+    if name and (name != os.path.basename(name.replace("\\", "/")) or name != os.path.basename(resolved)):
+        return None, "bad_path", 400
+    sandbox = os.path.abspath(data_dir)
+    if resolved != sandbox and not resolved.startswith(sandbox + os.sep):
+        return None, "forbidden", 403
+    return resolved, "", 200
 
 
 def start_note_job(data_dir, fields, files):

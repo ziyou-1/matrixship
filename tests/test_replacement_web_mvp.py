@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,90 @@ def _png_bytes():
     out = io.BytesIO()
     Image.new("RGB", (2, 2), (255, 0, 0)).save(out, format="PNG")
     return out.getvalue()
+
+
+class _WebFakeDownloader:
+    def __init__(self, filename="source-direct.mp4"):
+        self.filename = filename
+        self.calls = []
+
+    def download(self, source_url, job_dir):
+        self.calls.append((source_url, job_dir))
+        path = os.path.join(job_dir, self.filename)
+        Path(path).write_bytes(b"fake-video")
+        return path
+
+
+class _WebFakeVideoPipeline:
+    def __init__(self, fail_indices=()):
+        self.fail_indices = {int(v) for v in fail_indices}
+        self.retry_calls = []
+
+    def build_plan(self, job):
+        job["segments"] = [
+            {"index": 1, "start": 0.0, "end": 8.0, "status": "planned"},
+            {"index": 2, "start": 8.0, "end": 16.0, "status": "planned"},
+        ]
+        return job
+
+    def execute(self, job, selected_segments=None, progress=None):
+        for segment in job["segments"]:
+            if int(segment["index"]) in self.fail_indices:
+                segment.update({"status": "failed", "qcStatus": "failed", "error": "boom"})
+            else:
+                out = os.path.join(job["outDir"], "segment-%02d.mp4" % int(segment["index"]))
+                Path(out).write_bytes(b"seg")
+                segment.update({"status": "done", "qcStatus": "passed", "videoPath": out})
+        job["status"] = "partial" if any(s["status"] == "failed" for s in job["segments"]) else "awaiting_review"
+        return job
+
+    def retry(self, job, segment_indices, progress=None):
+        self.retry_calls.append(list(segment_indices or []))
+        wanted = {int(v) for v in (segment_indices or [])}
+        for segment in job["segments"]:
+            if segment["status"] == "failed" and (not wanted or int(segment["index"]) in wanted):
+                out = os.path.join(job["outDir"], "segment-%02d-retry.mp4" % int(segment["index"]))
+                Path(out).write_bytes(b"seg")
+                segment.update({"status": "done", "qcStatus": "passed", "error": "", "videoPath": out})
+        job["status"] = "awaiting_review" if all(s["status"] == "done" for s in job["segments"]) else "partial"
+        return job
+
+    def concat(self, job):
+        out = os.path.join(job["outDir"], "replacement_final.mp4")
+        Path(out).write_bytes(b"final-bytes")
+        job.update({"status": "completed", "outputPath": out})
+        return job
+
+
+def _make_fake_video_service(data_dir, pipeline, downloader=None):
+    replacement_web = importlib.import_module("replacement_web")
+    replacement_service = importlib.import_module("replacement_service")
+    replacement_analysis = importlib.import_module("replacement_analysis")
+
+    def extract_frames(_video_path, frames_dir, _limit):
+        os.makedirs(frames_dir, exist_ok=True)
+        return []
+
+    analysis = replacement_analysis.ReplacementAnalysis(
+        downloader=downloader or _WebFakeDownloader(),
+        download_validator=lambda path: {"ok": True, "code": "", "path": path, "duration": 8.0, "width": 720, "height": 1280},
+        platform_from_url=lambda url: "douyin",
+        source_validator=lambda path: {"ok": True, "code": "", "path": path, "duration": 8.0, "width": 720, "height": 1280},
+        frame_extractor=extract_frames,
+        ocr_runner=lambda frames: {"status": "ok", "engine": "fake-ocr", "text": "", "errors": []},
+        transcription_runner=lambda _v, out_dir, progress=None: {"status": "ok", "text": "", "segments": [], "failedRanges": [], "errors": [], "retryCount": 0, "outDir": out_dir},
+        vision_runner=lambda *a, **k: "fake visual",
+        report_builder=lambda out: ("## report", "ok"),
+        markdown_builder=lambda out: out.get("report") or "",
+        image_data_url=lambda path: "",
+        json_logger=lambda *a, **k: '{"errorId":"e"}',
+        log_event=lambda *a, **k: None,
+    )
+    return replacement_service.ReplacementService(
+        data_dir=replacement_web._task_root(data_dir, "video"),
+        source_resolver=replacement_service.SourceResolver(analysis),
+        pipeline=pipeline,
+    )
 
 
 class ReplacementWebFeatureGateTests(unittest.TestCase):
@@ -51,7 +136,7 @@ class ReplacementWebModuleTests(unittest.TestCase):
 
         self.assertIn("视频替换", html)
         self.assertIn("图文替换", html)
-        self.assertIn("/api/replacement/video/start", html)
+        self.assertIn("/api/replacement/video/prepare", html)
         self.assertIn("/api/replacement/note/start", html)
         self.assertIn("/api/replacement/note/save-draft", html)
         self.assertIn("X-Matrix-Agent-Token", html)
@@ -87,7 +172,6 @@ class ReplacementWebModuleTests(unittest.TestCase):
         self.assertIn("请从本地客户端打开替换网页", html)
         self.assertIn("授权已失效，请回到客户端重新打开", html)
         self.assertIn("本地视频替换任务已创建", html)
-        self.assertIn("当前客户预览版暂不执行真实视频生成", html)
         self.assertIn("finally", html)
 
     def test_native_client_builds_replacement_web_launch_url_without_central_token(self):
@@ -656,6 +740,436 @@ class ReplacementApiServerRouteTests(unittest.TestCase):
             self.assertTrue(payload["job"]["slotMappings"][0]["hasFile"])
 
 
+class ReplacementVideoPageControlTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = importlib.import_module("replacement_web")
+
+    def test_video_panel_exposes_lifecycle_controls_and_polling(self):
+        html = self.mod.replacement_page_html()
+
+        # source mode + handoff status
+        self.assertIn("loadVideoHandoff", html)
+        self.assertIn("matrixReplacementVideoHandoffId", html)
+        self.assertIn("matrixReplacementVideoJobId", html)
+        # lifecycle routes driven from the page
+        self.assertIn("/api/replacement/video/prepare", html)
+        self.assertIn("/api/replacement/video/execute", html)
+        self.assertIn("/api/replacement/video/retry", html)
+        self.assertIn("/api/replacement/video/concat", html)
+        self.assertIn("/api/replacement/video/cancel", html)
+        self.assertIn("/api/replacement/video/job", html)
+        self.assertIn("/api/replacement/video/download", html)
+        # editable plan + per-segment status + controls
+        self.assertIn('id="video-plan"', html)
+        self.assertIn('id="video-segments"', html)
+        self.assertIn('id="video-execute"', html)
+        self.assertIn('id="video-retry"', html)
+        self.assertIn('id="video-cancel"', html)
+        self.assertIn('id="video-concat"', html)
+        self.assertIn("renderVideoJob", html)
+        self.assertIn("pollVideoJob", html)
+        # poll cadence: 1s preparation, 2s generation
+        self.assertIn("1000", html)
+        self.assertIn("2000", html)
+        # authenticated download uses header token, never a query token
+        self.assertIn("authHeaders()", html)
+        self.assertNotIn("token=${", html)
+
+    def test_video_panel_only_uses_sessionstorage_for_handoff_and_job(self):
+        html = self.mod.replacement_page_html()
+        keys = set(re.findall(r"sessionStorage\.(?:getItem|setItem|removeItem)\(([A-Za-z_]+)", html))
+        # TOKEN_KEY/USER_KEY/HANDOFF_KEY/JOB_KEY are the only session keys; token+user predate video MVP
+        self.assertTrue({"HANDOFF_KEY", "JOB_KEY"}.issubset(keys))
+
+
+class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = importlib.import_module("replacement_web")
+
+    def _handoff(self, td):
+        local_video = os.path.join(td, "source-video.mp4")
+        Path(local_video).write_bytes(b"fake mp4")
+        created = self.mod.create_video_handoff(
+            td,
+            {
+                "sourceUrl": "https://www.douyin.com/video/1?token=secret",
+                "sourceVideoPath": local_video,
+                "platform": "douyin",
+                "breakdownAnalysis": {"meta": {"duration": 8.0}},
+            },
+        )
+        return created["handoffId"]
+
+    def test_prepare_with_handoff_without_source_url_plans_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                result = self.mod.prepare_video_job(
+                    td,
+                    {"handoffId": handoff_id, "sellingPoints": "fast"},
+                    [("characterImage", "face.png", b"fake image bytes")],
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["jobId"].startswith("rvw_"))
+            self.assertEqual(result["status"], "planned")
+            self.assertEqual(result["taskType"], "video")
+            self.assertEqual(result["source"]["host"], "www.douyin.com")
+            self.assertEqual(result["sourceContext"]["platform"], "douyin")
+            self.assertEqual(len(result["segments"]), 2)
+            exposed = json.dumps(result, ensure_ascii=False)
+            self.assertNotIn(td, exposed)
+            self.assertNotIn("token=secret", exposed)
+
+    def test_prepare_with_direct_url_downloads_into_job_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            downloader = _WebFakeDownloader()
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline, downloader=downloader)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                result = self.mod.prepare_video_job(
+                    td,
+                    {"sourceUrl": "https://www.douyin.com/video/abc?token=secret"},
+                    [("characterImage", "face.png", b"img")],
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "planned")
+            self.assertEqual(result["source"]["host"], "www.douyin.com")
+            self.assertEqual(len(downloader.calls), 1)
+            self.assertNotIn("token=secret", json.dumps(result, ensure_ascii=False))
+
+    def test_prepare_requires_valid_source_and_character_image(self):
+        with tempfile.TemporaryDirectory() as td:
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline())
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                bad_url = self.mod.prepare_video_job(
+                    td, {"sourceUrl": "file:///tmp/a.mp4"}, [("characterImage", "f.png", b"1")]
+                )
+                missing_image = self.mod.prepare_video_job(
+                    td, {"sourceUrl": "https://www.douyin.com/video/1"}, []
+                )
+
+            self.assertFalse(bad_url["ok"])
+            self.assertEqual(bad_url["error"], "replacement_invalid_source_url")
+            self.assertFalse(missing_image["ok"])
+            self.assertEqual(missing_image["error"], "replacement_video_missing_character_image")
+
+    def test_execute_then_concat_completes_and_exposes_safe_download(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline())
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                )
+                job_id = prepared["jobId"]
+                executed = self.mod.execute_video_job(td, job_id, {})
+                self.assertEqual(executed["status"], "awaiting_review")
+                self.assertFalse(executed["download"]["available"])
+
+                completed = self.mod.concat_video_job(td, job_id)
+                self.assertEqual(completed["status"], "completed")
+                self.assertTrue(completed["download"]["available"])
+                self.assertEqual(completed["download"]["filename"], "replacement_final.mp4")
+
+            exposed = json.dumps(completed, ensure_ascii=False)
+            self.assertNotIn(td, exposed)
+            self.assertNotIn("outputPath", exposed)
+            self.assertNotIn("videoPath", exposed)
+
+            fp, error, status = self.mod.final_media_path(td, job_id, "replacement_final.mp4")
+            self.assertEqual((error, status), ("", 200))
+            self.assertEqual(Path(fp).read_bytes(), b"final-bytes")
+            _fp2, bad_error, bad_status = self.mod.final_media_path(td, job_id, "../evil.mp4")
+            self.assertIn(bad_status, (400, 403, 404))
+            self.assertIn(bad_error, ("bad_path", "forbidden", "not_found"))
+
+    def test_retry_only_reruns_failed_segments(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline(fail_indices=(2,))
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                )
+                job_id = prepared["jobId"]
+                partial = self.mod.execute_video_job(td, job_id, {})
+                self.assertEqual(partial["status"], "partial")
+                self.assertEqual(partial["segments"][1]["status"], "failed")
+
+                retried = self.mod.retry_video_job(td, job_id, [2])
+                self.assertEqual(retried["status"], "awaiting_review")
+                self.assertEqual(retried["segments"][1]["status"], "done")
+                self.assertEqual(pipeline.retry_calls, [[2]])
+
+    def test_cancel_marks_job_cancelled(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline())
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                )
+                cancelled = self.mod.cancel_video_job(td, prepared["jobId"])
+            self.assertEqual(cancelled["status"], "cancelled")
+
+    def test_invalid_state_transitions_return_409(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline())
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                )
+                job_id = prepared["jobId"]
+                # concat before awaiting_review -> 409
+                early_concat = self.mod.concat_video_job(td, job_id)
+                self.assertFalse(early_concat["ok"])
+                self.assertEqual(early_concat["statusCode"], 409)
+                # retry before partial/awaiting_review -> 409
+                early_retry = self.mod.retry_video_job(td, job_id, [1])
+                self.assertEqual(early_retry["statusCode"], 409)
+
+    def test_execute_missing_job_returns_404(self):
+        with tempfile.TemporaryDirectory() as td:
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline())
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                result = self.mod.execute_video_job(td, "rvw_%s" % ("a" * 24), {})
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["statusCode"], 404)
+
+    def test_video_job_response_redacts_internal_paths_and_credentials(self):
+        raw = {
+            "id": "rvw_%s" % ("a" * 24),
+            "taskType": "video",
+            "status": "failed",
+            "stage": "editing",
+            "outDir": "/private/data/rvw_aaaa",
+            "sourceVideoPath": "/private/data/rvw_aaaa/source.mp4",
+            "outputPath": "/private/data/rvw_aaaa/final.mp4",
+            "source": {"scheme": "https", "host": "www.douyin.com", "pathHash": "abcdef"},
+            "error": "boom out=/private/data/rvw_aaaa token=secret-token cookie=abc",
+            "segments": [
+                {"index": 1, "status": "failed", "videoPath": "/private/data/rvw_aaaa/seg1.mp4",
+                 "startFramePath": "/private/data/frame.png", "qcStatus": "failed"},
+            ],
+        }
+        response = self.mod.video_job_response(raw)
+        exposed = json.dumps(response, ensure_ascii=False)
+
+        self.assertEqual(response["jobId"], raw["id"])
+        self.assertEqual(response["source"]["host"], "www.douyin.com")
+        self.assertNotIn("/private/data", exposed)
+        self.assertNotIn("secret-token", exposed)
+        self.assertNotIn("videoPath", exposed)
+        self.assertNotIn("startFramePath", exposed)
+        self.assertNotIn("outputPath", exposed)
+        self.assertNotIn("sourceVideoPath", exposed)
+        self.assertEqual(response["segments"][0]["status"], "failed")
+
+    def test_video_job_response_never_exposes_raw_provider_task_id_or_signed_url(self):
+        # Task 7: a secret-like provider URL and raw provider task id must never
+        # appear in an API response, even when embedded in free-text error copy.
+        raw_task = "provider-task-SECRET-999"
+        signed = "https://cdn.example.com/v/out.mp4?X-Amz-Signature=zzz&token=priv"
+        raw = {
+            "id": "rvw_%s" % ("b" * 24),
+            "taskType": "video",
+            "status": "failed",
+            "error": "generation failed for task %s at %s" % (raw_task, signed),
+            "segments": [
+                {"index": 1, "status": "failed", "providerTaskId": raw_task, "videoUrl": signed},
+            ],
+        }
+        response = self.mod.video_job_response(raw)
+        exposed = json.dumps(response, ensure_ascii=False)
+
+        self.assertNotIn(raw_task, exposed)
+        self.assertNotIn("X-Amz-Signature", exposed)
+        self.assertNotIn("token=priv", exposed)
+        self.assertNotIn("out.mp4", exposed)
+
+
+class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.api = importlib.import_module("api_server")
+        self.mod = self.api.replacement_web
+
+    def _handler(self, path, method="GET", body=b"", headers=None):
+        handler = self.api.Handler.__new__(self.api.Handler)
+        handler.command = method
+        handler.path = path
+        handler.requestline = f"{method} {path} HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.server = None
+        handler.headers = headers or {}
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        return handler
+
+    def _response(self, handler):
+        handler.wfile.seek(0)
+        raw = handler.wfile.read().decode("utf-8", errors="replace")
+        head, _, body = raw.partition("\r\n\r\n")
+        status = int(head.splitlines()[0].split()[1])
+        return status, json.loads(body) if body else {}
+
+    def _multipart(self, fields, files):
+        boundary = "webboundary"
+        parts = []
+        for key, value in fields.items():
+            parts.append(("--" + boundary).encode())
+            parts.append(('Content-Disposition: form-data; name="%s"' % key).encode())
+            parts.append(b"")
+            parts.append(str(value).encode())
+        for field, filename, data in files:
+            parts.append(("--" + boundary).encode())
+            parts.append(('Content-Disposition: form-data; name="%s"; filename="%s"' % (field, filename)).encode())
+            parts.append(b"Content-Type: application/octet-stream")
+            parts.append(b"")
+            parts.append(data)
+        parts.append(("--" + boundary + "--").encode())
+        parts.append(b"")
+        body = b"\r\n".join(parts)
+        headers = {
+            "Content-Type": "multipart/form-data; boundary=" + boundary,
+            "Content-Length": str(len(body)),
+        }
+        return body, headers
+
+    def _handoff(self, td):
+        local_video = os.path.join(td, "source-video.mp4")
+        Path(local_video).write_bytes(b"fake mp4")
+        created = self.mod.create_video_handoff(
+            td,
+            {
+                "sourceUrl": "https://www.douyin.com/video/1",
+                "sourceVideoPath": local_video,
+                "platform": "douyin",
+                "breakdownAnalysis": {"meta": {"duration": 8.0}},
+            },
+        )
+        return created["handoffId"]
+
+    def test_full_video_lifecycle_over_http_routes(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            service = _make_fake_video_service(td, _WebFakeVideoPipeline(fail_indices=(2,)))
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=True
+            ), patch.object(self.api, "DATA_DIR", td), patch.object(
+                self.mod, "build_video_service", return_value=service
+            ):
+                body, headers = self._multipart(
+                    {"handoffId": handoff_id},
+                    [("characterImage", "face.png", b"img")],
+                )
+                prepare = self._handler("/api/replacement/video/prepare", method="POST", body=body, headers=headers)
+                prepare.do_POST()
+                prepare_status, prepare_payload = self._response(prepare)
+                self.assertEqual(prepare_status, 202)
+                self.assertEqual(prepare_payload["status"], "planned")
+                job_id = prepare_payload["jobId"]
+
+                jobq = self._handler("/api/replacement/video/job?jobId=%s" % job_id)
+                jobq.do_GET()
+                jobq_status, jobq_payload = self._response(jobq)
+                self.assertEqual(jobq_status, 200)
+                self.assertEqual(jobq_payload["taskType"], "video")
+                self.assertEqual(jobq_payload["status"], "planned")
+
+                exec_body = json.dumps({"jobId": job_id}).encode()
+                execute = self._handler(
+                    "/api/replacement/video/execute",
+                    method="POST",
+                    body=exec_body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(exec_body))},
+                )
+                execute.do_POST()
+                exec_status, exec_payload = self._response(execute)
+                self.assertEqual(exec_status, 202)
+                self.assertEqual(exec_payload["status"], "partial")
+
+                # concat before review -> 409
+                concat_body = json.dumps({"jobId": job_id}).encode()
+                early = self._handler(
+                    "/api/replacement/video/concat",
+                    method="POST",
+                    body=concat_body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(concat_body))},
+                )
+                early.do_POST()
+                early_status, _early_payload = self._response(early)
+                self.assertEqual(early_status, 409)
+
+                retry_body = json.dumps({"jobId": job_id, "segmentIndices": [2]}).encode()
+                retry = self._handler(
+                    "/api/replacement/video/retry",
+                    method="POST",
+                    body=retry_body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(retry_body))},
+                )
+                retry.do_POST()
+                retry_status, retry_payload = self._response(retry)
+                self.assertEqual(retry_status, 202)
+                self.assertEqual(retry_payload["status"], "awaiting_review")
+
+                concat = self._handler(
+                    "/api/replacement/video/concat",
+                    method="POST",
+                    body=concat_body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(concat_body))},
+                )
+                concat.do_POST()
+                concat_status, concat_payload = self._response(concat)
+                self.assertEqual(concat_status, 202)
+                self.assertEqual(concat_payload["status"], "completed")
+                self.assertTrue(concat_payload["download"]["available"])
+
+                download = self._handler(
+                    "/api/replacement/video/download?jobId=%s&filename=%s"
+                    % (job_id, concat_payload["download"]["filename"])
+                )
+                download.do_GET()
+                download.wfile.seek(0)
+                dl_head, _, dl_body = download.wfile.read().partition(b"\r\n\r\n")
+                self.assertIn(b" 200 ", dl_head.splitlines()[0])
+                self.assertEqual(dl_body, b"final-bytes")
+
+                cancel_body = json.dumps({"jobId": job_id}).encode()
+                cancel = self._handler(
+                    "/api/replacement/video/cancel",
+                    method="POST",
+                    body=cancel_body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(cancel_body))},
+                )
+                cancel.do_POST()
+                cancel_status, _cancel_payload = self._response(cancel)
+                # completed is terminal; cancel is a safe no-op returning 202 with terminal state
+                self.assertEqual(cancel_status, 202)
+
+    def test_video_lifecycle_routes_are_gated_when_feature_disabled(self):
+        with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+            self.api, "replacement_web_enabled", return_value=False
+        ):
+            exec_body = json.dumps({"jobId": "rvw_%s" % ("a" * 24)}).encode()
+            handler = self._handler(
+                "/api/replacement/video/execute",
+                method="POST",
+                body=exec_body,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(exec_body))},
+            )
+            handler.do_POST()
+        status, payload = self._response(handler)
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"], "replacement_web_disabled")
+
+
 class ReplacementWebDocumentationTests(unittest.TestCase):
     def test_openapi_documents_replacement_web_mvp_contract(self):
         import yaml
@@ -666,6 +1180,12 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
 
         for path in (
             "/api/replacement/video/start",
+            "/api/replacement/video/prepare",
+            "/api/replacement/video/execute",
+            "/api/replacement/video/retry",
+            "/api/replacement/video/concat",
+            "/api/replacement/video/cancel",
+            "/api/replacement/video/download",
             "/api/replacement/video/handoff",
             "/api/replacement/video/job",
             "/api/replacement/note/start",
@@ -679,6 +1199,29 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
         self.assertIn("ReplacementStartResponse", schemas)
         self.assertIn("ReplacementVideoHandoffResponse", schemas)
         self.assertIn("ReplacementJobResponse", schemas)
+        self.assertIn("ReplacementVideoJobResponse", schemas)
+
+        for lifecycle_path in (
+            "/api/replacement/video/prepare",
+            "/api/replacement/video/execute",
+            "/api/replacement/video/retry",
+            "/api/replacement/video/concat",
+            "/api/replacement/video/cancel",
+        ):
+            operation = paths[lifecycle_path]["post"]
+            with self.subTest(path=lifecycle_path):
+                self.assertIn("202", operation["responses"])
+                self.assertIn("404", operation["responses"])
+        for lifecycle_path in (
+            "/api/replacement/video/execute",
+            "/api/replacement/video/retry",
+            "/api/replacement/video/concat",
+        ):
+            with self.subTest(path=lifecycle_path):
+                self.assertIn("409", paths[lifecycle_path]["post"]["responses"])
+        video_status_enum = schemas["ReplacementVideoJobResponse"]["properties"]["status"]["enum"]
+        for state in ("planned", "running", "awaiting_review", "partial", "completed", "failed", "cancelled"):
+            self.assertIn(state, video_status_enum)
         self.assertEqual(paths["/replacement"]["get"].get("security"), [])
         self.assertEqual(
             schemas["ReplacementJobResponse"]["properties"]["copyCandidates"]["items"]["type"],

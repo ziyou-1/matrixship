@@ -39,23 +39,26 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
 
             self.assertEqual(self.client._find_video_file_from_download(result), str(video))
 
-    def test_central_defaults_to_public_production_server(self):
+    def test_central_defaults_to_local_loopback(self):
         with mock.patch.dict(os.environ, {
             "MATRIX_CENTRAL": "",
             "CENTRAL_URL": "",
         }, clear=False):
             client = load_client()
 
-        self.assertEqual(client.CENTRAL, "http://120.26.194.174:9080")
+        # Default matches the shipped start-visible-client.bat, which starts and
+        # targets a local central server on 127.0.0.1:9080. Deployments that use a
+        # remote central server set MATRIX_CENTRAL explicitly (see override test).
+        self.assertEqual(client.CENTRAL, "http://127.0.0.1:9080")
 
-    def test_central_env_override_still_supports_local_development(self):
+    def test_central_env_override_supports_remote_central(self):
         with mock.patch.dict(os.environ, {
-            "MATRIX_CENTRAL": "http://127.0.0.1:9080",
+            "MATRIX_CENTRAL": "http://120.26.194.174:9080",
             "CENTRAL_URL": "",
         }, clear=False):
             client = load_client()
 
-        self.assertEqual(client.CENTRAL, "http://127.0.0.1:9080")
+        self.assertEqual(client.CENTRAL, "http://120.26.194.174:9080")
 
     def test_find_video_file_from_files_list(self):
         with tempfile.TemporaryDirectory() as td:

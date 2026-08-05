@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-04 视频替换共享服务熔断、可观测事件与契约
+### Added
+- 本地终态任务度量与共享模式熔断：`backend/replacement_service.py` 新增 `record_terminal_result`、`circuit_breaker_state`、`shared_mode_allowed`，在 agent 数据目录持久化最近至多 500 条终态任务（仅存 job 哈希）。累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时新任务切回 `legacy`；正好 1% 不熔断，取消不计为失败，运行中的任务绝不中断。
+- 脱敏结构化边界事件：`build_replacement_event`/`emit_replacement_event` 输出 `prepare_started`、`analysis_completed`、`provider_submitted`、`provider_recovered`、`billing_settled`、`video_completed`、`video_failed`、`shared_mode_circuit_opened`、`rollback_requested`，只含 job id、stage、model、provider-task 哈希、status、media-URL 形状和 cost/ref。
+### Changed
+- `backend/matrix_native_client.py` 的 `replacement_mode_for_new_job()` 现在同时校验 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 与 `shared_mode_allowed()`：熔断打开时发出 `shared_mode_circuit_opened`/`rollback_requested` 并回退 `legacy`。
+- `backend/replacement_web.py::build_video_service` 传入共享 metrics 目录与本地日志器，使网页与 Qt 共用一致的失败率统计；`public_job` 脱敏扩展为丢弃并清洗 provider task id / 媒体 URL 字段，API 响应永不暴露原始 provider task id 或签名 URL。
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service`（含 `ReplacementCircuitBreakerTests` 100/2⇒legacy、100/1⇒shared、<100⇒shared、cancelled 不计失败、活动任务不中断、窗口有界；`ReplacementEventRedactionTests` provider 哈希与签名 URL 脱敏）和 `tests.test_replacement_web_mvp`、`tests.test_openapi_contract`。
+- 仅本地执行端生效，无中心服/远程/Docker/数据库变更；`migration.sql` 记为无迁移。切换 `VIDEO_REPLACEMENT_SERVICE_MODE` 需重启本地执行端；回滚设为 `legacy` 并重启，保留 job 文件与生成媒体，不删除数据、不重复提交已完成 provider task、不重复结算。发布侧保留上一稳定安装包/Tag 以决定客户端版本回滚。
+
 ## 2026-08-04 客户端默认连接公网中心服
 ### Fixed
 - Windows 客户端无 `MATRIX_CENTRAL` / `CENTRAL_URL` 环境变量时，默认中心服从 `http://127.0.0.1:9080` 改为 `http://120.26.194.174:9080`，避免用户从浏览器下载安装后登录请求打到本机空端口并显示 `WinError 10061`。

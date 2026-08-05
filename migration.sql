@@ -34,3 +34,12 @@ COMMIT;
 -- Database schema/data changes: none. Native-to-web video handoffs are short-lived
 -- local JSON files under replacement_web_handoffs and are feature-gated with the
 -- existing MATRIX_REPLACEMENT_WEB_ENABLED switch.
+-- Release: 2026-08-04 shared video replacement service, mode switch and circuit breaker.
+-- Database schema/data changes: none. Terminal-job metrics for the shared-service
+-- circuit breaker are stored as a bounded local JSON window (replacement_metrics.json,
+-- hashed job id only) under the local executor agent data directory; job state stays
+-- in existing local job.json files. No central-server, remote AI Canvas, resident port,
+-- or database changes are introduced.
+-- Runtime switch: VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared (restart the local
+-- executor to take effect). Rollback: set VIDEO_REPLACEMENT_SERVICE_MODE=legacy and
+-- restart; no SQL migration is required.

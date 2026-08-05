@@ -11688,6 +11688,146 @@ def _replacement_public_job(job):
     return _replacement_pipeline_for_job(job).public_job(job)
 
 
+def replacement_mode_for_new_job():
+    """Return the video-replacement service mode for a *new* job.
+
+    Controlled by ``VIDEO_REPLACEMENT_SERVICE_MODE`` (``legacy`` | ``shared``).
+    Defaults to ``legacy`` for safety. A new job uses ``shared`` only when BOTH
+    the env opt-in AND the local circuit breaker (``shared_mode_allowed``) agree;
+    when the breaker is open we emit ``shared_mode_circuit_opened`` /
+    ``rollback_requested`` and fall back to ``legacy``. A job already in flight
+    keeps whatever path it started on — the breaker only gates new jobs.
+    """
+    mode = str(os.getenv("VIDEO_REPLACEMENT_SERVICE_MODE", "") or "").strip().lower()
+    if mode != "shared":
+        return "legacy"
+    try:
+        import replacement_service
+    except Exception:
+        return "shared"
+    try:
+        base_dir = data_dir()
+    except Exception:
+        base_dir = None
+    try:
+        if replacement_service.shared_mode_allowed(base_dir):
+            return "shared"
+    except Exception:
+        # Fail open to shared only if the breaker itself is unavailable; any
+        # decision error must not silently strand an opted-in operator.
+        return "shared"
+    try:
+        state = replacement_service.circuit_breaker_state(base_dir)
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "shared_mode_circuit_opened", level="warning",
+            stage="new_job_gate", status="open",
+            detail={
+                "total": state.get("total"),
+                "failures": state.get("failures"),
+                "failureRate": round(float(state.get("failureRate") or 0.0), 6),
+            },
+        )
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "rollback_requested", level="warning",
+            stage="new_job_gate", status="legacy",
+        )
+    except Exception:
+        pass
+    return "legacy"
+
+
+def video_replacement_service_shared():
+    return replacement_mode_for_new_job() == "shared"
+
+
+class ReplacementServiceAdapter:
+    """Bridge the Qt VideoReplacementPage onto the shared ReplacementService.
+
+    The adapter only forwards request overrides built from Qt page controls and
+    reads job state back through the service's public (scrubbed) job. Provider
+    task IDs and billing refs live in job.json / the pipeline and are never
+    mutated here, so Qt never sees or rewrites internal paths, credentials or
+    provider task identifiers. Existing BRIDGE event shapes are preserved.
+    """
+
+    def __init__(self, data_dir=None, service=None, bridge=None):
+        self._data_dir = data_dir
+        self._service = service
+        self._bridge = bridge
+
+    def _resolve_service(self):
+        if self._service is None:
+            import replacement_web
+            self._service = replacement_web.build_video_service(self._data_dir or data_dir())
+        return self._service
+
+    def _emit(self, event, payload):
+        bridge = self._bridge if self._bridge is not None else BRIDGE
+        if bridge is not None:
+            bridge.payload.emit(event, payload)
+
+    def prepare(self, job_id, request, files, progress=None):
+        job = self._resolve_service().prepare(job_id, request, files, progress=progress)
+        self._emit("video_replace_plan_ready", {"jobId": job_id, "job": job})
+        return job
+
+    def execute(self, job_id, overrides=None, progress=None):
+        job = self._resolve_service().execute(job_id, overrides=overrides or {}, progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def retry(self, job_id, segment_indices, progress=None):
+        job = self._resolve_service().retry(job_id, segment_indices or [], progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def concat(self, job_id, progress=None):
+        job = self._resolve_service().concat(job_id, progress=progress)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "替换生成完成，已存入资产库",
+            "job": job,
+        })
+        return job
+
+    def cancel(self, job_id):
+        job = self._resolve_service().cancel(job_id)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "任务已取消",
+            "job": job,
+        })
+        return job
+
+    def _emit_run_result(self, job_id, job):
+        job = job if isinstance(job, dict) else {}
+        status = str(job.get("status") or "")
+        if status == "partial":
+            failed = [
+                segment for segment in (job.get("segments") or [])
+                if isinstance(segment, dict) and segment.get("status") in ("failed", "download_failed")
+            ]
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
+                "job": job,
+                "failedSegments": failed,
+            })
+        elif status in ("completed", "done"):
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成完成，已存入资产库",
+                "job": job,
+            })
+        elif status == "failed":
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成失败",
+                "job": job,
+            })
+        # running / awaiting_review are surfaced through progress events only.
+
+
 def _replacement_cancel_requested(job):
     return bool((job or {}).get("cancelRequested")) or str((job or {}).get("status") or "") == "cancel_requested"
 
@@ -15576,7 +15716,58 @@ class VideoReplacementPage(BasePage):
                     "message": "替换生成失败（错误编号 %s）:%s" % (error_id or "-", str(exc)[:120]),
                     "job": _replacement_public_job(failure_job),
                 })
+        if video_replacement_service_shared():
+            self._ensure_service_adapter()
+            run_bg(self._start_shared_service_job)
+            return
         run_bg(work)
+
+    def _ensure_service_adapter(self):
+        adapter = getattr(self, "_service_adapter", None)
+        if adapter is None:
+            adapter = ReplacementServiceAdapter(data_dir=data_dir())
+            self._service_adapter = adapter
+        return adapter
+
+    def _emit_service_progress(self, job_id, stage, message, segment_index, segments):
+        """Translate a shared-service pipeline progress callback into the
+        existing ``video_replace_progress`` BRIDGE event (same payload shape as
+        the legacy path). Only scrubbed, page-side data is emitted."""
+        job = self._job if isinstance(self._job, dict) else {}
+        segment = None
+        if segment_index is not None:
+            for item in (job.get("segments") or []):
+                if int(item.get("index") or 0) == int(segment_index or 0):
+                    segment = item
+                    break
+        timing = _replacement_timing_snapshot(job, segment, stage=stage)
+        prompt = ""
+        if segment_index is not None:
+            for item in segments or []:
+                if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                    prompt = str((item or {}).get("prompt") or "")
+                    break
+        BRIDGE.payload.emit("video_replace_progress", {
+            "jobId": job_id,
+            "stage": timing.get("stage") or stage or "",
+            "message": message or _replacement_stage_label(stage),
+            "timing": timing,
+            "segments": segments or [],
+            "prompt": prompt,
+        })
+
+    def _start_shared_service_job(self):
+        """Route generation through the shared ReplacementService adapter.
+
+        Qt only forwards plan overrides and reads job state back from job.json
+        via the adapter; it never mutates provider task IDs or billing refs."""
+        job = self._job if isinstance(self._job, dict) else {}
+        overrides = dict(getattr(self, "_service_overrides", None) or {})
+        return self._service_adapter.execute(
+            str(job.get("id") or ""),
+            overrides,
+            progress=self._emit_service_progress,
+        )
 
     def _run_job_segments(self, job, selected_segments):
         if _replacement_job_mode(job) == "comic_project":
@@ -17312,6 +17503,43 @@ def _wf_download(url, path):
     r.raise_for_status()  # 非 2xx(签名过期403/5xx/HTML错误页)直接抛错,别把错误页当成 mp4 存下来入队
     with open(path, "wb") as f:
         f.write(r.content)
+    return path
+
+
+def _replacement_source_extension(url):
+    ext = os.path.splitext(urlparse(str(url or "")).path)[1].lower()
+    return ext if ext in (".mp4", ".mov", ".webm", ".m4v") else ".mp4"
+
+
+def _replacement_web_download_source(source_url, job_dir):
+    """Direct-URL source downloader for the shared replacement service.
+
+    Reuses the breakdown/reference download path so production direct-URL
+    prepare works: it downloads into the job dir with the same helper the
+    reference-video analysis uses (``_wf_download``, which raises on non-2xx so
+    HTML/expired-signature error bodies are never stored), then validates the
+    media via ``_breakdown_source_validation`` before returning. Invalid media
+    is rejected and the partial file removed. Returns the local video path;
+    never logs the URL or the absolute path.
+    """
+    url = str(source_url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("replacement_invalid_source_url")
+    out_dir = os.path.abspath(str(job_dir or "").strip())
+    if not out_dir:
+        raise ValueError("replacement_source_job_dir_required")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(
+        out_dir, "source-%s%s" % (uuid.uuid4().hex[:12], _replacement_source_extension(url))
+    )
+    _wf_download(url, path)
+    validation = _breakdown_source_validation(path) or {}
+    if not validation.get("ok"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError(str(validation.get("code") or "replacement_source_media_invalid"))
     return path
 
 

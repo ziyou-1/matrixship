@@ -1,5 +1,13 @@
 # 部署说明
 
+## 2026-08-04 Shared video replacement service, mode switch and circuit breaker
+
+- Runtime tier: local execution engine only. This release adds no central-server, remote AI Canvas, Docker, database, or resident-port changes; `migration.sql` stays a no-op release note.
+- Mode switch: `VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared` selects the path for new video-replacement jobs, default `legacy`. Rollout order: enable `MATRIX_REPLACEMENT_WEB_ENABLED=1` and set the web/local executor to `shared`, keep Qt on `legacy`, validate the real local pipeline, then switch Qt to `shared`. **A mode change only takes effect after restarting the local executor / native client**; a job already in flight keeps its path.
+- Automatic circuit breaker: the local executor persists at most 500 recent terminal outcomes under `<agent-data-dir>/replacement_metrics.json` (hashed job id only). After at least 100 terminal jobs, if the shared-service failure ratio is strictly greater than 1% (`failed/total > 0.01`), new jobs automatically fall back to `legacy` and `shared_mode_circuit_opened` / `rollback_requested` are logged; exactly 1% does not trip it, cancelled jobs are not failures, and running jobs are never interrupted.
+- Boundary events for ops: `prepare_started`, `analysis_completed`, `provider_submitted`, `provider_recovered`, `billing_settled`, `video_completed`, `video_failed`, `shared_mode_circuit_opened`, `rollback_requested` are structured, redacted (job id, stage, model, provider-task hash, status, media-URL shape, cost/ref). No Token/Cookie/Authorization/signed URL/absolute path/raw bytes are logged.
+- Rollback: set `VIDEO_REPLACEMENT_SERVICE_MODE=legacy` and restart the local executor; keep existing job files and generated media for traceability. Do not delete task data, re-submit completed provider tasks, or re-settle billing. A local circuit trip does not auto-restore a prior installer across customers — keep the previous stable installer/image or tag and decide client version rollback from the logs. Code rollback restores `backend/replacement_service.py`, `backend/replacement_web.py`, `backend/matrix_native_client.py`, `backend/api_server.py`, the replacement tests, OpenAPI/four-level docs, `CHANGELOG.md`, and `migration.sql`.
+
 ## 2026-08-04 Local replacement web MVP `/replacement`
 
 - Runtime tier: local execution engine only (`backend/api_server.py`, default local client port `9081`). This release does not require central-server, remote AI Canvas, Docker image, or database deployment.

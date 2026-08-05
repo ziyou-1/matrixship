@@ -1,4 +1,12 @@
-﻿## 2026-08-04 `/comic-tool` 第 4 个 Windows 客户端下载入口不可用
+﻿## 2026-08-04 视频替换共享模式自动回退到 legacy（熔断）
+- 现象：设置了 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 并重启后，新的视频替换任务仍走旧 Qt 链路；日志出现 `replacement_shared_mode_circuit_opened` 和 `replacement_rollback_requested`。
+- 根因：本机自动熔断已触发。本地执行端在 `<agent-data-dir>/replacement_metrics.json` 持久化最近至多 500 条终态任务，当累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时，新任务自动切回 `legacy`；正好 1%（100 个里 1 个失败）不熔断，取消（cancelled）不计为失败，运行中的任务不会被打断。
+- 修复：先按 `video_failed` 事件的 `failureStage`、`model` 和 provider-task 哈希定位真实失败原因（来源下载、分析、生成或计费）；修复后失败率随新终态样本回落到 1% 以内即自动恢复 `shared`。需要立即恢复时可清空或轮转该本机 `replacement_metrics.json`（仅影响熔断统计窗口，不影响任何 job 数据），再重启本地执行端。
+- 排查：确认 `replacement_metrics.json` 只包含 job 哈希、status、failure 和时间戳，不含明文 job id、Token、Cookie、Authorization、签名 URL 或本地绝对路径；确认边界事件里 provider task id 只以哈希出现，media URL 只保留 scheme+host。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_service.ReplacementCircuitBreakerTests tests.test_replacement_service.ReplacementEventRedactionTests -v`。
+- 回滚：把 `VIDEO_REPLACEMENT_SERVICE_MODE` 设为 `legacy` 并重启本地执行端即可强制旧链路；保留 job 文件和生成媒体，不删除任务数据、不重复提交已完成 provider task、不重复结算。本机熔断不等于跨客户自动恢复旧安装包，必要时按上一稳定安装包/Tag 回滚客户端。不涉及中心服 API、数据库、Docker、`migration.sql`。
+
+## 2026-08-04 `/comic-tool` 第 4 个 Windows 客户端下载入口不可用
 - 现象：打开 `https://manju.yunlingai.net/comic-tool` 后只看到 3 个创作工具，或第 4 个工具不是「Windows 客户端」，或按钮仍显示“即将开放”。
 - 根因：线上远程 AI Canvas 仍运行旧 `/root/AI-CanvasPro/server.py`，`platform-index.html` 未注入 `yunling-download-card-injector`，或浏览器缓存了旧 SPA HTML。
 - 修复：部署包含下载卡片注入的 `tools/aicanvas_remote/server_current.py` 到 `/root/AI-CanvasPro/server.py`，重启 `ai-canvas.service`，然后强刷 `/comic-tool`。本地测试只证明镜像逻辑，不能代替远程部署。

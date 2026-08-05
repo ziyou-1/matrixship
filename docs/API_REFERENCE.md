@@ -921,6 +921,37 @@ tone=<optional text>
 
 可观测性：页面打开记录 `replacement_web_page_opened` 结构化日志；创建 job 记录 `replacement_web_job_started`，保存草稿记录 `replacement_note_draft_saved`，只包含 endpoint、taskType/jobId/draftMaterialId、ok 和稳定 error。回滚时关闭 `MATRIX_REPLACEMENT_WEB_ENABLED` 即可隐藏网页和 API；代码回滚恢复 `backend/api_server.py`、`backend/replacement_web.py`、`backend/platform_features.py`、OpenAPI/API 文档和本测试文件。
 
+### 视频替换生命周期、来源模式与轮询
+
+Qt 原生页面与 `/replacement` 网页共用同一套本地 `ReplacementService`，`job.json` 是唯一跨进程事实源。两类来源模式：
+
+- **handoff 复用**：原生客户端打开网页时通过短期 `handoffId`（`rwh_...`）复用已下载的源视频和分解结果，`prepare` 无需 `sourceUrl`。
+- **直接链接**：客户粘贴 `http/https` 视频链接，服务负责平台校验、本地下载、抽帧/OCR/转写/视觉分析和替换方案生成。
+
+生命周期路由（均受 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 和本机 agent token 保护，成功返回 202；`start` 为旧 MVP 兼容入口，仅创建 queued skeleton，不能绕过方案确认）：
+
+```text
+POST /api/replacement/video/prepare  -> 202  planned | source-failed（400 非法来源/缺主角图/超限；404 功能关闭或 handoff 缺失；500 准备失败）
+POST /api/replacement/video/execute  -> 202  仅 planned 可执行（409 非法状态；404 job 不存在）
+GET  /api/replacement/video/job      -> 200  脱敏生命周期快照
+POST /api/replacement/video/retry    -> 202  仅 partial/awaiting_review，只重试失败片段（409 非法状态）
+POST /api/replacement/video/concat   -> 202  仅 awaiting_review（409 非法状态）
+POST /api/replacement/video/cancel   -> 202  终态 job 原样返回，不伪造成功/失败
+GET  /api/replacement/video/download -> 200  校验 jobId/filename/输出根后串流成片，token 走请求头
+```
+
+轮询节奏：准备阶段每 1 秒，生成阶段每 2 秒。响应从不返回本地绝对路径、查询串、Token、Cookie、Authorization、Bearer、签名 URL 或原始字节；provider task id 仅以哈希出现。
+
+### 服务模式切换、熔断与回滚
+
+`VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared` 控制新任务走旧 Qt 链路还是共享服务，默认 `legacy`。**修改后需重启本地执行端生效**。首次发布让网页用 `shared`、Qt 保持 `legacy`，完成本地真实链路验证后再把 Qt 切到 `shared`。
+
+本机自动熔断：本地执行端在 agent 数据目录持久化最近至多 500 条终态任务（`replacement_metrics.json`，只存 job 哈希）。只有累计 **至少 100 个终态任务** 且失败率 **严格大于 1%**（`failed/total > 0.01`）时，才把 **新任务** 切回 `legacy` 并写 `shared_mode_circuit_opened` / `rollback_requested` 结构化事件；正好 1%（100 个里 1 个失败）不熔断。取消（cancelled）是终态但不计为失败。熔断只影响新任务的路由决策，**绝不中断已在运行的任务**。
+
+结构化边界事件（脱敏后只含 jobId、stage、model、provider-task 哈希、status、media-URL 形状和 cost/ref）：`prepare_started`、`analysis_completed`、`provider_submitted`、`provider_recovered`、`billing_settled`、`video_completed`、`video_failed`、`shared_mode_circuit_opened`、`rollback_requested`。
+
+回滚：把 `VIDEO_REPLACEMENT_SERVICE_MODE` 设为 `legacy` 并重启本地执行端；保留已有 job 文件和生成媒体以便追溯，不删除任务数据、不重复提交已完成 provider task、不重复结算费用。本机熔断不等于跨客户自动恢复旧安装包，发布侧仍需保留上一稳定版本镜像或安装包 Tag，必要时按日志决定客户端版本回滚。本次发布无数据库迁移（见 `migration.sql`）。
+
 ## 小红书图文同款
 
 运行单元：本地执行引擎 `127.0.0.1:9081`。功能开关为 `XHS_NOTE_REPLACEMENT_ENABLED`，默认启用；设置为 `0/false/no/off` 时以下接口返回 `feature_disabled`。
