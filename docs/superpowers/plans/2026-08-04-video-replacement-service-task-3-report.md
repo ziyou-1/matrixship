@@ -141,3 +141,28 @@ warning: in the working copy of 'tests/test_video_replacement_v2.py', LF will be
 warning: in the working copy of 'tests/test_web_surface_removed.py', LF will be replaced by CRLF the next time Git touches it
 warning: in the working copy of 'tools/aicanvas_remote/server_current.py', LF will be replaced by CRLF the next time Git touches it
 ```
+
+## Cancellation Event Follow-up
+
+- Changed the cancellation terminal event to emit `_replacement_public_job(job)` while keeping the persisted internal job unchanged.
+- Added `test_cancel_completion_event_uses_public_job_without_internal_paths` to verify that local paths remain available internally but are absent from `video_replace_done`.
+
+```text
+.\.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_cancel_completion_event_uses_public_job_without_internal_paths tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_public_payloads_hide_internal_segment_paths tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_execute_returns_canceled_job_after_segment_cancellation -v
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.430s
+
+OK
+```
+
+```text
+$env:MATRIX_CENTRAL='http://127.0.0.1:9080'; .\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_service tests.test_video_replacement tests.test_video_replacement_v2 -q
+
+----------------------------------------------------------------------
+Ran 388 tests in 11.665s
+
+OK
+```
+
+The explicit `MATRIX_CENTRAL` value isolates Task 3 from an unrelated dirty working-tree change that points the client default at the remote central service; the legacy migration test uses `127.0.0.1:9080` as its fixture origin.

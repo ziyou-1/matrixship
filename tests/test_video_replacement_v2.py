@@ -1442,6 +1442,67 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(result["segments"][0]["status"], "cancel_requested")
         self.assertTrue(any(item["status"] == "canceled" for item in saved))
 
+    def test_cancel_completion_event_uses_public_job_without_internal_paths(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            internal_paths = [
+                str(root),
+                str(root / "source.mp4"),
+                str(root / "output.mp4"),
+                str(root / "segment-01.mp4"),
+                str(root / "source-segment-01.mp4"),
+                str(root / "uploaded-source-segment-01.mp4"),
+            ]
+            job = {
+                "id": "job-cancel-public-event",
+                "status": "cancel_requested",
+                "outDir": internal_paths[0],
+                "sourceVideoPath": internal_paths[1],
+                "outputPath": internal_paths[2],
+                "segments": [{
+                    "index": 1,
+                    "status": "cancel_requested",
+                    "videoPath": internal_paths[3],
+                    "sourceSegmentPath": internal_paths[4],
+                    "sourceSegmentUploadPath": internal_paths[5],
+                    "diagnostics": {"detail": "canceled at " + internal_paths[4]},
+                }],
+            }
+            saved = []
+            emitted = []
+            bridge = types.SimpleNamespace(payload=types.SimpleNamespace(
+                emit=lambda tag, payload: emitted.append((tag, payload))
+            ))
+
+            with mock.patch.object(
+                    self.client,
+                    "_cleanup_replacement_sensitive_materials",
+                    return_value={"ok": True, "deleted": [], "failed": []},
+                ), mock.patch.object(
+                    self.client,
+                    "_cleanup_replacement_temporary_materials",
+                    return_value={"ok": True, "deleted": [], "failed": []},
+                ), mock.patch.object(
+                    self.client,
+                    "_save_replacement_job",
+                    side_effect=lambda value: saved.append(json.loads(json.dumps(value, ensure_ascii=False))),
+                ), mock.patch.object(self.client, "BRIDGE", bridge):
+                result = self.client._mark_replacement_job_canceled(job)
+
+        self.assertIs(result, job)
+        self.assertEqual(result["status"], "canceled")
+        self.assertEqual(saved[-1]["sourceVideoPath"], internal_paths[1])
+        self.assertEqual(saved[-1]["segments"][0]["sourceSegmentPath"], internal_paths[4])
+        self.assertEqual(emitted[-1][0], "video_replace_done")
+        public_payload = json.dumps(emitted[-1][1], ensure_ascii=False)
+        for private_key in (
+                "outDir", "sourceVideoPath", "outputPath", "videoPath",
+                "sourceSegmentPath", "sourceSegmentUploadPath",
+            ):
+            self.assertNotIn(private_key, public_payload)
+        for internal_path in internal_paths:
+            self.assertNotIn(internal_path, public_payload)
+
     def test_hybrid_pipeline_retry_only_replays_requested_failed_segment(self):
         with tempfile.TemporaryDirectory() as td:
             saved = []

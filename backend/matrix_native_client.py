@@ -11641,7 +11641,7 @@ def _mark_replacement_job_canceled(job, message="任务已取消，中心人脸�
     _save_replacement_job(job)
     if BRIDGE is not None:
         BRIDGE.payload.emit("video_replace_done", {
-            "jobId": job.get("id"), "message": message, "job": job,
+            "jobId": job.get("id"), "message": message, "job": _replacement_public_job(job),
         })
     return job
 
