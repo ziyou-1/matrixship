@@ -46,10 +46,19 @@ class BillingAnalyticsTest(unittest.TestCase):
         self.assertEqual([x["type"] for x in payload["distribution"]], ["video", "image", "voice", "other"])
 
     def test_refunded_model_log_expands_to_charge_and_refund(self):
+        """已退款的扣费,其扣费行本身也标 refunded。
+
+        2026-08-06 前这里断言扣费行是 charged。而 _consumption() 按 status=="charged"
+        统计,于是退掉的钱仍被计入"期间总消耗",导致矩阵账户中心(1319.41)与漫剧消费
+        账单(936.41)对不上——两边读的是同一张表。
+        """
         rows = normalize_billing_records(
             44, [], [{"id": 7, "request_id": "req-7", "task_id": "task-7", "model_id": "vidu", "model_type": "video", "amount": "10", "balance_after": "90", "status": "refunded", "created_at": "2026-07-29 10:00:00", "refunded_at": "2026-07-29 10:05:00"}], [], []
         )
-        self.assertEqual({x["status"]: x["change"] for x in rows}, {"charged": -10.0, "refunded": 10.0})
+        self.assertEqual(sorted((x["id"], x["status"], float(x["change"])) for x in rows), [
+            ("usage-7", "refunded", -10.0),
+            ("usage-refund-7", "refunded", 10.0),
+        ])
 
     def test_authoritative_refund_keeps_matching_model_charge_without_synthetic_refund(self):
         rows = normalize_billing_records(
@@ -59,9 +68,10 @@ class BillingAnalyticsTest(unittest.TestCase):
             [],
             [],
         )
+        # usage-7 标 refunded 而非 charged:它确实已退款,计入总消耗会与漫剧口径不符。
         self.assertEqual({row["id"]: (row["status"], row["change"]) for row in rows}, {
             "ledger-refund": ("refunded", Decimal("10")),
-            "usage-7": ("charged", Decimal("-10")),
+            "usage-7": ("refunded", Decimal("-10")),
         })
 
     def test_authoritative_recharges_deduplicate_camel_case_source_rows(self):
