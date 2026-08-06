@@ -3849,12 +3849,14 @@ def charge_user_actual_cost(user_id, amount, reason="LK888实际扣费", ref="",
         amount_power = maindb_power_from_yundou(amount)
         meta = meta if isinstance(meta, dict) else {}
         try:
+            # 不要把 LK888 的任务号塞进 task_id:该列是指向 generation_tasks.id 的外键,
+            # 写入外部任务号会触发 1452 外键错误。任务号本身已经在 request_id 里
+            # (ref = "lk888:<taskId>"),需要时从那里取。
             status, charged, bal, err = maindb.charge_actual_cost(
                 user_id,
                 amount_power,
                 request_id=ref,
                 model_id=str(meta.get("modelId") or ""),
-                task_id=str(meta.get("taskId") or "") or None,
                 description=reason,
                 allow_arrears=False,
             )
