@@ -433,10 +433,16 @@ def topup(uid, amount, reason="充值"):
 
 def list_model_usage_logs(uid, start_at, end_at, limit=50001):
     safe_limit = max(1, min(int(limit), 50001))
+    # created_ts / refunded_ts:让数据库直接给出 epoch。
+    # pymysql 返回的是不带时区的 datetime,调用方(billing_analytics._timestamp)会把它
+    # 当成北京时间,而库里存的是 UTC —— 每条记录因此早 8 小时,与中心服 JSON 账本的
+    # 真实 epoch 混排时,新扣费会沉到旧记录下面,账户中心"最新一条"的扣后余额对不上
+    # 当前余额。用 UNIX_TIMESTAMP() 由数据库换算,不依赖任何一侧对时区的假设。
     sql = (
         "SELECT id, request_id, user_id, project_id, task_id, model_id, model_type, "
         "billing_method, amount, balance_before, balance_after, status, description, "
-        "created_at, refunded_at FROM model_usage_logs "
+        "created_at, refunded_at, UNIX_TIMESTAMP(created_at) AS created_ts, "
+        "UNIX_TIMESTAMP(refunded_at) AS refunded_ts FROM model_usage_logs "
         "WHERE user_id=%s AND created_at >= %s AND created_at < %s "
         "ORDER BY created_at DESC, id DESC LIMIT %s"
     )
