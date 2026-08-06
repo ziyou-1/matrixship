@@ -201,6 +201,13 @@ class UnifiedBillingTest(unittest.TestCase):
         self.assertEqual(self.state["ledger"][0]["actualAmount"], 0.0371)
 
     def test_maindb_capability_charge_converts_yundou_to_power(self):
+        """1 元 = 1 算力。
+
+        2026-08-06 之前这里断言的是 0.14 元 -> 1.4 算力(即 ×10)。那个倍率的依据是
+        "与漫剧 recharge_packages 一致:50元=500算力",但线上实际是 50元档=50算力,
+        用户按 1:1 买进却被矩阵侧按 10 倍扣 —— 本用例把错误的倍率钉成了正确行为,
+        所以这个十倍超收一直没被测试发现。
+        """
         fake = FakeMainDb(rowcount=1)
 
         with mock.patch.object(self.server, "maindb", fake), \
@@ -212,8 +219,8 @@ class UnifiedBillingTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(balance, 10.0)
         self.assertIsNone(err)
-        self.assertEqual(fake.calls[0][1], ("1.4", 42, "1.4"))
-        self.assertEqual(self.state["ledger"][0]["delta"], -1.4)
+        self.assertEqual(fake.calls[0][1], ("0.14", 42, "0.14"))
+        self.assertEqual(self.state["ledger"][0]["delta"], -0.14)
         self.assertEqual(self.state["ledger"][0]["yundouAmount"], 0.14)
         self.assertEqual(self.state["ledger"][0]["wallet"], "maindb_generic")
 
