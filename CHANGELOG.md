@@ -1,5 +1,21 @@
 ﻿# Changelog
 
+## 2026-08-06 矩阵侧扣费与漫剧侧对齐
+### Fixed
+- `MAINDB_YUAN_TO_POWER` 由 10 改为 1。线上 `recharge_packages` 本就是 1 元 ≈ 1 算力（50元档=50算力），此前按 10 倍扣费属十倍超收。该常量同时决定扣费与微信充值入账，**必须共用一个值**。
+- 矩阵侧扣费不再只写中心服 JSON 账本。新增 `maindb.charge_actual_cost()`，在同一事务内完成余额扣减、`model_usage_logs` 与 `computing_power_records` 写入，漫剧的消费账单界面因此能看到矩阵侧消费。
+- 幂等改由 `model_usage_logs.request_id` 唯一索引保证。旧实现扫描会被截断到 8000 条的 JSON 账本，且查重与扣款不在同一把锁内，并发结算可重复扣费。
+
+### Changed
+- `charge_user_allow_arrears()` 更名 `charge_user_actual_cost()`：余额不足直接拒绝（`insufficient_balance`），不再允许扣成负数。
+- 漫剧账号的模型扣费不再写 JSON 账本，MySQL 为唯一权威，避免账户中心与漫剧账单出现双份来源。
+- `tests/test_billing_unified.py` 中把 10 倍汇率断言成正确行为的用例已修正——正是它让这个超收长期未被发现。
+
+### Verification And Operations
+- 计费相关套件 181/181 通过；新增 `tests/test_billing_parity.py` 11 条，已对旧代码 RED 验证。
+- 无需数据迁移：矩阵侧微信支付从未启用（0 订单），10 倍只作用于扣费；线上未设该环境变量，改默认值即生效。线上 `ix_model_usage_logs_request_id` 已是唯一索引且无重复，无需 ALTER。
+- 需重建中心服镜像并重启。不涉及数据库结构变更、客户端或安装包。
+
 ## 2026-08-06 客户端改用 HTTPS 独立子域中心服
 ### Fixed
 - 客户端默认中心服由明文 `http://120.26.194.174:9080` 改为 `https://central.yunlingai.net`。明文会让登录密码与会话 token 过公网，并被 `validate_service_url()` 拒绝而使"分解视频"的音频转写失败。

@@ -301,6 +301,102 @@ def refund_generation(request_id, reason=""):
         raise
 
 
+_POWER_RECORDS_OK = None
+
+
+def _power_records_available():
+    """computing_power_records 是否可写。只探一次并缓存;**不能**放进扣费事务里探,
+    否则探测失败会连累整笔扣费回滚。"""
+    global _POWER_RECORDS_OK
+    if _POWER_RECORDS_OK is None:
+        try:
+            _q("SELECT 1 FROM computing_power_records LIMIT 1")
+            _POWER_RECORDS_OK = True
+        except Exception:
+            _POWER_RECORDS_OK = False
+    return _POWER_RECORDS_OK
+
+
+def charge_actual_cost(uid, amount_power, request_id, model_id="", description="",
+                       project_id=None, task_id=None, model_type="media",
+                       billing_method="per_call", allow_arrears=False):
+    """按**实际成本**扣算力,并在同一事务内写 model_usage_logs + computing_power_records。
+
+    与 charge_generation() 的唯一区别是金额来源:这里由调用方给出(LK888 返回的真实消费),
+    不查 model_prices —— 上游随时新增模型,价格表必然覆盖不全,而真实成本永远可得。
+    其余一律对齐漫剧侧:同一事务、条件扣费、request_id 幂等、退款走 refund_generation()。
+
+    返回 (status, amount, balance_after, error)。
+    status ∈ {"charged", "duplicate", "insufficient", "error"}。
+
+    **语句顺序是有意的**:先 model_usage_logs 再 users,与 refund_generation() 完全一致
+    (它也是先 SELECT/UPDATE 流水再 UPDATE users)。反过来写会与并发退款形成死锁环。
+    """
+    if not request_id:
+        return "error", 0.0, get_balance(uid), "missing_request_id"
+    try:
+        amt = _to_dec(amount_power).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    except Exception:
+        return "error", 0.0, get_balance(uid), "amount_invalid"
+    if amt <= 0:
+        return "charged", 0.0, get_balance(uid), None
+
+    conn = _conn()
+    try:
+        conn.begin()
+        with conn.cursor() as cur:
+            # 1) 先占坑。request_id 上有唯一索引,重复结算在这里被数据库直接挡下 ——
+            #    幂等由数据库保证,不依赖任何进程内状态。
+            #    status 直接写 'success':未提交的行别人读不到,另造中间态反而可能撞上 ENUM。
+            try:
+                cur.execute(
+                    "INSERT INTO model_usage_logs (request_id, user_id, project_id, task_id, model_id, "
+                    "model_type, billing_method, amount, balance_before, balance_after, status, "
+                    "description, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,0,'success',%s,NOW())",
+                    (str(request_id), int(uid), project_id, task_id, str(model_id or ""),
+                     str(model_type or "media"), str(billing_method or "per_call"), str(amt),
+                     str(description or "matrixship 实际成本扣费")))
+            except pymysql.err.IntegrityError:
+                conn.rollback()
+                return "duplicate", 0.0, get_balance(uid), None
+            log_id = cur.lastrowid
+
+            # 2) 锁住余额行再判断,避免并发下两笔都通过校验
+            cur.execute("SELECT computing_power FROM users WHERE id=%s FOR UPDATE", (int(uid),))
+            row = cur.fetchone()
+            if not row:
+                conn.rollback()
+                return "error", float(amt), 0.0, "user_not_found"
+            bal_before = _to_dec(row.get("computing_power"))
+
+            if not allow_arrears and bal_before < amt:
+                conn.rollback()
+                return "insufficient", float(amt), float(bal_before), "insufficient_balance"
+
+            bal_after = bal_before - amt
+            # 持有行锁,直接赋绝对值:保证写进流水的 balance_after 与库里实际值一致
+            cur.execute("UPDATE users SET computing_power=%s, updated_at=NOW() WHERE id=%s",
+                        (str(bal_after), int(uid)))
+            cur.execute("UPDATE model_usage_logs SET balance_before=%s, balance_after=%s WHERE id=%s",
+                        (str(bal_before), str(bal_after), log_id))
+
+            # 3) 余额流水表:漫剧的账单界面读它,不写这张表就等于矩阵侧的消费在那边"隐身"
+            if _power_records_available():
+                cur.execute(
+                    "INSERT INTO computing_power_records (user_id, change_type, amount, balance, "
+                    "order_id, description, created_at) VALUES (%s,'consume',%s,%s,NULL,%s,NOW())",
+                    (int(uid), str(-amt), str(bal_after),
+                     str(description or "matrixship 实际成本扣费")))
+        conn.commit()
+        return "charged", float(amt), float(bal_after), None
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return "error", float(amt), get_balance(uid), str(e)[:120]
+
+
 def topup(uid, amount, reason="充值"):
     """给用户加算力(充值/兑换/管理员)。返回 (ok, balance_after)。"""
     amt = _to_dec(amount)

@@ -1,4 +1,28 @@
-﻿## 2026-08-06 分解失败 `remote service URL must use https; http is allowed only for loopback hosts`
+﻿## 2026-08-06 矩阵侧扣费十倍超收、且漫剧消费账单看不到
+- 现象：漫剧后台的消费账单里看不到任何来自矩阵侧的消费，用户余额却在下降。核对时会发现余额比 `computing_power_records` / `model_usage_logs` 的最后一条记录少一截（排查当天账号 44 少了 77.23），像是"丢钱"。同时同一个模型经矩阵侧调用扣的算力约为漫剧侧的十倍。
+- 根因一（十倍超收）：`backend/central_server.py` 的 `MAINDB_YUAN_TO_POWER` 取 10，注释依据是"与漫剧 recharge_packages 一致：50元=500算力"。但线上 `recharge_packages` 实际是 `50元档=50算力、100元档=105、500元档=550、1000元档=1150`，**本来就是 1 元 ≈ 1 算力**。用户按 1:1 买进、矩阵侧按 10 倍扣。`tests/test_billing_unified.py` 里的用例还把这个倍率断言成了正确行为，因此长期没被发现。
+- 根因二（账单隐身）：矩阵侧扣费走 `charge_user_allow_arrears()`，只做一条无条件 `UPDATE users SET computing_power`，流水仅写中心服的 JSON 账本（`STATE["ledger"]`，持久化在 `central_data/scheduler_state.json`），从不写 `model_usage_logs` / `computing_power_records`。生产库 `model_usage_logs` 共 11415 行、`description LIKE 'matrixship%'` 的 **0 行**，`charge_generation()` 在中心服里从未被调用。
+- 根因三（可重复扣费）：幂等靠反向扫描 `STATE["ledger"]` 找同 `ref` 的负数流水，而该账本被 `_add_ledger()` 截断到最近 8000 条；且"查重"在 `with LOCK` 内、"扣款"在锁外，两个并发结算可以同时查不到、同时扣款。
+- 修复：`MAINDB_YUAN_TO_POWER` 默认值改为 1（该常量同时决定扣费换算与微信充值入账，**不可拆成两个**，只改一边即为十倍定价错误）。新增 `maindb.charge_actual_cost()`：在**同一事务**内写 `model_usage_logs`、`SELECT ... FOR UPDATE` 锁余额行、条件扣费、更新余额、回填流水的 `balance_before/after`、并写 `computing_power_records`。`charge_user_allow_arrears()` 更名为 `charge_user_actual_cost()` 并改为调用它；漫剧账号**不再写 JSON 账本**。
+- 语句顺序：先 `model_usage_logs` 再 `users`，与 `refund_generation()` 一致。反序会与并发退款形成死锁环，改动此处前务必确认两侧同序。
+- 幂等：改由 `model_usage_logs.request_id` 的唯一索引保证（线上已存在 `ix_model_usage_logs_request_id`，unique=1，且重复组数为 0，**无需 ALTER**）。重复结算返回 `duplicate`，上层视为成功、不重试。
+- 余额不足：改为直接拒绝（`insufficient_balance`），不再允许扣成负数。这是行为变更——此前余额可为负，用户会遇到"以前能跑、现在被拦"。
+- 账单一致性：`billing_analytics.normalize_billing_records()` 会按 `ref` / `request_id` 合并去重（`billing_analytics.py#L177-L179`）。因此矩阵侧写入 `model_usage_logs` 的 `request_id` **必须**与 JSON 账本的 `ref` 字节相同（现为 `lk888:<taskId>`），否则账户中心会重复计数。本次已改为只写 MySQL，从结构上消除双源。
+- 排查：漫剧账单看不到矩阵消费时，按 `ref` 三层对账——`users.computing_power`（唯一真值）→ `model_usage_logs`（两个界面的明细来源）→ JSON 账本（仅非漫剧账号与充值/兑换码）。MySQL 有而 JSON 无属正常（截断）；JSON 有而 MySQL 无说明写库失败，必须告警。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_billing_parity tests.test_billing_analytics tests.test_billing_unified tests.test_billing_dashboard_api tests.test_account_billing_dashboard tests.test_billing_rollout_guard tests.test_native_billing_rates tests.test_aicanvas_frame_billing tests.test_lk888_media_task_parsing tests.test_openapi_contract` 181/181 通过。新增 `tests/test_billing_parity.py` 11 条，已用 `git stash` 对旧代码做 RED 验证（1 失败 + 9 错误）。
+- 迁移：无需迁移。矩阵侧微信支付从未配置（四个密钥为空、充值订单 0 条），`MAINDB_YUAN_TO_POWER` 的 10 倍**只作用在扣费上**，没有任何余额按 10 倍充入过。生产也未设该环境变量，改代码默认值即生效。
+- 回滚：回滚 `backend/maindb.py`、`backend/central_server.py`、`tests/test_billing_parity.py`、`tests/test_billing_unified.py` 与本节，重建中心服镜像并重启。回滚后恢复十倍扣费与账单隐身。不涉及数据库结构变更。
+
+## 2026-08-06 中心服 compose 在 `current` 软链目录下推断出错误项目名，险些挂空数据卷启动
+- 现象：在 `/opt/matrixship-central-prod/current` 下执行 `docker compose -f docker-compose.prod.yml up -d` 重建中心服，输出 `project has been loaded without an explicit name from a symlink. Using name "current"`，随后创建 `current_default` 网络和 `current_matrix-central-data` 数据卷，最后以 `Bind for :::9080 failed: port is already allocated` 失败。
+- 根因：`current` 是指向 `releases/<tag>` 的软链，compose 在没有 `-p`、目录下也没有 `.env` 或 `name:` 字段时，用当前目录名推断项目名，于是把项目名定为 `current` 而不是 `matrixship-central-prod`。项目名是卷名和容器名的前缀，compose 因此**不认识**已有的 `matrixship-central-prod_matrix-central-data`，转而新建同名后缀的空卷。这次是原容器仍占着 9080 才启动失败；**若端口空闲，新容器会挂着空的 `/app/central_data` 正常起来，企业、用户、成员关系看起来全部消失**（与本文件 `scheduler_state.json` 被默认骨架覆盖那条是不同成因、相同表象）。
+- 修复：重建命令必须显式带项目名，`--no-build` 避免误触发 `build:` 段重新构建镜像，`IMAGE_TAG` 必须显式传当前 release（compose 里默认值是 `prod-local`，不传会指向一个不存在或过期的镜像）：`cd /opt/matrixship-central-prod/current && IMAGE_TAG=<release> docker compose -p matrixship-central-prod -f docker-compose.prod.yml up -d --no-build`。当前 release 用 `readlink -f current` 或 `docker inspect matrixship-central-prod-matrix-central-1 --format '{{.Config.Image}}'` 确认。
+- 排查：误建的项目用 `docker rm -f current-matrix-central-1`、`docker network rm current_default`、`docker volume rm current_matrix-central-data` 清理；`docker volume ls | grep matrix` 之后应只剩 `matrixship-central-prod_matrix-central-data` 一个。重建后必须确认挂载卷名正确：`docker inspect matrixship-central-prod-matrix-central-1 --format '{{range .Mounts}}{{.Name}}{{end}}'`。
+- 验证：2026-08-06 修改 `backend/.env.prod` 的 `CENTRAL_ADMIN_PASSWORD` 后按上述命令重建，实测容器 `running/healthy`、镜像 tag 未变、挂载卷为 `matrixship-central-prod_matrix-central-data`、`scheduler_state.json` 仍为 393649 字节、9080 正常 LISTEN、`/api/health` 200，四个 `MATRIX_*` feature flag 与重建前一致仍为 `0`。
+- 回滚：`.env.prod` 改动回滚为 `cp -p .env.prod.bak-<时间戳> .env.prod` 后按同一条命令重建。误建项目的清理不可回滚，但那三个对象都是本次新建的空对象，删除不影响生产数据。不涉及代码、镜像、数据库、OpenAPI 或 `migration.sql`。
+- 遗留：`docker-compose.prod.yml` 里没有 `name:` 字段，只要有人漏掉 `-p` 就会重踩。根治办法是在该文件顶部加 `name: matrixship-central-prod`（compose v2.20+ 支持），或在 `current/` 放一个含 `COMPOSE_PROJECT_NAME=matrixship-central-prod` 的 `.env`。**另外：公网中心服平台管理员口令目前仍是仓库和文档里公开写着的弱口令，`http://120.26.194.174:9080` 直接对外，建议收到 nginx 之后再改随机口令。**
+
+## 2026-08-06 分解失败 `remote service URL must use https; http is allowed only for loopback hosts`
 - 现象：公网下载安装的客户端，采集和下载都正常，分解视频走到"调用视觉模型分析关键帧"之后失败，报告里只有来源信息，`音频转写: failed`，末尾是上面这条英文错误和一个 errorId。
 - 根因：客户端不直连模型服务，转写用的 base_url 是 `lk888_config()["base_url"]` = `CENTRAL + "/lk888"`。2026-08-05 把 CENTRAL 默认值改成公网明文 `http://120.26.194.174:9080` 之后，`backend/utils/video_transcription.py` 的 `validate_service_url()` 判定"非回环主机必须 HTTPS"而抛 `ValueError`；该异常没有被捕获，一路冒到分解主流程，把整份报告变成失败。改之前默认值是回环地址，这条校验永远放行，所以从未暴露。校验本身是对的——明文会让口播音频和登录凭据一起过公网。
 - 修复：中心服增加 HTTPS 独立入口 `https://central.yunlingai.net`（nginx 新增两个 server 块 + Let's Encrypt 证书），客户端默认中心服改为该地址；`_transcribe_breakdown_audio()` 捕获 `ValueError` 并降级为"转写这一步失败"，画面与 OCR 分析继续，失败原因和错误码写入报告；`_video_breakdown_markdown()` 增加"转写失败原因/代码"两行。
