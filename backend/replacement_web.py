@@ -81,6 +81,9 @@ def replacement_page_html():
     .frame-row figure img { margin-bottom: 2px; }
     .frame-row figcaption { color: #667085; font-size: 11px; text-align: center; }
     .seg-video { width: 100%; border-radius: 6px; border: 1px solid #e4e9f0; background: #000; margin: 6px 0; }
+    .seg-script-label { display: block; font-size: 12px; color: #475569; margin: 6px 0 3px; }
+    textarea.seg-script { width: 100%; min-height: 60px; resize: vertical; font-size: 13px; line-height: 1.5; border: 1px solid #d7dee7; border-radius: 6px; padding: 6px 8px; box-sizing: border-box; }
+    textarea.seg-script[readonly] { background: #f4f6f9; color: #667085; }
     .slot-item strong, .copy-option strong { display: block; font-size: 13px; margin-bottom: 4px; }
     .meta { color: #667085; font-size: 12px; overflow-wrap: anywhere; }
     .copy-option { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; border: 1px solid #d7dee7; border-radius: 6px; padding: 10px; background: white; cursor: pointer; }
@@ -135,6 +138,7 @@ def replacement_page_html():
         <button type="button" id="video-cancel" hidden>\u53d6\u6d88\u4efb\u52a1</button>
         <button type="button" id="video-concat" class="primary" hidden>\u5408\u6210\u6210\u7247</button>
         <a id="video-download" href="#" hidden>\u4e0b\u8f7d\u6210\u7247</a>
+        <button type="button" id="video-save-library" hidden>\u52a0\u5165\u7d20\u6750\u5e93</button>
       </div>
       <div id="video-regen-row" class="check-row" hidden style="gap:8px;flex-wrap:wrap;align-items:center;">
         <span>\u6f2b\u5267\u9996\u5c3e\u5e27\u91cd\u751f\uff1a\u7247\u6bb5</span>
@@ -474,11 +478,13 @@ function renderVideoSegments(job) {
       mediaHtml += '</div>';
     }
     if (media.video) mediaHtml += '<video data-media-url="' + escapeHtml(mediaUrl(segment.index, 'video')) + '" controls preload="none" class="seg-video"></video>';
+    const scriptEditable = ['planned', 'pending', ''].indexOf(String(segment.status || '')) !== -1;
+    const scriptHtml = '<label class="seg-script-label">口播稿</label>' +
+      '<textarea class="seg-script" data-segment-script="' + escapeHtml(segment.index) + '"' + (scriptEditable ? '' : ' readonly') + ' placeholder="可编辑本段口播稿">' + escapeHtml(segment.script || '') + '</textarea>';
     holder.insertAdjacentHTML('beforeend',
       '<div class="slot-item"><strong>' + title + '</strong>' +
       '<div class="meta">' + range + '</div>' +
-      '<div class="meta">' + note + '</div>' + err + mediaHtml +
-      '<input data-segment-index="' + escapeHtml(segment.index) + '" placeholder="可补充本段要求"></div>');
+      '<div class="meta">' + note + '</div>' + err + mediaHtml + scriptHtml + '</div>');
   });
   loadSegmentMedia();
 }
@@ -496,10 +502,9 @@ async function loadSegmentMedia() {
   }
 }
 function collectVideoPlanOverrides() {
-  const inputs = Array.from(document.querySelectorAll('#video-segments input[data-segment-index]'));
-  const segments = inputs
-    .map(input => ({index: Number(input.dataset.segmentIndex), note: (input.value || '').trim()}))
-    .filter(item => item.note);
+  const segments = Array.from(document.querySelectorAll('#video-segments textarea[data-segment-script]'))
+    .filter(area => !area.readOnly)
+    .map(area => ({index: Number(area.dataset.segmentScript), script: (area.value || '')}));
   return segments.length ? {segments} : {};
 }
 function renderVideoJob(job) {
@@ -518,6 +523,8 @@ function renderVideoJob(job) {
   const canDownload = !!(job.download && job.download.available);
   download.hidden = !canDownload;
   download.dataset.filename = canDownload ? (job.download.filename || '') : '';
+  const saveLib = document.getElementById('video-save-library');
+  if (saveLib) saveLib.hidden = !canDownload;
   const regenRow = document.getElementById('video-regen-row');
   if (regenRow) regenRow.hidden = !(job.replacementMode === 'comic_project' && job.status === 'awaiting_review');
   status.textContent = videoStatusMessage(job) + '\\n\\n' + JSON.stringify(job, null, 2);
@@ -638,6 +645,28 @@ async function downloadVideoResult(event) {
     status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
   }
 }
+async function saveVideoToLibrary() {
+  const jobId = currentVideoJobId();
+  const status = document.getElementById('video-status');
+  if (!jobId) return;
+  if (!authHeaders()['X-Matrix-Agent-Token']) { status.textContent = formatReplacementError({error: 'agent_token_required'}, 401); return; }
+  const btn = document.getElementById('video-save-library');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/replacement/video/save-to-library', {
+      method: 'POST',
+      headers: authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({jobId})
+    });
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) { status.textContent = formatReplacementError(json, res.status) + '\\n\\n' + JSON.stringify(json, null, 2); return; }
+    status.textContent = (json.alreadyAdded ? '该成片已在素材库中。' : '已加入素材库。') + '\\n\\n' + JSON.stringify(json, null, 2);
+  } catch (error) {
+    status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 function syncVideoPersonMode() {
   const noPerson = document.getElementById('video-no-person');
   const authBox = document.getElementById('video-person-auth');
@@ -682,6 +711,7 @@ document.getElementById('video-cancel').addEventListener('click', cancelVideoJob
 document.getElementById('video-concat').addEventListener('click', concatVideoJob);
 document.getElementById('video-regen').addEventListener('click', regenerateVideoFrame);
 document.getElementById('video-download').addEventListener('click', downloadVideoResult);
+document.getElementById('video-save-library').addEventListener('click', saveVideoToLibrary);
 document.getElementById('note-form').addEventListener('submit', e => { e.preventDefault(); submitForm('note-form', '/api/replacement/note/start', 'note-status'); });
 document.getElementById('note-save').addEventListener('click', saveNoteDraft);
 syncVideoPersonMode();
@@ -1385,9 +1415,29 @@ def prepare_video_job(data_dir, fields, files):
     return video_job_response(raw)
 
 
+_SEGMENT_SCRIPT_MAX = 5000
+
+
+def _validate_segment_overrides(overrides):
+    """Reject oversized per-segment 口播稿 edits before they reach the service."""
+    segments = (overrides or {}).get("segments")
+    if not isinstance(segments, list):
+        return None
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        script = segment.get("script")
+        if isinstance(script, str) and len(script) > _SEGMENT_SCRIPT_MAX:
+            return _error("replacement_segment_script_too_long", stage="execute", status=400)
+    return None
+
+
 def execute_video_job(data_dir, job_id, overrides):
     if not _valid_job_id("video", job_id) or not load_job(data_dir, "video", job_id):
         return _error("replacement_job_not_found", stage="execute", status=404)
+    script_error = _validate_segment_overrides(overrides)
+    if script_error:
+        return script_error
     service = build_video_service(data_dir)
     try:
         service.execute(job_id, overrides=overrides or {})
@@ -1468,7 +1518,7 @@ def regenerate_frame_video_job(data_dir, job_id, segment_index, frame_kind):
 _VIDEO_SEGMENT_FIELDS = (
     "index", "start", "end", "status", "qcStatus", "audioStatus",
     "segmentType", "stage", "stageLabel", "elapsedSec", "etaSec",
-    "error", "errorId", "progressText",
+    "error", "errorId", "progressText", "script", "scriptReviewed",
 )
 
 
@@ -1599,6 +1649,51 @@ def video_segment_media_path(data_dir, job_id, segment_index, kind):
     if ext not in IMAGE_EXTENSIONS:
         return None, "", "unsupported_file_type", 400
     return resolved, "image", "", 200
+
+
+def video_job_library_source(data_dir, job_id):
+    """Resolve a COMPLETED video job's finalized output so the server can copy it
+    into the material library (素材库 / 素材发布). Returns (path, meta, error, status).
+    The path is for server-internal copying only; meta stays redacted (jobId /
+    platform / filename / any existing material id), never the local path or a
+    provider URL."""
+    if not _valid_job_id("video", job_id):
+        return None, {}, "bad_path", 400
+    job = load_job(data_dir, "video", job_id)
+    if not job:
+        return None, {}, "replacement_job_not_found", 404
+    if str(job.get("status") or "") not in ("completed", "done"):
+        return None, {}, "replacement_job_not_completed", 409
+    output_path = str(job.get("outputPath") or "").strip()
+    if not output_path or not os.path.isfile(output_path):
+        return None, {}, "replacement_output_missing", 404
+    resolved = os.path.abspath(output_path)
+    sandbox = os.path.abspath(data_dir)
+    if resolved != sandbox and not resolved.startswith(sandbox + os.sep):
+        return None, {}, "forbidden", 403
+    if os.path.splitext(resolved.lower())[1] not in _VIDEO_MEDIA_EXTENSIONS:
+        return None, {}, "unsupported_file_type", 400
+    source = job.get("source") if isinstance(job.get("source"), dict) else {}
+    context = job.get("sourceContext") if isinstance(job.get("sourceContext"), dict) else {}
+    meta = {
+        "jobId": str(job.get("id") or job_id),
+        "platform": str(context.get("platform") or source.get("platform") or ""),
+        "filename": os.path.basename(resolved),
+        "existingMaterialId": str(job.get("libraryMaterialId") or ""),
+    }
+    return resolved, meta, "", 200
+
+
+def mark_video_added_to_library(data_dir, job_id, material_id):
+    """Record the material-library id on the video job so a repeat request is a
+    no-op instead of duplicating the material."""
+    job = load_job(data_dir, "video", job_id)
+    if not job:
+        return None
+    job["libraryMaterialId"] = str(material_id or "")
+    job["updatedAt"] = time.time()
+    _write_job(data_dir, "video", job)
+    return job
 
 
 def start_note_job(data_dir, fields, files):

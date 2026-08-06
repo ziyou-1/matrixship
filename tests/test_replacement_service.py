@@ -358,6 +358,44 @@ class ReplacementServiceContractTests(unittest.TestCase):
             self.assertTrue(saved["outputPath"].endswith("final.mp4"))
             self.assertFalse((job_path.parent / "job.json.tmp").exists())
 
+    def test_apply_overrides_applies_segment_script_edit_and_clears_frozen_durations(self):
+        with tempfile.TemporaryDirectory() as td:
+            service = self._service(td)
+            job = {
+                "id": "rvw_apply",
+                "segments": [
+                    {"index": 1, "script": "旧稿", "speechDurationSec": 3.0, "videoDurationSec": 4.0},
+                    {"index": 2, "script": "保持不变"},
+                ],
+            }
+            service._apply_overrides(job, {"segments": [
+                {"index": 1, "script": "  改写后的口播稿  "},
+                {"index": 2, "script": "保持不变"},
+            ]})
+            seg1, seg2 = job["segments"]
+            # Edited segment: trimmed, marked reviewed, frozen comic durations dropped.
+            self.assertEqual(seg1["script"], "改写后的口播稿")
+            self.assertTrue(seg1["scriptReviewed"])
+            self.assertNotIn("speechDurationSec", seg1)
+            self.assertNotIn("videoDurationSec", seg1)
+            # Unchanged segment stays byte-identical (no scriptReviewed injected).
+            self.assertEqual(seg2, {"index": 2, "script": "保持不变"})
+            # Raw overrides are still merged for audit.
+            self.assertIn("segments", job["overrides"])
+
+    def test_execute_persists_edited_segment_script(self):
+        with tempfile.TemporaryDirectory() as td:
+            service = self._service(td)
+            service.prepare(
+                "job-script",
+                {"sourceUrl": "https://example.test/video.mp4"},
+                [("characterImage", "face.png", b"img")],
+            )
+            service.execute("job-script", overrides={"segments": [{"index": 1, "script": "新的口播稿"}]})
+            saved = json.loads((Path(td) / "job-script" / "job.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["segments"][0]["script"], "新的口播稿")
+            self.assertTrue(saved["segments"][0]["scriptReviewed"])
+
     def test_execute_failure_marks_job_failed_without_success_result(self):
         with tempfile.TemporaryDirectory() as td:
             service = self._service(td, pipeline=FailingPipeline())

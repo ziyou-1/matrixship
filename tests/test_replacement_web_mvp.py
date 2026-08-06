@@ -1307,6 +1307,99 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
         self.assertIn("/api/replacement/video/media", html)
         self.assertIn("seg-video", html)
 
+    def test_video_job_response_exposes_segment_script_for_prefill(self):
+        raw = {
+            "id": "rvw_%s" % ("c" * 24),
+            "taskType": "video",
+            "status": "planned",
+            "segments": [{"index": 1, "status": "planned", "script": "识别到的口播稿"}],
+        }
+        response = self.mod.video_job_response(raw)
+        self.assertEqual(response["segments"][0]["script"], "识别到的口播稿")
+
+    def test_execute_rejects_oversized_segment_script(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("d" * 24)
+            self._persist_video_job(td, job_id, [{"index": 1, "status": "planned"}])
+            response = self.mod.execute_video_job(
+                td, job_id, {"segments": [{"index": 1, "script": "x" * 5001}]})
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["error"], "replacement_segment_script_too_long")
+            self.assertEqual(response["statusCode"], 400)
+
+    def test_replacement_page_has_editable_per_segment_script(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn("data-segment-script", html)
+        self.assertIn("口播稿", html)
+        self.assertIn("seg-script", html)
+        # the dead per-segment "note" input has been removed
+        self.assertNotIn("可补充本段要求", html)
+
+    def _write_completed_video_job(self, td, job_id, filename="final.mp4", status="completed", source=None):
+        job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        out = os.path.join(job_dir, filename)
+        Path(out).write_bytes(b"final-bytes")
+        job = {"id": job_id, "taskType": "video", "status": status, "outputPath": out}
+        if source is not None:
+            job["source"] = source
+        with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+            json.dump(job, f)
+        return job_dir, out
+
+    def test_video_job_library_source_resolves_completed_output_with_redacted_meta(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("b" * 24)
+            _job_dir, out = self._write_completed_video_job(td, job_id, source={"platform": "douyin"})
+            path, meta, error, status = self.mod.video_job_library_source(td, job_id)
+            self.assertEqual((error, status), ("", 200))
+            self.assertEqual(os.path.abspath(out), path)
+            self.assertEqual(meta["platform"], "douyin")
+            self.assertEqual(meta["filename"], "final.mp4")
+            self.assertNotIn(td, json.dumps(meta, ensure_ascii=False))
+
+    def test_video_job_library_source_guards_status_output_and_sandbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            # malformed job id
+            self.assertEqual(self.mod.video_job_library_source(td, "nope")[2], "bad_path")
+            # not completed
+            partial = "rvw_%s" % ("c" * 24)
+            self._persist_video_job(td, partial, [{"index": 1, "status": "planned"}])
+            self.assertEqual(self.mod.video_job_library_source(td, partial)[2], "replacement_job_not_completed")
+            # completed but the output file is gone
+            gone = "rvw_%s" % ("d" * 24)
+            gdir = os.path.join(td, "replacement_web_jobs", "video", gone)
+            os.makedirs(gdir, exist_ok=True)
+            with open(os.path.join(gdir, "job.json"), "w", encoding="utf-8") as f:
+                json.dump({"id": gone, "taskType": "video", "status": "completed",
+                           "outputPath": os.path.join(gdir, "missing.mp4")}, f)
+            self.assertEqual(self.mod.video_job_library_source(td, gone)[2], "replacement_output_missing")
+            # output escapes the data sandbox
+            leaky = "rvw_%s" % ("e" * 24)
+            ldir = os.path.join(td, "replacement_web_jobs", "video", leaky)
+            os.makedirs(ldir, exist_ok=True)
+            with tempfile.TemporaryDirectory() as outside:
+                leak = os.path.join(outside, "leak.mp4")
+                Path(leak).write_bytes(b"x")
+                with open(os.path.join(ldir, "job.json"), "w", encoding="utf-8") as f:
+                    json.dump({"id": leaky, "taskType": "video", "status": "completed", "outputPath": leak}, f)
+                self.assertEqual(self.mod.video_job_library_source(td, leaky)[3], 403)
+
+    def test_video_job_library_source_reports_existing_material_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("f" * 24)
+            self._write_completed_video_job(td, job_id)
+            self.mod.mark_video_added_to_library(td, job_id, "mat123")
+            _path, meta, error, _status = self.mod.video_job_library_source(td, job_id)
+            self.assertEqual(error, "")
+            self.assertEqual(meta["existingMaterialId"], "mat123")
+
+    def test_replacement_page_has_save_to_library_control(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn("video-save-library", html)
+        self.assertIn("saveVideoToLibrary", html)
+        self.assertIn("/api/replacement/video/save-to-library", html)
+
 
 class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
     def setUp(self):
@@ -1523,6 +1616,79 @@ class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
                 self.assertEqual(gated_status, 404)
                 self.assertEqual(gated_payload["error"], "replacement_web_disabled")
 
+    def test_save_to_library_route_adds_completed_video_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("b" * 24)
+            job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            out = os.path.join(job_dir, "final.mp4")
+            Path(out).write_bytes(b"final-bytes")
+            with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+                json.dump({"id": job_id, "taskType": "video", "status": "completed",
+                           "outputPath": out, "source": {"platform": "douyin"}}, f)
+            materials = os.path.join(td, "materials")
+            os.makedirs(materials, exist_ok=True)
+            body = json.dumps({"jobId": job_id}).encode()
+            headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=True
+            ), patch.object(self.api, "DATA_DIR", td), patch.object(
+                self.api, "MATERIALS_DIR", materials
+            ), patch.object(self.api, "LIBRARY_JSON", os.path.join(td, "library.json")):
+                with self.api.STATE_LOCK:
+                    self.api._MEM["library"] = []
+                first = self._handler("/api/replacement/video/save-to-library", method="POST", body=body, headers=headers)
+                first.do_POST()
+                st, payload = self._response(first)
+                self.assertEqual(st, 200)
+                self.assertTrue(payload["ok"])
+                mid = payload["id"]
+                lib = self.api.load_library()
+                self.assertEqual(len(lib), 1)
+                self.assertEqual(lib[0]["type"], "video")
+                self.assertEqual(lib[0]["replacementJobId"], job_id)
+                self.assertTrue(os.path.isfile(os.path.join(materials, mid, "final.mp4")))
+                # response is redacted: no local sandbox path leaks
+                self.assertNotIn(td, json.dumps(payload, ensure_ascii=False))
+
+                # A repeat request is a no-op that returns the same material id.
+                second = self._handler("/api/replacement/video/save-to-library", method="POST", body=body, headers=headers)
+                second.do_POST()
+                st2, payload2 = self._response(second)
+                self.assertEqual(st2, 200)
+                self.assertTrue(payload2.get("alreadyAdded"))
+                self.assertEqual(payload2["id"], mid)
+                self.assertEqual(len(self.api.load_library()), 1)
+
+    def test_save_to_library_route_rejects_incomplete_job_and_respects_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("c" * 24)
+            job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+                json.dump({"id": job_id, "taskType": "video", "status": "partial"}, f)
+            body = json.dumps({"jobId": job_id}).encode()
+            headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=True
+            ), patch.object(self.api, "DATA_DIR", td):
+                h = self._handler("/api/replacement/video/save-to-library", method="POST", body=body, headers=headers)
+                h.do_POST()
+                st, payload = self._response(h)
+                self.assertEqual(st, 409)
+                self.assertEqual(payload["error"], "replacement_job_not_completed")
+
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=False
+            ), patch.object(self.api, "DATA_DIR", td):
+                gated = self._handler("/api/replacement/video/save-to-library", method="POST", body=body, headers=headers)
+                gated.do_POST()
+                gst, gpayload = self._response(gated)
+                self.assertEqual(gst, 404)
+                self.assertEqual(gpayload["error"], "replacement_web_disabled")
+
 
 class ReplacementWebDocumentationTests(unittest.TestCase):
     def test_openapi_documents_replacement_web_mvp_contract(self):
@@ -1541,6 +1707,7 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
             "/api/replacement/video/cancel",
             "/api/replacement/video/download",
             "/api/replacement/video/media",
+            "/api/replacement/video/save-to-library",
             "/api/replacement/video/handoff",
             "/api/replacement/video/job",
             "/api/replacement/note/start",
@@ -1577,6 +1744,9 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
         media_params = {p["name"]: p for p in paths["/api/replacement/video/media"]["get"]["parameters"]}
         self.assertEqual(media_params["kind"]["schema"]["enum"], ["start", "end", "video"])
         self.assertIn("403", paths["/api/replacement/video/media"]["get"]["responses"])
+        save_lib = paths["/api/replacement/video/save-to-library"]["post"]["responses"]
+        self.assertIn("409", save_lib)
+        self.assertIn("403", save_lib)
         video_status_enum = schemas["ReplacementVideoJobResponse"]["properties"]["status"]["enum"]
         for state in ("planned", "running", "awaiting_review", "partial", "completed", "failed", "cancelled"):
             self.assertIn(state, video_status_enum)

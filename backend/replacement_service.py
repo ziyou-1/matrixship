@@ -558,7 +558,38 @@ class ReplacementService:
         merged = dict(job.get("overrides") or {})
         merged.update(copy.deepcopy(overrides))
         job["overrides"] = merged
+        self._apply_segment_script_edits(job, overrides.get("segments"))
         return job
+
+    def _apply_segment_script_edits(self, job, segment_overrides):
+        """Fold per-segment 口播稿 (script) edits from the caller into the job's
+        own segments so the pipeline regenerates subtitles/TTS from the corrected
+        text (both pipelines re-read segment['script'] fresh at execute). The web
+        edit is itself the review, so scriptReviewed is set True. Only segments
+        whose script actually changed are touched, so an unedited job stays
+        byte-identical. On a real change the frozen comic duration slots are
+        dropped so ComicProjectReplacementPipeline recomputes them from the new
+        script (harmless for the hybrid pipeline, which never reads them)."""
+        if not isinstance(segment_overrides, list):
+            return
+        edits = {}
+        for override in segment_overrides:
+            if isinstance(override, dict) and override.get("index") is not None and "script" in override:
+                edits[str(override.get("index"))] = str(override.get("script") or "").strip()
+        if not edits:
+            return
+        for segment in job.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            new_script = edits.get(str(segment.get("index")))
+            if new_script is None:
+                continue
+            if new_script == str(segment.get("script") or "").strip():
+                continue
+            segment["script"] = new_script
+            segment["scriptReviewed"] = True
+            segment.pop("speechDurationSec", None)
+            segment.pop("videoDurationSec", None)
 
     def _write_job(self, job):
         source = dict(job or {})

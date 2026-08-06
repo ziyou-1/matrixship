@@ -7337,6 +7337,48 @@ class Handler(BaseHTTPRequestHandler):
             raw_log = json_log(logger, 'replacement_video_media_failed', exc=e, jobId=job_id, kind=kind)
             return json_response(self, {'ok': False, 'error': 'replacement_video_media_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
 
+    def add_replacement_video_to_library(self, body):
+        body = body if isinstance(body, dict) else {}
+        job_id = str(body.get('jobId') or body.get('id') or '')
+        fp, meta, error, status = replacement_web.video_job_library_source(DATA_DIR, job_id)
+        if error:
+            return json_response(self, {'ok': False, 'error': error, 'stage': 'save_library'}, status)
+        # Idempotent: a job already in the library returns its existing material id.
+        if meta.get('existingMaterialId'):
+            return json_response(self, {'ok': True, 'id': meta['existingMaterialId'], 'alreadyAdded': True})
+        try:
+            mid = uuid.uuid4().hex
+            mdir = os.path.join(MATERIALS_DIR, mid)
+            os.makedirs(mdir, exist_ok=True)
+            safe = os.path.basename(meta.get('filename') or '') or 'replacement.mp4'
+            dst = os.path.join(mdir, safe)
+            _copy_material_file(fp, dst)
+            title = str(body.get('title') or '').strip() or ('同款替换成片 %s' % (meta.get('jobId') or ''))
+            item = {
+                'id': mid, 'title': title, 'type': 'video',
+                'files': [safe], 'urls': ['/api/library/file/%s/%s' % (mid, safe)],
+                'published': 0, 'createdAt': time.time(),
+                'platform': meta.get('platform') or '',
+                'source': '同款替换生成', 'replacementJobId': meta.get('jobId') or '',
+            }
+            with STATE_LOCK:
+                lib = load_library()
+                lib.insert(0, item)
+                save_library(lib)
+            replacement_web.mark_video_added_to_library(DATA_DIR, job_id, mid)
+            json_log(
+                logger, 'replacement_video_added_to_library', level='info',
+                endpoint='/api/replacement/video/save-to-library',
+                jobId=meta.get('jobId') or '', materialId=mid, platform=meta.get('platform') or '',
+            )
+            return json_response(self, {'ok': True, 'id': mid, 'material': {
+                'id': mid, 'title': title, 'type': 'video',
+                'platform': item['platform'], 'createdAt': item['createdAt'],
+            }})
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_save_library_failed', exc=e, jobId=job_id)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_save_library_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId'), 'stage': 'save_library'}, 500)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -7584,6 +7626,11 @@ class Handler(BaseHTTPRequestHandler):
                     error=result.get('error') or '',
                 )
                 return json_response(self, result, status)
+
+            if path == '/api/replacement/video/save-to-library':
+                if not replacement_web_enabled():
+                    return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+                return self.add_replacement_video_to_library(body)
 
             if path == '/api/replacement/note/save-draft':
                 if not replacement_web_enabled():

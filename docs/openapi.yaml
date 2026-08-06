@@ -586,6 +586,65 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/save-to-library:
+    post:
+      summary: Add a completed replacement video into the local material library (素材库)
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It copies a completed video job's finalized output into the material library (素材库 / 素材发布) so it becomes publishable, after validating the job is completed and its output resolves inside the local data sandbox. This is the material-library path, not the pending-publish queue. Idempotent — a job already added returns its existing material id. The agent token is sent in the request header; local paths and provider URLs are never returned.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId]
+              properties:
+                jobId: {type: string, pattern: "^rvw_[0-9a-f]{24}$"}
+                title: {type: string, description: Optional material title; defaults to a 同款替换成片 label.}
+      responses:
+        "200":
+          description: Material created (or already present); returns the material id and redacted metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  id: {type: string}
+                  alreadyAdded: {type: boolean}
+                  material:
+                    type: object
+                    properties:
+                      id: {type: string}
+                      title: {type: string}
+                      type: {type: string}
+                      platform: {type: string}
+                      createdAt: {type: number}
+        "400":
+          description: Invalid job id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Job output resolves outside the local data sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled, or the job/output is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Job is not completed yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/replacement/note/start:
     post:
       summary: Start a local Phase 0 image-note replacement preview job

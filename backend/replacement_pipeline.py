@@ -1056,6 +1056,14 @@ class ComicProjectReplacementPipeline(HybridReplacementPipeline):
                 )
                 return
         segment["status"] = "running"
+        # A per-segment 口播稿 edit drops the frozen plan-time duration slots; recompute
+        # them from the corrected script so the storyboard/video request length matches
+        # the new speech (mirrors _comic_plan_script_segments, which uses the same helpers).
+        if segment.get("script") and not segment.get("videoDurationSec"):
+            speech = self._call("_estimate_replacement_tts_duration_sec", segment.get("script"))
+            if speech:
+                segment["speechDurationSec"] = speech
+                segment["videoDurationSec"] = self._call("_comic_video_duration_slot", speech)
         self._emit_comic_progress(
             job,
             segment,
