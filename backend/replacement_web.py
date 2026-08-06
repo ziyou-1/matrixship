@@ -114,6 +114,11 @@ def replacement_page_html():
       </div>
       <label>\u53e3\u64ad\u7a3f</label><textarea name="script"></textarea>
       <label>\u5356\u70b9/\u98ce\u683c\u8981\u6c42</label><textarea name="sellingPoints"></textarea>
+      <div class="grid">
+        <div><label>\u540c\u6b3e\u66ff\u6362\u6a21\u578b</label><select name="model" id="video-model"><option value="">\u9ed8\u8ba4\u6a21\u578b</option></select></div>
+        <div><label>\u58f0\u97f3</label><select name="audioMode" id="video-audio-mode"></select></div>
+        <div id="video-voice-row" hidden><label>AI \u97f3\u8272</label><select name="voice" id="video-voice"></select></div>
+      </div>
       <div class="actions"><button class="primary">\u51c6\u5907\u66ff\u6362\u4efb\u52a1</button></div>
     </form>
     <div id="video-plan" hidden>
@@ -125,6 +130,12 @@ def replacement_page_html():
         <button type="button" id="video-cancel" hidden>\u53d6\u6d88\u4efb\u52a1</button>
         <button type="button" id="video-concat" class="primary" hidden>\u5408\u6210\u6210\u7247</button>
         <a id="video-download" href="#" hidden>\u4e0b\u8f7d\u6210\u7247</a>
+      </div>
+      <div id="video-regen-row" class="check-row" hidden style="gap:8px;flex-wrap:wrap;align-items:center;">
+        <span>\u6f2b\u5267\u9996\u5c3e\u5e27\u91cd\u751f\uff1a\u7247\u6bb5</span>
+        <input type="number" id="video-regen-index" min="1" value="1" style="width:64px;">
+        <select id="video-regen-kind"><option value="start">\u9996\u5e27</option><option value="end">\u5c3e\u5e27</option></select>
+        <button type="button" id="video-regen" class="primary">\u91cd\u751f\u8be5\u5e27</button>
       </div>
     </div>
     <pre id="video-status">{}</pre>
@@ -475,6 +486,8 @@ function renderVideoJob(job) {
   const canDownload = !!(job.download && job.download.available);
   download.hidden = !canDownload;
   download.dataset.filename = canDownload ? (job.download.filename || '') : '';
+  const regenRow = document.getElementById('video-regen-row');
+  if (regenRow) regenRow.hidden = !(job.replacementMode === 'comic_project' && job.status === 'awaiting_review');
   status.textContent = videoStatusMessage(job) + '\\n\\n' + JSON.stringify(job, null, 2);
 }
 async function pollVideoJob() {
@@ -565,6 +578,12 @@ function cancelVideoJob() {
 function concatVideoJob() {
   videoLifecycleCall('/api/replacement/video/concat', {}, '合成成片...');
 }
+function regenerateVideoFrame() {
+  const idx = parseInt(document.getElementById('video-regen-index').value, 10);
+  const kind = document.getElementById('video-regen-kind').value;
+  if (!idx || idx < 1) return;
+  videoLifecycleCall('/api/replacement/video/regenerate-frame', {segmentIndex: idx, frameKind: kind}, '重生首尾帧中...');
+}
 async function downloadVideoResult(event) {
   if (event) event.preventDefault();
   const jobId = currentVideoJobId();
@@ -595,16 +614,46 @@ function syncVideoPersonMode() {
   if (authBox) { authBox.classList.toggle('disabled', off); authBox.style.display = off ? 'none' : ''; }
   if (character) character.required = !off;
 }
+function syncVideoAudioMode() {
+  const mode = document.getElementById('video-audio-mode');
+  const row = document.getElementById('video-voice-row');
+  if (row) row.hidden = !(mode && mode.value === 'tts');
+}
+async function loadVideoOptions() {
+  try {
+    const res = await fetch('/api/replacement/video/options', {headers: authHeaders()});
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) return;
+    const fill = (id, items, keepFirst) => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const start = keepFirst && sel.options.length ? 1 : 0;
+      while (sel.options.length > start) sel.remove(start);
+      (items || []).forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.value; opt.textContent = it.label;
+        sel.appendChild(opt);
+      });
+    };
+    fill('video-model', json.models, true);
+    fill('video-audio-mode', json.audioModes, false);
+    fill('video-voice', json.voices, false);
+    syncVideoAudioMode();
+  } catch (_e) {}
+}
+document.getElementById('video-audio-mode').addEventListener('change', syncVideoAudioMode);
 document.getElementById('video-no-person').addEventListener('change', syncVideoPersonMode);
 document.getElementById('video-form').addEventListener('submit', e => { e.preventDefault(); prepareVideoJob(); });
 document.getElementById('video-execute').addEventListener('click', executeVideoJob);
 document.getElementById('video-retry').addEventListener('click', retryVideoFailed);
 document.getElementById('video-cancel').addEventListener('click', cancelVideoJob);
 document.getElementById('video-concat').addEventListener('click', concatVideoJob);
+document.getElementById('video-regen').addEventListener('click', regenerateVideoFrame);
 document.getElementById('video-download').addEventListener('click', downloadVideoResult);
 document.getElementById('note-form').addEventListener('submit', e => { e.preventDefault(); submitForm('note-form', '/api/replacement/note/start', 'note-status'); });
 document.getElementById('note-save').addEventListener('click', saveNoteDraft);
 syncVideoPersonMode();
+loadVideoOptions();
 loadVideoHandoff();
 if (currentVideoJobId()) pollVideoJob();
 </script>
@@ -1157,6 +1206,51 @@ def _video_person_gate(fields, images):
     return None
 
 
+_WEB_AUDIO_MODES = (
+    {"value": "auto", "label": "自动（生成视频自带声音）"},
+    {"value": "tts", "label": "AI 音色配音"},
+)
+
+
+def video_replacement_options():
+    """Model / audio-mode / voice choices for the web video replacement form.
+
+    Models and voices come from the same native catalog the Qt page uses, so the
+    web and desktop offer identical choices. Falls back to empty lists when the
+    native helpers are unavailable (e.g. isolated tests); the pipeline then uses
+    its defaults.
+    """
+    models, voices = [], []
+    try:
+        import matrix_native_client as helpers
+    except Exception:
+        helpers = None
+    if helpers is not None:
+        try:
+            for row in (helpers._replacement_supported_model_rows() or []):
+                name = str((row or {}).get("name") or "").strip()
+                if name:
+                    models.append({"value": name, "label": str((row or {}).get("display_name") or name)})
+        except Exception:
+            models = []
+        try:
+            for label, voice_id in (getattr(helpers, "DH_VOICES", None) or []):
+                vid = str(voice_id or "").strip()
+                if vid:
+                    voices.append({"value": vid, "label": str(label or vid)})
+        except Exception:
+            voices = []
+    return {"models": models, "voices": voices, "audioModes": [dict(m) for m in _WEB_AUDIO_MODES]}
+
+
+def _allowed_video_model_names():
+    return {m["value"] for m in video_replacement_options()["models"]}
+
+
+def _allowed_voice_ids():
+    return {v["value"] for v in video_replacement_options()["voices"]}
+
+
 def _video_prepare_request(fields, handoff):
     fields = fields or {}
     request = {}
@@ -1169,6 +1263,15 @@ def _video_prepare_request(fields, handoff):
     request["noPersonMode"] = _truthy_field(fields.get("noPersonMode"))
     request["faceAuthorized"] = _truthy_field(fields.get("faceAuthorized"))
     request["personFullBody"] = _truthy_field(fields.get("personFullBody"))
+    model = str(fields.get("model") or "").strip()
+    if model and model in _allowed_video_model_names():
+        request["model"] = model
+    audio_mode = str(fields.get("audioMode") or "").strip().lower()
+    if audio_mode in ("auto", "tts"):
+        request["audioMode"] = audio_mode
+    voice = str(fields.get("voice") or "").strip()
+    if voice and voice in _allowed_voice_ids():
+        request["voice"] = voice
     request["inputs"] = {
         "hasScript": bool(str(fields.get("script") or "").strip()),
         "hasSellingPoints": bool(str(fields.get("sellingPoints") or "").strip()),
@@ -1275,6 +1378,30 @@ def cancel_video_job(data_dir, job_id):
     return video_job_response(load_job(data_dir, "video", job_id))
 
 
+def regenerate_frame_video_job(data_dir, job_id, segment_index, frame_kind):
+    job = load_job(data_dir, "video", job_id) if _valid_job_id("video", job_id) else None
+    if not job:
+        return _error("replacement_job_not_found", stage="regenerate", status=404)
+    kind = str(frame_kind or "").strip().lower()
+    if kind not in ("start", "end"):
+        return _error("comic_frame_kind_invalid", stage="regenerate", status=400)
+    if str(job.get("replacementMode") or "").strip() != "comic_project":
+        # 首尾帧重生只对漫剧项目模式有意义
+        return _error("replacement_frame_regen_comic_only", stage="regenerate", status=400)
+    try:
+        seg_index = int(segment_index)
+    except (TypeError, ValueError):
+        return _error("replacement_invalid_segment_index", stage="regenerate", status=400)
+    service = build_video_service(data_dir)
+    try:
+        service.regenerate_frame(job_id, seg_index, kind)
+    except ValueError as exc:
+        return _error(str(exc) or "replacement_regenerate_failed", stage="regenerate", status=409)
+    except Exception:
+        return _error("replacement_regenerate_failed", stage="regenerate", status=500)
+    return video_job_response(load_job(data_dir, "video", job_id))
+
+
 _VIDEO_SEGMENT_FIELDS = (
     "index", "start", "end", "status", "qcStatus", "audioStatus",
     "segmentType", "stage", "stageLabel", "elapsedSec", "etaSec",
@@ -1307,6 +1434,7 @@ def video_job_response(job):
         "jobId": str(scrubbed.get("id") or job.get("id") or ""),
         "taskType": "video",
         "status": str(scrubbed.get("status") or ""),
+        "replacementMode": str(scrubbed.get("replacementMode") or ""),
         "stage": str(scrubbed.get("stage") or ""),
         "progressText": str(scrubbed.get("progressText") or ""),
         "source": scrubbed.get("source") if isinstance(scrubbed.get("source"), dict) else {},

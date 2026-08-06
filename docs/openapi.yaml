@@ -191,6 +191,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/options:
+    get:
+      summary: List video replacement model / audio-mode / voice choices
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. Returns the same model, audio-mode and AI-voice catalog the native client offers so the web form can populate its selectors.
+      responses:
+        "200":
+          description: Available models, audio modes and voices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  models: {type: array, items: {type: object}}
+                  audioModes: {type: array, items: {type: object}}
+                  voices: {type: array, items: {type: object}}
+        "404":
+          description: Feature disabled (MATRIX_REPLACEMENT_WEB_ENABLED not set)
   /api/replacement/video/handoff:
     get:
       summary: Read a local native-client video replacement handoff
@@ -407,6 +425,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Concatenation failed inside the local service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/regenerate-frame:
+    post:
+      summary: Regenerate a comic-project segment start or end frame
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. Regenerates the requested start/end keyframe for one segment of a comic_project video replacement job in awaiting_review/partial. Non-comic jobs return replacement_frame_regen_comic_only.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId, segmentIndex, frameKind]
+              properties:
+                jobId: {type: string}
+                segmentIndex: {type: integer, minimum: 1}
+                frameKind: {type: string, enum: [start, end]}
+      responses:
+        "202":
+          description: Frame regeneration applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "400":
+          description: Invalid frame kind or non-comic job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Job not found or feature disabled
           content:
             application/json:
               schema:

@@ -375,6 +375,13 @@ class SourceResolver:
         for flag in ("noPersonMode", "faceAuthorized", "personFullBody"):
             if flag in request:
                 job[flag] = bool(request.get(flag))
+        # Model / audio-mode / voice chosen on the web form flow through to the job
+        # so the pipeline uses the requested model and audio path (defaults apply
+        # when the caller omits them).
+        for field in ("model", "audioMode", "voice"):
+            value = str(request.get(field) or "").strip()
+            if value:
+                job[field] = value
         if resolved.get("status") == "failed":
             job["status"] = "failed"
             job["error"] = str(resolved.get("error") or "media_invalid")
@@ -484,6 +491,19 @@ class ReplacementService:
             raise
         self._write_job(job)
         self._maybe_record_terminal(job)
+        return self._public_job(job)
+
+    def regenerate_frame(self, job_id, segment_index, frame_kind, progress=None):
+        job = self._load_job(job_id)
+        if not job:
+            raise ValueError("replacement_job_not_found")
+        if job.get("status") not in ("partial", "awaiting_review"):
+            raise ValueError("replacement_job_not_ready_for_regenerate")
+        result = self.pipeline.regenerate_frame(
+            job, int(segment_index), frame_kind, progress=progress)
+        if isinstance(result, dict) and isinstance(result.get("job"), dict):
+            job = result["job"]
+        self._write_job(job)
         return self._public_job(job)
 
     def concat(self, job_id, progress=None):
