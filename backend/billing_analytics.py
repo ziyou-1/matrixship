@@ -183,10 +183,14 @@ def normalize_billing_records(user_id, ledger_rows, model_usage_rows, recharge_o
         # 优先用主库直接给出的 epoch(created_ts / refunded_ts)。
         # 退回裸 datetime 时 _timestamp() 会按北京时间解释,而库里存 UTC,记录会早 8 小时,
         # 与 JSON 账本的真实 epoch 混排后新扣费排到旧记录下面。
+        # 已退款的扣费要如实标成 refunded,不能一律写 charged。_consumption() 只统计
+        # status == "charged" 的记录,写死 charged 会把退掉的钱也算进"期间总消耗",
+        # 与漫剧账单(剔除已退款)对不上。明细列表仍会显示这条,带"已退款"标记。
+        usage_refunded = str(row.get("status", "")).lower() == "refunded"
         records.append(_record("usage-" + str(row.get("id", ref)), _timestamp(
             row.get("created_ts") or row.get("created_at") or row.get("createdAt")
-        ), row_type, -amount, "charged", **base))
-        if str(row.get("status", "")).lower() == "refunded" and not (ref and str(ref) in refund_refs):
+        ), row_type, -amount, "refunded" if usage_refunded else "charged", **base))
+        if usage_refunded and not (ref and str(ref) in refund_refs):
             records.append(_record("usage-refund-" + str(row.get("id", ref)), _timestamp(
                 row.get("refunded_ts") or row.get("refunded_at")
                 or row.get("created_ts") or row.get("created_at")
