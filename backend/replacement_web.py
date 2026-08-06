@@ -114,6 +114,11 @@ def replacement_page_html():
       </div>
       <label>\u53e3\u64ad\u7a3f</label><textarea name="script"></textarea>
       <label>\u5356\u70b9/\u98ce\u683c\u8981\u6c42</label><textarea name="sellingPoints"></textarea>
+      <div class="grid">
+        <div><label>\u540c\u6b3e\u66ff\u6362\u6a21\u578b</label><select name="model" id="video-model"><option value="">\u9ed8\u8ba4\u6a21\u578b</option></select></div>
+        <div><label>\u58f0\u97f3</label><select name="audioMode" id="video-audio-mode"></select></div>
+        <div id="video-voice-row" hidden><label>AI \u97f3\u8272</label><select name="voice" id="video-voice"></select></div>
+      </div>
       <div class="actions"><button class="primary">\u51c6\u5907\u66ff\u6362\u4efb\u52a1</button></div>
     </form>
     <div id="video-plan" hidden>
@@ -595,6 +600,34 @@ function syncVideoPersonMode() {
   if (authBox) { authBox.classList.toggle('disabled', off); authBox.style.display = off ? 'none' : ''; }
   if (character) character.required = !off;
 }
+function syncVideoAudioMode() {
+  const mode = document.getElementById('video-audio-mode');
+  const row = document.getElementById('video-voice-row');
+  if (row) row.hidden = !(mode && mode.value === 'tts');
+}
+async function loadVideoOptions() {
+  try {
+    const res = await fetch('/api/replacement/video/options', {headers: authHeaders()});
+    const json = await readJsonResponse(res);
+    if (!res.ok || !json.ok) return;
+    const fill = (id, items, keepFirst) => {
+      const sel = document.getElementById(id);
+      if (!sel) return;
+      const start = keepFirst && sel.options.length ? 1 : 0;
+      while (sel.options.length > start) sel.remove(start);
+      (items || []).forEach(it => {
+        const opt = document.createElement('option');
+        opt.value = it.value; opt.textContent = it.label;
+        sel.appendChild(opt);
+      });
+    };
+    fill('video-model', json.models, true);
+    fill('video-audio-mode', json.audioModes, false);
+    fill('video-voice', json.voices, false);
+    syncVideoAudioMode();
+  } catch (_e) {}
+}
+document.getElementById('video-audio-mode').addEventListener('change', syncVideoAudioMode);
 document.getElementById('video-no-person').addEventListener('change', syncVideoPersonMode);
 document.getElementById('video-form').addEventListener('submit', e => { e.preventDefault(); prepareVideoJob(); });
 document.getElementById('video-execute').addEventListener('click', executeVideoJob);
@@ -605,6 +638,7 @@ document.getElementById('video-download').addEventListener('click', downloadVide
 document.getElementById('note-form').addEventListener('submit', e => { e.preventDefault(); submitForm('note-form', '/api/replacement/note/start', 'note-status'); });
 document.getElementById('note-save').addEventListener('click', saveNoteDraft);
 syncVideoPersonMode();
+loadVideoOptions();
 loadVideoHandoff();
 if (currentVideoJobId()) pollVideoJob();
 </script>
@@ -1157,6 +1191,51 @@ def _video_person_gate(fields, images):
     return None
 
 
+_WEB_AUDIO_MODES = (
+    {"value": "auto", "label": "自动（生成视频自带声音）"},
+    {"value": "tts", "label": "AI 音色配音"},
+)
+
+
+def video_replacement_options():
+    """Model / audio-mode / voice choices for the web video replacement form.
+
+    Models and voices come from the same native catalog the Qt page uses, so the
+    web and desktop offer identical choices. Falls back to empty lists when the
+    native helpers are unavailable (e.g. isolated tests); the pipeline then uses
+    its defaults.
+    """
+    models, voices = [], []
+    try:
+        import matrix_native_client as helpers
+    except Exception:
+        helpers = None
+    if helpers is not None:
+        try:
+            for row in (helpers._replacement_supported_model_rows() or []):
+                name = str((row or {}).get("name") or "").strip()
+                if name:
+                    models.append({"value": name, "label": str((row or {}).get("display_name") or name)})
+        except Exception:
+            models = []
+        try:
+            for label, voice_id in (getattr(helpers, "DH_VOICES", None) or []):
+                vid = str(voice_id or "").strip()
+                if vid:
+                    voices.append({"value": vid, "label": str(label or vid)})
+        except Exception:
+            voices = []
+    return {"models": models, "voices": voices, "audioModes": [dict(m) for m in _WEB_AUDIO_MODES]}
+
+
+def _allowed_video_model_names():
+    return {m["value"] for m in video_replacement_options()["models"]}
+
+
+def _allowed_voice_ids():
+    return {v["value"] for v in video_replacement_options()["voices"]}
+
+
 def _video_prepare_request(fields, handoff):
     fields = fields or {}
     request = {}
@@ -1169,6 +1248,15 @@ def _video_prepare_request(fields, handoff):
     request["noPersonMode"] = _truthy_field(fields.get("noPersonMode"))
     request["faceAuthorized"] = _truthy_field(fields.get("faceAuthorized"))
     request["personFullBody"] = _truthy_field(fields.get("personFullBody"))
+    model = str(fields.get("model") or "").strip()
+    if model and model in _allowed_video_model_names():
+        request["model"] = model
+    audio_mode = str(fields.get("audioMode") or "").strip().lower()
+    if audio_mode in ("auto", "tts"):
+        request["audioMode"] = audio_mode
+    voice = str(fields.get("voice") or "").strip()
+    if voice and voice in _allowed_voice_ids():
+        request["voice"] = voice
     request["inputs"] = {
         "hasScript": bool(str(fields.get("script") or "").strip()),
         "hasSellingPoints": bool(str(fields.get("sellingPoints") or "").strip()),

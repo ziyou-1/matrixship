@@ -375,6 +375,13 @@ class SourceResolver:
         for flag in ("noPersonMode", "faceAuthorized", "personFullBody"):
             if flag in request:
                 job[flag] = bool(request.get(flag))
+        # Model / audio-mode / voice chosen on the web form flow through to the job
+        # so the pipeline uses the requested model and audio path (defaults apply
+        # when the caller omits them).
+        for field in ("model", "audioMode", "voice"):
+            value = str(request.get(field) or "").strip()
+            if value:
+                job[field] = value
         if resolved.get("status") == "failed":
             job["status"] = "failed"
             job["error"] = str(resolved.get("error") or "media_invalid")

@@ -191,6 +191,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/options:
+    get:
+      summary: List video replacement model / audio-mode / voice choices
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. Returns the same model, audio-mode and AI-voice catalog the native client offers so the web form can populate its selectors.
+      responses:
+        "200":
+          description: Available models, audio modes and voices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  models: {type: array, items: {type: object}}
+                  audioModes: {type: array, items: {type: object}}
+                  voices: {type: array, items: {type: object}}
+        "404":
+          description: Feature disabled (MATRIX_REPLACEMENT_WEB_ENABLED not set)
   /api/replacement/video/handoff:
     get:
       summary: Read a local native-client video replacement handoff

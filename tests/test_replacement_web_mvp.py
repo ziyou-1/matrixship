@@ -186,6 +186,22 @@ class ReplacementWebModuleTests(unittest.TestCase):
         self.assertIn("授权", html)
         self.assertIn("syncVideoPersonMode", html)
 
+    def test_video_replacement_options_lists_models_audio_and_voices(self):
+        options = self.mod.video_replacement_options()
+        self.assertIsInstance(options.get("models"), list)
+        self.assertIsInstance(options.get("voices"), list)
+        audio_values = {m["value"] for m in options.get("audioModes") or []}
+        self.assertIn("auto", audio_values)
+        self.assertIn("tts", audio_values)
+
+    def test_replacement_page_html_has_model_and_audio_controls(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn('name="model"', html)
+        self.assertIn('name="audioMode"', html)
+        self.assertIn('name="voice"', html)
+        self.assertIn("loadVideoOptions", html)
+        self.assertIn("/api/replacement/video/options", html)
+
     def test_replacement_page_html_supports_note_preview_copy_editing(self):
         html = self.mod.replacement_page_html()
 
@@ -902,6 +918,30 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             self.assertEqual(result["status"], "planned")
             job = self.mod.load_job(td, "video", result["jobId"])
             self.assertTrue(job.get("noPersonMode"))
+
+    def test_prepare_passes_selected_model_audio_and_voice_to_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline)
+            fake_options = {
+                "models": [{"value": "test-model", "label": "T"}],
+                "voices": [{"value": "VoiceA", "label": "A"}],
+                "audioModes": [{"value": "auto", "label": "auto"}, {"value": "tts", "label": "tts"}],
+            }
+            with patch.object(self.mod, "build_video_service", return_value=service), \
+                    patch.object(self.mod, "video_replacement_options", return_value=fake_options):
+                result = self.mod.prepare_video_job(
+                    td,
+                    {"handoffId": handoff_id, "noPersonMode": "1",
+                     "model": "test-model", "audioMode": "tts", "voice": "VoiceA"},
+                    [],
+                )
+            self.assertTrue(result["ok"])
+            job = self.mod.load_job(td, "video", result["jobId"])
+            self.assertEqual(job.get("model"), "test-model")
+            self.assertEqual(job.get("audioMode"), "tts")
+            self.assertEqual(job.get("voice"), "VoiceA")
 
     def test_prepare_with_direct_url_downloads_into_job_dir(self):
         with tempfile.TemporaryDirectory() as td:

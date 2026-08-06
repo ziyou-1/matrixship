@@ -7360,6 +7360,10 @@ class Handler(BaseHTTPRequestHandler):
                 handoffId=handoff_id,
             )
             return json_response(self, replacement_web.handoff_response(handoff))
+        if path == '/api/replacement/video/options':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return json_response(self, {'ok': True, **replacement_web.video_replacement_options()})
         if path == '/api/replacement/file':
             if not replacement_web_enabled():
                 return json_response(self, replacement_web.replacement_disabled_payload(), 404)
