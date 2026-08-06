@@ -141,6 +141,37 @@ class ChargeActualCostTest(unittest.TestCase):
         touched = [t for t, _ in conn.sql]
         self.assertLess(touched.index("INSERT MODEL_USAGE_LOGS"), touched.index("UPDATE USERS"))
 
+    def test_foreign_key_violation_is_an_error_not_a_silent_duplicate(self):
+        """1452 等完整性错误绝不能当成"已扣过"。
+
+        task_id / project_id 是外键。若把任意 IntegrityError 都判成 duplicate,
+        调用方会以为扣过了而放行,用户白嫖且无任何记录 —— 与本次改造的目标相反。
+        """
+        import pymysql
+
+        class FKConn(FakeConn):
+            def cursor(self):
+                cur = FakeCursor(self)
+                orig = cur.execute
+
+                def execute(sql, args=None):
+                    if sql.strip().upper().startswith("INSERT INTO MODEL_USAGE_LOGS"):
+                        self.sql.append(("INSERT MODEL_USAGE_LOGS", args))
+                        raise pymysql.err.IntegrityError(1452, "Cannot add or update a child row")
+                    return orig(sql, args)
+
+                cur.execute = execute
+                return cur
+
+        conn = FKConn(balance="100")
+
+        status, _amt, _bal, err = self._charge(conn)
+
+        self.assertEqual(status, "error")
+        self.assertIn("1452", err or "")
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(conn.committed)
+
     def test_duplicate_request_id_is_rejected_by_the_database(self):
         """幂等由唯一索引保证,不依赖任何进程内状态。"""
         conn = FakeConn(balance="100", raise_duplicate=True)

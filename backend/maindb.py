@@ -373,9 +373,16 @@ def charge_actual_cost(uid, amount_power, request_id, model_id="", description="
                     (str(request_id), int(uid), project_id, task_id, str(model_id or ""),
                      str(model_type or "media"), str(billing_method or "per_call"), str(amt),
                      str(description or "matrixship 实际成本扣费")))
-            except pymysql.err.IntegrityError:
+            except pymysql.err.IntegrityError as exc:
                 conn.rollback()
-                return "duplicate", 0.0, get_balance(uid), None
+                # **只有** 1062(唯一键冲突)才是"这笔已经扣过"。其余完整性错误必须报错:
+                # task_id/project_id 是指向 generation_tasks / comic_drama_projects 的外键,
+                # 传入非法值会报 1452,若一并当成 duplicate,调用方会以为已扣费而放行 ——
+                # 用户白嫖,且没有任何记录。
+                code = exc.args[0] if exc.args else 0
+                if code == 1062:
+                    return "duplicate", 0.0, get_balance(uid), None
+                return "error", float(amt), get_balance(uid), "integrity_error_%s" % code
             log_id = cur.lastrowid
 
             # 2) 锁住余额行再判断,避免并发下两笔都通过校验
