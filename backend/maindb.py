@@ -249,7 +249,7 @@ def charge_generation(uid, model_id, params=None, request_id=None, project_id=No
             cur.execute(
                 "INSERT INTO model_usage_logs (request_id, user_id, project_id, task_id, model_id, model_type, "
                 "billing_method, amount, balance_before, balance_after, status, description, created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'success',%s,NOW())",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'charged',%s,NOW())",  # 'charged' 是漫剧平台在用的值
                 (rid, int(uid), project_id, task_id, str(model_id), row.get("model_type") or "media",
                  row.get("billing_method") or "per_call", str(amt), str(bal_after + float(amt)), str(bal_after),
                  "matrixship 生成扣费(成本 %s ×%s)" % (base, mult)))
@@ -347,12 +347,15 @@ def charge_actual_cost(uid, amount_power, request_id, model_id="", description="
         with conn.cursor() as cur:
             # 1) 先占坑。request_id 上有唯一索引,重复结算在这里被数据库直接挡下 ——
             #    幂等由数据库保证,不依赖任何进程内状态。
-            #    status 直接写 'success':未提交的行别人读不到,另造中间态反而可能撞上 ENUM。
+            #    status 直接写终态:未提交的行别人读不到,另造中间态反而可能撞上 ENUM。
             try:
+                # status 必须写 'charged':这是漫剧平台自己在用的值(线上 2533 条),
+                # 它的消费账单界面按这个口径展示。charge_generation() 里写的 'success'
+                # 在线上是 0 条 —— 那个函数从未真正跑过,所以错误值一直没暴露。
                 cur.execute(
                     "INSERT INTO model_usage_logs (request_id, user_id, project_id, task_id, model_id, "
                     "model_type, billing_method, amount, balance_before, balance_after, status, "
-                    "description, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,0,'success',%s,NOW())",
+                    "description, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,0,'charged',%s,NOW())",
                     (str(request_id), int(uid), project_id, task_id, str(model_id or ""),
                      str(model_type or "media"), str(billing_method or "per_call"), str(amt),
                      str(description or "matrixship 实际成本扣费")))
