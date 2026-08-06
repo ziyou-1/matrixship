@@ -537,6 +537,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/media:
+    get:
+      summary: Stream a segment's local first/last frame image or segment preview video
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It streams a single segment media asset (start frame, end frame, or segment video) from local files that were already downloaded during generation, after validating the job id, segment index, media kind, file extension, and that the resolved file lives inside the local data sandbox. The agent token is sent in the request header, never in the query string. Provider signed URLs, raw provider task ids, and local paths are never exposed; responses are served with Cache-Control:no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rvw_[0-9a-f]{24}$"}
+        - name: segmentIndex
+          in: query
+          required: true
+          schema: {type: integer}
+        - name: kind
+          in: query
+          required: true
+          schema: {type: string, enum: [start, end, video]}
+      responses:
+        "200":
+          description: Local segment frame image or segment video bytes
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+            video/mp4:
+              schema: {type: string, format: binary}
+        "400":
+          description: Invalid job id, segment index, media kind, or unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Requested media resolves outside the local data sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled, or the job/segment/media is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/replacement/note/start:
     post:
       summary: Start a local Phase 0 image-note replacement preview job
@@ -2840,6 +2889,14 @@ components:
               etaSec: {type: number}
               error: {type: string}
               errorId: {type: string}
+              media:
+                type: object
+                description: Availability booleans for each local media asset of this segment. Never a URL or path; each true asset is fetched via GET /api/replacement/video/media.
+                properties:
+                  start: {type: boolean}
+                  end: {type: boolean}
+                  video: {type: boolean}
+                additionalProperties: false
             additionalProperties: false
         diagnostics:
           type: object

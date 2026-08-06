@@ -1207,6 +1207,106 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
         self.assertNotIn("token=priv", exposed)
         self.assertNotIn("out.mp4", exposed)
 
+    def _persist_video_job(self, data_dir, job_id, segments):
+        job = {"id": job_id, "taskType": "video", "status": "partial", "segments": segments}
+        job_dir = os.path.join(data_dir, "replacement_web_jobs", "video", job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+            json.dump(job, f)
+        return job
+
+    def test_video_job_response_reports_per_segment_media_availability(self):
+        # Task 5 (web media preview): the response advertises which local media a
+        # segment has (start/end frame, segment video) as booleans only — never the
+        # local path or a provider URL, which the page loads via the media endpoint.
+        with tempfile.TemporaryDirectory() as td:
+            start_png = os.path.join(td, "start.png")
+            end_png = os.path.join(td, "end.png")
+            seg_mp4 = os.path.join(td, "seg1.mp4")
+            Path(start_png).write_bytes(b"png-bytes")
+            Path(end_png).write_bytes(b"png-bytes")
+            Path(seg_mp4).write_bytes(b"fake mp4 bytes")
+            raw = {
+                "id": "rvw_%s" % ("c" * 24),
+                "taskType": "video",
+                "status": "partial",
+                "segments": [
+                    {"index": 1, "status": "done", "startFramePath": start_png,
+                     "endFramePath": end_png, "videoPath": seg_mp4},
+                    {"index": 2, "status": "planned", "startFramePath": os.path.join(td, "missing.png"),
+                     "videoPath": os.path.join(td, "missing.mp4")},
+                ],
+            }
+            response = self.mod.video_job_response(raw)
+            exposed = json.dumps(response, ensure_ascii=False)
+
+            self.assertEqual(response["segments"][0]["media"], {"start": True, "end": True, "video": True})
+            self.assertEqual(response["segments"][1]["media"], {"start": False, "end": False, "video": False})
+            self.assertNotIn(td, exposed)
+            self.assertNotIn("startFramePath", exposed)
+            self.assertNotIn("videoPath", exposed)
+
+    def test_video_segment_media_path_serves_local_frame_and_video_within_sandbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("d" * 24)
+            job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            start_png = os.path.join(job_dir, "start.png")
+            seg_mp4 = os.path.join(job_dir, "seg1.mp4")
+            Path(start_png).write_bytes(b"png-bytes")
+            Path(seg_mp4).write_bytes(b"fake mp4 bytes")
+            self._persist_video_job(td, job_id, [
+                {"index": 1, "status": "done", "startFramePath": start_png, "videoPath": seg_mp4},
+            ])
+
+            path, media_type, error, status = self.mod.video_segment_media_path(td, job_id, "1", "start")
+            self.assertEqual((media_type, error, status), ("image", "", 200))
+            self.assertEqual(os.path.abspath(start_png), path)
+
+            path, media_type, error, status = self.mod.video_segment_media_path(td, job_id, "1", "video")
+            self.assertEqual((media_type, error, status), ("video", "", 200))
+            self.assertEqual(os.path.abspath(seg_mp4), path)
+
+    def test_video_segment_media_path_guards_kind_job_and_sandbox(self):
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+            job_id = "rvw_%s" % ("e" * 24)
+            job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            in_png = os.path.join(job_dir, "start.png")
+            in_mp4 = os.path.join(job_dir, "seg.mp4")
+            out_png = os.path.join(outside, "leak.png")
+            Path(in_png).write_bytes(b"png-bytes")
+            Path(in_mp4).write_bytes(b"mp4")
+            Path(out_png).write_bytes(b"png-bytes")
+            self._persist_video_job(td, job_id, [
+                {"index": 1, "startFramePath": in_png, "videoPath": in_mp4},
+                {"index": 2, "startFramePath": out_png},   # escapes the sandbox
+                {"index": 3, "startFramePath": in_mp4, "videoPath": in_png},  # extension/kind mismatch
+            ])
+
+            # unknown kind
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "1", "middle")[2], "bad_kind")
+            # malformed job id
+            self.assertEqual(self.mod.video_segment_media_path(td, "not-a-job", "1", "start")[2], "bad_path")
+            # valid id but no such job on disk
+            self.assertEqual(self.mod.video_segment_media_path(td, "rvw_%s" % ("f" * 24), "1", "start")[2], "not_found")
+            # non-integer segment index
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "x", "start")[2], "bad_segment")
+            # segment index absent from the job
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "9", "start")[2], "not_found")
+            # local file resolves outside the data sandbox
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "2", "start")[3], 403)
+            # image kind pointing at a video file (and vice versa) is rejected
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "3", "start")[2], "unsupported_file_type")
+            self.assertEqual(self.mod.video_segment_media_path(td, job_id, "3", "video")[2], "unsupported_file_type")
+
+    def test_replacement_page_renders_segment_media_via_token_guarded_endpoint(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn("data-media-url", html)
+        self.assertIn("loadSegmentMedia", html)
+        self.assertIn("/api/replacement/video/media", html)
+        self.assertIn("seg-video", html)
+
 
 class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
     def setUp(self):
@@ -1383,6 +1483,46 @@ class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(payload["error"], "replacement_web_disabled")
 
+    def test_video_media_route_serves_local_frame_bytes_with_token_and_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            job_id = "rvw_%s" % ("a" * 24)
+            job_dir = os.path.join(td, "replacement_web_jobs", "video", job_id)
+            os.makedirs(job_dir, exist_ok=True)
+            frame = os.path.join(job_dir, "start.png")
+            Path(frame).write_bytes(b"\x89PNG frame bytes")
+            with open(os.path.join(job_dir, "job.json"), "w", encoding="utf-8") as f:
+                json.dump({"id": job_id, "taskType": "video", "status": "partial",
+                           "segments": [{"index": 1, "startFramePath": frame}]}, f)
+
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=True
+            ), patch.object(self.api, "DATA_DIR", td):
+                ok = self._handler("/api/replacement/video/media?jobId=%s&segmentIndex=1&kind=start" % job_id)
+                ok.do_GET()
+                ok.wfile.seek(0)
+                head, _, body = ok.wfile.read().partition(b"\r\n\r\n")
+                head_text = head.decode("latin-1")
+                self.assertIn(" 200 ", head_text.splitlines()[0])
+                self.assertIn("Content-Type: image/png", head_text)
+                self.assertIn("Cache-Control: no-store", head_text)
+                self.assertEqual(body, b"\x89PNG frame bytes")
+
+                bad = self._handler("/api/replacement/video/media?jobId=%s&segmentIndex=1&kind=middle" % job_id)
+                bad.do_GET()
+                bad_status, bad_payload = self._response(bad)
+                self.assertEqual(bad_status, 400)
+                self.assertEqual(bad_payload["error"], "bad_kind")
+
+            # Media route is gated by the same feature flag as the rest of the surface.
+            with patch.object(self.api, "ensure_agent_request", return_value=True), patch.object(
+                self.api, "replacement_web_enabled", return_value=False
+            ), patch.object(self.api, "DATA_DIR", td):
+                gated = self._handler("/api/replacement/video/media?jobId=%s&segmentIndex=1&kind=start" % job_id)
+                gated.do_GET()
+                gated_status, gated_payload = self._response(gated)
+                self.assertEqual(gated_status, 404)
+                self.assertEqual(gated_payload["error"], "replacement_web_disabled")
+
 
 class ReplacementWebDocumentationTests(unittest.TestCase):
     def test_openapi_documents_replacement_web_mvp_contract(self):
@@ -1400,6 +1540,7 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
             "/api/replacement/video/concat",
             "/api/replacement/video/cancel",
             "/api/replacement/video/download",
+            "/api/replacement/video/media",
             "/api/replacement/video/handoff",
             "/api/replacement/video/job",
             "/api/replacement/note/start",
@@ -1433,6 +1574,9 @@ class ReplacementWebDocumentationTests(unittest.TestCase):
         ):
             with self.subTest(path=lifecycle_path):
                 self.assertIn("409", paths[lifecycle_path]["post"]["responses"])
+        media_params = {p["name"]: p for p in paths["/api/replacement/video/media"]["get"]["parameters"]}
+        self.assertEqual(media_params["kind"]["schema"]["enum"], ["start", "end", "video"])
+        self.assertIn("403", paths["/api/replacement/video/media"]["get"]["responses"])
         video_status_enum = schemas["ReplacementVideoJobResponse"]["properties"]["status"]["enum"]
         for state in ("planned", "running", "awaiting_review", "partial", "completed", "failed", "cancelled"):
             self.assertIn(state, video_status_enum)

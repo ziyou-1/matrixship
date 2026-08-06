@@ -76,6 +76,11 @@ def replacement_page_html():
     .slot-list, .copy-options { display: grid; gap: 8px; }
     .slot-item { border: 1px solid #d7dee7; border-radius: 6px; padding: 10px; background: white; min-height: 56px; }
     .slot-item img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; border: 1px solid #e4e9f0; background: #eef2f6; margin-bottom: 8px; }
+    .frame-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0; }
+    .frame-row figure { margin: 0; }
+    .frame-row figure img { margin-bottom: 2px; }
+    .frame-row figcaption { color: #667085; font-size: 11px; text-align: center; }
+    .seg-video { width: 100%; border-radius: 6px; border: 1px solid #e4e9f0; background: #000; margin: 6px 0; }
     .slot-item strong, .copy-option strong { display: block; font-size: 13px; margin-bottom: 4px; }
     .meta { color: #667085; font-size: 12px; overflow-wrap: anywhere; }
     .copy-option { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; border: 1px solid #d7dee7; border-radius: 6px; padding: 10px; background: white; cursor: pointer; }
@@ -452,18 +457,43 @@ function videoHasFailedSegments(job) {
 function renderVideoSegments(job) {
   const holder = document.getElementById('video-segments');
   const segments = job && Array.isArray(job.segments) ? job.segments : [];
+  const jobId = (job && job.jobId) || '';
   holder.innerHTML = '';
+  const mediaUrl = (index, kind) => '/api/replacement/video/media?jobId=' + encodeURIComponent(jobId) + '&segmentIndex=' + encodeURIComponent(index) + '&kind=' + kind;
   segments.forEach(segment => {
     const title = '#' + escapeHtml(segment.index) + ' ' + escapeHtml(segment.status || 'planned');
     const range = escapeHtml((segment.start || 0) + 's - ' + (segment.end || 0) + 's');
     const note = escapeHtml(segment.stageLabel || segment.stage || '');
     const err = segment.error ? '<div class="meta">' + escapeHtml(segment.error) + '</div>' : '';
+    const media = segment.media || {};
+    let mediaHtml = '';
+    if (media.start || media.end) {
+      mediaHtml += '<div class="frame-row">';
+      if (media.start) mediaHtml += '<figure><img data-media-url="' + escapeHtml(mediaUrl(segment.index, 'start')) + '" alt="首帧" loading="lazy"><figcaption>首帧</figcaption></figure>';
+      if (media.end) mediaHtml += '<figure><img data-media-url="' + escapeHtml(mediaUrl(segment.index, 'end')) + '" alt="尾帧" loading="lazy"><figcaption>尾帧</figcaption></figure>';
+      mediaHtml += '</div>';
+    }
+    if (media.video) mediaHtml += '<video data-media-url="' + escapeHtml(mediaUrl(segment.index, 'video')) + '" controls preload="none" class="seg-video"></video>';
     holder.insertAdjacentHTML('beforeend',
       '<div class="slot-item"><strong>' + title + '</strong>' +
       '<div class="meta">' + range + '</div>' +
-      '<div class="meta">' + note + '</div>' + err +
+      '<div class="meta">' + note + '</div>' + err + mediaHtml +
       '<input data-segment-index="' + escapeHtml(segment.index) + '" placeholder="可补充本段要求"></div>');
   });
+  loadSegmentMedia();
+}
+async function loadSegmentMedia() {
+  const nodes = Array.from(document.querySelectorAll('#video-segments [data-media-url]'));
+  for (const el of nodes) {
+    const url = el.dataset.mediaUrl || '';
+    if (!url || el.dataset.loaded) continue;
+    try {
+      const res = await fetch(url, {headers: authHeaders()});
+      if (!res.ok) continue;
+      el.src = URL.createObjectURL(await res.blob());
+      el.dataset.loaded = '1';
+    } catch (_e) {}
+  }
 }
 function collectVideoPlanOverrides() {
   const inputs = Array.from(document.querySelectorAll('#video-segments input[data-segment-index]'));
@@ -1442,12 +1472,42 @@ _VIDEO_SEGMENT_FIELDS = (
 )
 
 
-def _public_video_segments(segments):
+_SEGMENT_MEDIA_FIELDS = {"start": "startFramePath", "end": "endFramePath", "video": "videoPath"}
+_VIDEO_MEDIA_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
+
+
+def _segment_media_local_path(segment, kind):
+    field = _SEGMENT_MEDIA_FIELDS.get(str(kind or "").strip().lower())
+    if not field:
+        return ""
+    return str((segment or {}).get(field) or "").strip()
+
+
+def _segment_media_available(segment, kind):
+    path = _segment_media_local_path(segment, kind)
+    return bool(path and os.path.isfile(path))
+
+
+def _public_video_segments(segments, raw_segments=None):
+    raw_by_index = {}
+    for seg in (raw_segments or []):
+        if isinstance(seg, dict) and seg.get("index") is not None:
+            raw_by_index[str(seg.get("index"))] = seg
     result = []
     for segment in segments or []:
         if not isinstance(segment, dict):
             continue
-        result.append({key: segment.get(key) for key in _VIDEO_SEGMENT_FIELDS if key in segment})
+        pub = {key: segment.get(key) for key in _VIDEO_SEGMENT_FIELDS if key in segment}
+        raw = raw_by_index.get(str(segment.get("index")))
+        if raw is not None:
+            # Only booleans — never the local paths or provider URLs; the page
+            # loads each available media via the token-guarded media endpoint.
+            pub["media"] = {
+                "start": _segment_media_available(raw, "start"),
+                "end": _segment_media_available(raw, "end"),
+                "video": _segment_media_available(raw, "video"),
+            }
+        result.append(pub)
     return result
 
 
@@ -1472,7 +1532,7 @@ def video_job_response(job):
         "progressText": str(scrubbed.get("progressText") or ""),
         "source": scrubbed.get("source") if isinstance(scrubbed.get("source"), dict) else {},
         "sourceContext": scrubbed.get("sourceContext") if isinstance(scrubbed.get("sourceContext"), dict) else {},
-        "segments": _public_video_segments(scrubbed.get("segments")),
+        "segments": _public_video_segments(scrubbed.get("segments"), job.get("segments")),
         "diagnostics": scrubbed.get("diagnostics") if isinstance(scrubbed.get("diagnostics"), dict) else {},
         "error": str(scrubbed.get("error") or ""),
         "handoffId": str(scrubbed.get("handoffId") or job.get("handoffId") or ""),
@@ -1499,6 +1559,46 @@ def final_media_path(data_dir, job_id, filename):
     if resolved != sandbox and not resolved.startswith(sandbox + os.sep):
         return None, "forbidden", 403
     return resolved, "", 200
+
+
+def video_segment_media_path(data_dir, job_id, segment_index, kind):
+    """Resolve a segment's local start/end frame image or segment video for safe
+    serving. Returns (path, mediaType, error, status); never exposes the path or
+    any provider URL to the caller — only the bytes are served downstream."""
+    kind = str(kind or "").strip().lower()
+    if kind not in _SEGMENT_MEDIA_FIELDS:
+        return None, "", "bad_kind", 400
+    if not _valid_job_id("video", job_id):
+        return None, "", "bad_path", 400
+    job = load_job(data_dir, "video", job_id)
+    if not job:
+        return None, "", "not_found", 404
+    try:
+        seg_index = int(segment_index)
+    except (TypeError, ValueError):
+        return None, "", "bad_segment", 400
+    segment = None
+    for candidate in (job.get("segments") or []):
+        if isinstance(candidate, dict) and str(candidate.get("index")) == str(seg_index):
+            segment = candidate
+            break
+    if not segment:
+        return None, "", "not_found", 404
+    raw = _segment_media_local_path(segment, kind)
+    if not raw or not os.path.isfile(raw):
+        return None, "", "not_found", 404
+    resolved = os.path.abspath(raw)
+    sandbox = os.path.abspath(data_dir)
+    if resolved != sandbox and not resolved.startswith(sandbox + os.sep):
+        return None, "", "forbidden", 403
+    ext = os.path.splitext(resolved.lower())[1]
+    if kind == "video":
+        if ext not in _VIDEO_MEDIA_EXTENSIONS:
+            return None, "", "unsupported_file_type", 400
+        return resolved, "video", "", 200
+    if ext not in IMAGE_EXTENSIONS:
+        return None, "", "unsupported_file_type", 400
+    return resolved, "image", "", 200
 
 
 def start_note_job(data_dir, fields, files):

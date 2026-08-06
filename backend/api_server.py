@@ -7313,6 +7313,30 @@ class Handler(BaseHTTPRequestHandler):
             raw_log = json_log(logger, 'replacement_video_download_failed', exc=e, jobId=job_id)
             return json_response(self, {'ok': False, 'error': 'replacement_video_download_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
 
+    def serve_replacement_video_media(self, qs):
+        job_id = (qs.get('jobId') or qs.get('id') or [''])[0]
+        segment_index = (qs.get('segmentIndex') or qs.get('segment_index') or [''])[0]
+        kind = (qs.get('kind') or [''])[0]
+        fp, media_type, error, status = replacement_web.video_segment_media_path(DATA_DIR, job_id, segment_index, kind)
+        if error:
+            return json_response(self, {'ok': False, 'error': error}, status)
+        ctype = mimetypes.guess_type(fp)[0] or ('video/mp4' if media_type == 'video' else 'application/octet-stream')
+        if not str(ctype or '').startswith(media_type + '/'):
+            return json_response(self, {'ok': False, 'error': 'unsupported_file_type'}, 400)
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            send_cors_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_media_failed', exc=e, jobId=job_id, kind=kind)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_media_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -7372,6 +7396,10 @@ class Handler(BaseHTTPRequestHandler):
             if not replacement_web_enabled():
                 return json_response(self, replacement_web.replacement_disabled_payload(), 404)
             return self.serve_replacement_video_download(qs)
+        if path == '/api/replacement/video/media':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return self.serve_replacement_video_media(qs)
         if path in ('/api/health', '/api/agent/status'):
             authorized = request_authorized(self)
             if not authorized:
