@@ -177,6 +177,15 @@ class ReplacementWebModuleTests(unittest.TestCase):
             finally:
                 _os.unlink(handle.name)
 
+    def test_replacement_page_html_has_person_authorization_controls(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn('name="noPersonMode"', html)
+        self.assertIn('name="faceAuthorized"', html)
+        self.assertIn('name="personFullBody"', html)
+        self.assertIn("纯产品视频", html)
+        self.assertIn("授权", html)
+        self.assertIn("syncVideoPersonMode", html)
+
     def test_replacement_page_html_supports_note_preview_copy_editing(self):
         html = self.mod.replacement_page_html()
 
@@ -319,7 +328,8 @@ class ReplacementWebModuleTests(unittest.TestCase):
             )
             result = self.mod.start_video_job(
                 td,
-                {"handoffId": handoff["handoffId"], "sellingPoints": "fast"},
+                {"handoffId": handoff["handoffId"], "sellingPoints": "fast",
+                 "faceAuthorized": "1", "personFullBody": "1"},
                 [("characterImage", "face.png", b"fake image bytes")],
             )
             job = self.mod.load_job(td, "video", result["jobId"])
@@ -351,6 +361,8 @@ class ReplacementWebModuleTests(unittest.TestCase):
                     "sourceUrl": "https://example.com/video/1?token=secret",
                     "script": "hello",
                     "sellingPoints": "fast",
+                    "faceAuthorized": "1",
+                    "personFullBody": "1",
                 },
                 [("characterImage", "face.png", b"fake image bytes")],
             )
@@ -837,7 +849,8 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             with patch.object(self.mod, "build_video_service", return_value=service):
                 result = self.mod.prepare_video_job(
                     td,
-                    {"handoffId": handoff_id, "sellingPoints": "fast"},
+                    {"handoffId": handoff_id, "sellingPoints": "fast",
+                     "faceAuthorized": "1", "personFullBody": "1"},
                     [("characterImage", "face.png", b"fake image bytes")],
                 )
 
@@ -852,6 +865,44 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             self.assertNotIn(td, exposed)
             self.assertNotIn("token=secret", exposed)
 
+    def test_prepare_rejects_real_face_without_full_body_confirmation(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            result = self.mod.prepare_video_job(
+                td,
+                {"handoffId": handoff_id, "faceAuthorized": "1"},
+                [("characterImage", "face.png", b"fake image bytes")],
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "replacement_person_full_body_required")
+
+    def test_prepare_rejects_real_face_without_authorization(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            result = self.mod.prepare_video_job(
+                td,
+                {"handoffId": handoff_id, "personFullBody": "1"},
+                [("characterImage", "face.png", b"fake image bytes")],
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "replacement_face_authorization_required")
+
+    def test_prepare_no_person_mode_skips_character_and_authorization(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                result = self.mod.prepare_video_job(
+                    td,
+                    {"handoffId": handoff_id, "noPersonMode": "1"},
+                    [],
+                )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "planned")
+            job = self.mod.load_job(td, "video", result["jobId"])
+            self.assertTrue(job.get("noPersonMode"))
+
     def test_prepare_with_direct_url_downloads_into_job_dir(self):
         with tempfile.TemporaryDirectory() as td:
             downloader = _WebFakeDownloader()
@@ -860,7 +911,8 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             with patch.object(self.mod, "build_video_service", return_value=service):
                 result = self.mod.prepare_video_job(
                     td,
-                    {"sourceUrl": "https://www.douyin.com/video/abc?token=secret"},
+                    {"sourceUrl": "https://www.douyin.com/video/abc?token=secret",
+                     "faceAuthorized": "1", "personFullBody": "1"},
                     [("characterImage", "face.png", b"img")],
                 )
 
@@ -892,7 +944,7 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             service = _make_fake_video_service(td, _WebFakeVideoPipeline())
             with patch.object(self.mod, "build_video_service", return_value=service):
                 prepared = self.mod.prepare_video_job(
-                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                    td, {"handoffId": handoff_id, "faceAuthorized": "1", "personFullBody": "1"}, [("characterImage", "face.png", b"img")]
                 )
                 job_id = prepared["jobId"]
                 executed = self.mod.execute_video_job(td, job_id, {})
@@ -923,7 +975,7 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             service = _make_fake_video_service(td, pipeline)
             with patch.object(self.mod, "build_video_service", return_value=service):
                 prepared = self.mod.prepare_video_job(
-                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                    td, {"handoffId": handoff_id, "faceAuthorized": "1", "personFullBody": "1"}, [("characterImage", "face.png", b"img")]
                 )
                 job_id = prepared["jobId"]
                 partial = self.mod.execute_video_job(td, job_id, {})
@@ -941,7 +993,7 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             service = _make_fake_video_service(td, _WebFakeVideoPipeline())
             with patch.object(self.mod, "build_video_service", return_value=service):
                 prepared = self.mod.prepare_video_job(
-                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                    td, {"handoffId": handoff_id, "faceAuthorized": "1", "personFullBody": "1"}, [("characterImage", "face.png", b"img")]
                 )
                 cancelled = self.mod.cancel_video_job(td, prepared["jobId"])
             self.assertEqual(cancelled["status"], "cancelled")
@@ -952,7 +1004,7 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             service = _make_fake_video_service(td, _WebFakeVideoPipeline())
             with patch.object(self.mod, "build_video_service", return_value=service):
                 prepared = self.mod.prepare_video_job(
-                    td, {"handoffId": handoff_id}, [("characterImage", "face.png", b"img")]
+                    td, {"handoffId": handoff_id, "faceAuthorized": "1", "personFullBody": "1"}, [("characterImage", "face.png", b"img")]
                 )
                 job_id = prepared["jobId"]
                 # concat before awaiting_review -> 409
@@ -1095,7 +1147,7 @@ class ReplacementVideoLifecycleRouteTests(unittest.TestCase):
                 self.mod, "build_video_service", return_value=service
             ):
                 body, headers = self._multipart(
-                    {"handoffId": handoff_id},
+                    {"handoffId": handoff_id, "faceAuthorized": "1", "personFullBody": "1"},
                     [("characterImage", "face.png", b"img")],
                 )
                 prepare = self._handler("/api/replacement/video/prepare", method="POST", body=body, headers=headers)

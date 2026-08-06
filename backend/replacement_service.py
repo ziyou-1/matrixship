@@ -369,6 +369,12 @@ class SourceResolver:
                 "message"):
             if key in resolved:
                 job[key] = copy.deepcopy(resolved.get(key))
+        # Carry caller control flags (person mode / authorization confirmations)
+        # onto the job so the pipeline honors no-person mode and keeps an audit
+        # trail of the authorization the user confirmed before submitting.
+        for flag in ("noPersonMode", "faceAuthorized", "personFullBody"):
+            if flag in request:
+                job[flag] = bool(request.get(flag))
         if resolved.get("status") == "failed":
             job["status"] = "failed"
             job["error"] = str(resolved.get("error") or "media_invalid")

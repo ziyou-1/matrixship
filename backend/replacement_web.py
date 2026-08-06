@@ -65,6 +65,11 @@ def replacement_page_html():
     .actions { margin-top: 16px; display: flex; gap: 10px; align-items: center; }
     .primary { background: #16745f; color: white; border: 0; border-radius: 6px; padding: 10px 14px; cursor: pointer; }
     .primary:disabled { background: #9aa6b2; cursor: not-allowed; }
+    .check-row { display: flex; align-items: flex-start; gap: 8px; font-weight: 500; margin: 8px 0 0; }
+    .check-row input { width: auto; margin-top: 2px; }
+    .auth-box { border: 1px solid #f0d9a8; background: #fffaf0; border-radius: 6px; padding: 10px 12px; margin-top: 8px; }
+    .auth-hint { color: #9a6a00; font-size: 12px; margin-bottom: 4px; }
+    .auth-box.disabled { opacity: .5; }
     .note-workspace { margin-top: 16px; display: grid; grid-template-columns: minmax(220px, .9fr) minmax(260px, 1fr) minmax(280px, 1fr); gap: 14px; align-items: start; }
     .tool-block { border: 1px solid #dde3ea; border-radius: 8px; padding: 12px; background: #fbfcfd; }
     .tool-block h2 { font-size: 15px; margin: 0 0 10px; letter-spacing: 0; }
@@ -100,6 +105,12 @@ def replacement_page_html():
         <div><label>\u4eba\u7269\u56fe</label><input name="characterImage" type="file" accept="image/*" required></div>
         <div><label>\u4ea7\u54c1\u56fe</label><input name="productImage" type="file" accept="image/*"></div>
         <div><label>\u573a\u666f\u56fe</label><input name="sceneImage" type="file" accept="image/*"></div>
+      </div>
+      <label class="check-row"><input type="checkbox" name="noPersonMode" id="video-no-person"> \u7eaf\u4ea7\u54c1\u89c6\u9891\uff08\u65e0\u4eba\u7269\uff0c\u4e0d\u4e0a\u4f20\u4eba\u7269\u56fe\u3001\u4e0d\u505a\u6362\u8138\uff09</label>
+      <div id="video-person-auth" class="auth-box">
+        <div class="auth-hint">\u771f\u4eba\u8138\u56fe\u5fc5\u987b\u786e\u8ba4\u6388\u6743\uff1b\u4e0d\u652f\u6301\u672a\u6388\u6743\u771f\u4eba\u3001\u516c\u4f17\u4eba\u7269\u6216\u660e\u661f\u8138\u3002</div>
+        <label class="check-row"><input type="checkbox" name="personFullBody" id="video-full-body"> \u8be5\u4eba\u7269\u56fe\u4e3a\u6e05\u6670\u6b63\u8138\u5168\u8eab\u7167\uff08\u5df2\u786e\u8ba4\uff09</label>
+        <label class="check-row"><input type="checkbox" name="faceAuthorized" id="video-face-auth"> \u6211\u786e\u8ba4\u5df2\u83b7\u5f97\u8be5\u4eba\u7269\u7d20\u6750\u6388\u6743</label>
       </div>
       <label>\u53e3\u64ad\u7a3f</label><textarea name="script"></textarea>
       <label>\u5356\u70b9/\u98ce\u683c\u8981\u6c42</label><textarea name="sellingPoints"></textarea>
@@ -329,6 +340,8 @@ function formatReplacementError(payload, statusCode = 0) {
   if (error === 'agent_token_required' || statusCode === 401) return '\u6388\u6743\u5df2\u5931\u6548\uff0c\u8bf7\u56de\u5230\u5ba2\u6237\u7aef\u91cd\u65b0\u6253\u5f00';
   if (error === 'replacement_invalid_source_url') return '\u8bf7\u586b\u5199\u6709\u6548\u7684 http/https \u6765\u6e90\u94fe\u63a5';
   if (error === 'replacement_video_missing_character_image') return '\u8bf7\u4e0a\u4f20\u4eba\u7269\u53c2\u8003\u56fe';
+  if (error === 'replacement_person_full_body_required') return '\u8bf7\u5148\u52fe\u9009\u786e\u8ba4\uff1a\u4e0a\u4f20\u7684\u4eba\u7269\u56fe\u662f\u6e05\u6670\u6b63\u8138\u5168\u8eab\u7167';
+  if (error === 'replacement_face_authorization_required') return '\u8bf7\u5148\u52fe\u9009\u786e\u8ba4\uff1a\u5df2\u83b7\u5f97\u8be5\u4eba\u7269\u7d20\u6750\u6388\u6743\uff08\u4e0d\u652f\u6301\u672a\u6388\u6743\u771f\u4eba\u3001\u516c\u4f17\u4eba\u7269\u6216\u660e\u661f\u8138\uff09';
   if (error === 'replacement_note_missing_images') return '\u8bf7\u4e0a\u4f20\u81f3\u5c11\u4e00\u5f20\u66ff\u6362\u56fe\u7247';
   if (error === 'replacement_unsupported_file_type') return '\u8bf7\u4e0a\u4f20 PNG\u3001JPG\u3001JPEG \u6216 WEBP \u56fe\u7247';
   if (error === 'replacement_upload_too_large') return '\u56fe\u7247\u8fc7\u5927\uff0c\u8bf7\u538b\u7f29\u540e\u91cd\u8bd5';
@@ -574,6 +587,15 @@ async function downloadVideoResult(event) {
     status.textContent = formatReplacementError({error: error && error.message ? error.message : 'network_error'});
   }
 }
+function syncVideoPersonMode() {
+  const noPerson = document.getElementById('video-no-person');
+  const authBox = document.getElementById('video-person-auth');
+  const character = document.querySelector('#video-form input[name="characterImage"]');
+  const off = !!(noPerson && noPerson.checked);
+  if (authBox) { authBox.classList.toggle('disabled', off); authBox.style.display = off ? 'none' : ''; }
+  if (character) character.required = !off;
+}
+document.getElementById('video-no-person').addEventListener('change', syncVideoPersonMode);
 document.getElementById('video-form').addEventListener('submit', e => { e.preventDefault(); prepareVideoJob(); });
 document.getElementById('video-execute').addEventListener('click', executeVideoJob);
 document.getElementById('video-retry').addEventListener('click', retryVideoFailed);
@@ -582,6 +604,7 @@ document.getElementById('video-concat').addEventListener('click', concatVideoJob
 document.getElementById('video-download').addEventListener('click', downloadVideoResult);
 document.getElementById('note-form').addEventListener('submit', e => { e.preventDefault(); submitForm('note-form', '/api/replacement/note/start', 'note-status'); });
 document.getElementById('note-save').addEventListener('click', saveNoteDraft);
+syncVideoPersonMode();
 loadVideoHandoff();
 if (currentVideoJobId()) pollVideoJob();
 </script>
@@ -976,8 +999,9 @@ def start_video_job(data_dir, fields, files):
     validation_error = _validate_images(images)
     if validation_error:
         return validation_error
-    if not any(field == "characterImage" for field, _filename, _data in images):
-        return _error("replacement_video_missing_character_image")
+    gate_error = _video_person_gate(fields, images)
+    if gate_error:
+        return gate_error
     job_id = _new_video_job_id()
     now = time.time()
     files_metadata = _file_metadata(images)
@@ -1107,6 +1131,32 @@ def build_video_service(data_dir):
     )
 
 
+def _truthy_field(value):
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "checked")
+
+
+def _video_person_gate(fields, images):
+    """Real-person compliance gate, mirroring the native VideoReplacementPage.
+
+    A real face reference may only be used after the user confirms (a) it is a
+    clear full-body front photo and (b) they hold the authorization for it. This
+    blocks unauthorized real people, public figures and celebrity faces exactly
+    like the Qt page. Product-only jobs (纯产品视频 / no-person mode) skip the face
+    requirements entirely.
+    """
+    fields = fields or {}
+    has_character = any(field == "characterImage" for field, _f, _d in (images or []))
+    if _truthy_field(fields.get("noPersonMode")):
+        return None
+    if not has_character:
+        return _error("replacement_video_missing_character_image")
+    if not _truthy_field(fields.get("personFullBody")):
+        return _error("replacement_person_full_body_required")
+    if not _truthy_field(fields.get("faceAuthorized")):
+        return _error("replacement_face_authorization_required")
+    return None
+
+
 def _video_prepare_request(fields, handoff):
     fields = fields or {}
     request = {}
@@ -1116,6 +1166,9 @@ def _video_prepare_request(fields, handoff):
     if handoff:
         request["handoff"] = handoff
         request["handoffId"] = str(handoff.get("id") or "").strip()
+    request["noPersonMode"] = _truthy_field(fields.get("noPersonMode"))
+    request["faceAuthorized"] = _truthy_field(fields.get("faceAuthorized"))
+    request["personFullBody"] = _truthy_field(fields.get("personFullBody"))
     request["inputs"] = {
         "hasScript": bool(str(fields.get("script") or "").strip()),
         "hasSellingPoints": bool(str(fields.get("sellingPoints") or "").strip()),
@@ -1147,8 +1200,9 @@ def prepare_video_job(data_dir, fields, files):
     validation_error = _validate_images(images)
     if validation_error:
         return validation_error
-    if not any(field == "characterImage" for field, _filename, _data in images):
-        return _error("replacement_video_missing_character_image")
+    gate_error = _video_person_gate(fields, images)
+    if gate_error:
+        return gate_error
     job_id = _new_video_job_id()
     _write_upload_files(data_dir, "video", job_id, images)
     request = _video_prepare_request(fields, handoff)
