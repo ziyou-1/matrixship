@@ -1244,9 +1244,37 @@ def _headers():
     return h
 
 
+def _build_central_session():
+    """给中心服请求装上连接复用 + 仅限建连阶段的重试。
+
+    两个都要:
+      * 复用连接。原实现每次调用都新建 TCP+TLS,握手一旦间歇失败,每个请求都独立
+        中招。账户中心一屏要发好几个请求,所以特别容易看到"账单数据暂时不可用"。
+      * 重试。但**只重试 connect**(read=0, status=0):TLS 握手失败意味着服务端
+        根本没收到请求,重发是安全的;而读阶段失败可能是服务端已经处理过了,
+        盲目重发会重复扣费。
+    """
+    session = requests.Session()
+    try:
+        from urllib3.util.retry import Retry
+        retry = Retry(total=3, connect=3, read=0, status=0,
+                      backoff_factor=0.5, allowed_methods=None,
+                      raise_on_status=False)
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry,
+                                                pool_connections=8, pool_maxsize=16)
+    except Exception:
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_CENTRAL_SESSION = _build_central_session()
+
+
 def api(method, path, body=None, timeout=60):
     try:
-        r = requests.request(method, CENTRAL + path, headers=_headers(), json=body, timeout=timeout)
+        r = _CENTRAL_SESSION.request(method, CENTRAL + path, headers=_headers(), json=body, timeout=timeout)
         try:
             return r.status_code, r.json()
         except Exception:
