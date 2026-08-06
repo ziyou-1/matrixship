@@ -296,10 +296,14 @@ class UnifiedBillingTest(unittest.TestCase):
     def test_maindb_model_usage_logs_query_is_bounded_and_requests_overflow_row(self):
         source = load_maindb_module()
         rows = [{"id": 7, "request_id": "video:req-1"}]
+        # created_ts / refunded_ts 由数据库换算成 epoch。pymysql 返回的裸 datetime 会被
+        # billing_analytics._timestamp() 当成北京时间,而库里存 UTC,记录因此早 8 小时,
+        # 与 JSON 账本混排时新扣费会沉到旧记录下面(2026-08-06 账户中心首行对不上余额)。
         expected_sql = (
             "SELECT id, request_id, user_id, project_id, task_id, model_id, model_type, "
             "billing_method, amount, balance_before, balance_after, status, description, "
-            "created_at, refunded_at FROM model_usage_logs "
+            "created_at, refunded_at, UNIX_TIMESTAMP(created_at) AS created_ts, "
+            "UNIX_TIMESTAMP(refunded_at) AS refunded_ts FROM model_usage_logs "
             "WHERE user_id=%s AND created_at >= %s AND created_at < %s "
             "ORDER BY created_at DESC, id DESC LIMIT %s"
         )
