@@ -378,7 +378,7 @@ class SourceResolver:
         # Model / audio-mode / voice chosen on the web form flow through to the job
         # so the pipeline uses the requested model and audio path (defaults apply
         # when the caller omits them).
-        for field in ("model", "audioMode", "voice"):
+        for field in ("model", "audioMode", "voice", "productNotes", "modelNotes"):
             value = str(request.get(field) or "").strip()
             if value:
                 job[field] = value

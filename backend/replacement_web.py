@@ -331,6 +331,8 @@ async function loadVideoHandoff() {
     status.textContent = '\u5df2\u63a5\u5165\u672c\u5730\u5206\u89e3\u7ed3\u679c\uff0c\u53ef\u4e0a\u4f20\u66ff\u6362\u7d20\u6750\u540e\u521b\u5efa\u66ff\u6362\u4efb\u52a1\u3002\\n\\n' + JSON.stringify(json, null, 2);
     const sourceInput = document.querySelector('#video-form input[name="sourceUrl"]');
     if (sourceInput) sourceInput.required = false;
+    const scriptBox = document.querySelector('#video-form textarea[name="script"]');
+    if (scriptBox && !scriptBox.value.trim() && json.script) scriptBox.value = json.script;
     const mode = document.getElementById('video-source-mode');
     if (mode) mode.textContent = '\u6765\u6e90\u6a21\u5f0f\uff1a\u672c\u5730\u5206\u89e3\u4ea4\u63a5 (' + handoffId + ')';
   } catch (error) {
@@ -915,12 +917,30 @@ def _handoff_source_context(handoff):
     }
 
 
+def _handoff_script_text(handoff):
+    """Joined recognized voiceover script from the breakdown transcript, so the web
+    form can prefill the 口播稿 box with what 分解视频 heard (redacted, length-capped)."""
+    analysis = handoff.get("breakdownAnalysis") if isinstance(handoff.get("breakdownAnalysis"), dict) else {}
+    transcript = analysis.get("transcript") if isinstance(analysis.get("transcript"), dict) else {}
+    text = str(transcript.get("text") or "").strip()
+    if not text:
+        parts = []
+        for seg in (transcript.get("segments") or []):
+            if isinstance(seg, dict):
+                piece = str(seg.get("text") or "").strip()
+                if piece:
+                    parts.append(piece)
+        text = " ".join(parts)
+    return _sanitize_note_text(text)[:4000]
+
+
 def handoff_response(handoff):
     handoff = handoff or {}
     source_path = str(handoff.get("sourceVideoPath") or "")
     return {
         "ok": True,
         "handoffId": str(handoff.get("id") or ""),
+        "script": _handoff_script_text(handoff),
         "source": _sanitize_note_value(handoff.get("source") or {}),
         "sourceVideo": {
             "available": bool(source_path and os.path.isfile(source_path)),
@@ -1272,12 +1292,25 @@ def _video_prepare_request(fields, handoff):
     voice = str(fields.get("voice") or "").strip()
     if voice and voice in _allowed_voice_ids():
         request["voice"] = voice
+    script = _sanitize_note_text(fields.get("script") or "")
+    selling_points = _sanitize_note_text(fields.get("sellingPoints") or "")
     request["inputs"] = {
-        "hasScript": bool(str(fields.get("script") or "").strip()),
-        "hasSellingPoints": bool(str(fields.get("sellingPoints") or "").strip()),
-        "script": _sanitize_note_text(fields.get("script") or ""),
-        "sellingPoints": _sanitize_note_text(fields.get("sellingPoints") or ""),
+        "hasScript": bool(script.strip()),
+        "hasSellingPoints": bool(selling_points.strip()),
+        "script": script,
+        "sellingPoints": selling_points,
     }
+    # The 口播稿 / 卖点·风格 the customer types (or the prefilled transcript they
+    # keep) feed the per-segment generation prompt via job.productNotes, which
+    # _build_replacement_prompt already consumes. Labelled so the model can tell
+    # the spoken script from the selling/style guidance.
+    notes = []
+    if script.strip():
+        notes.append("口播稿：" + script.strip())
+    if selling_points.strip():
+        notes.append("卖点/风格要求：" + selling_points.strip())
+    if notes:
+        request["productNotes"] = "；".join(notes)
     return request
 
 

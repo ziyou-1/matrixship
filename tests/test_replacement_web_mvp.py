@@ -221,6 +221,23 @@ class ReplacementWebModuleTests(unittest.TestCase):
         self.assertIn("loadVideoOptions", html)
         self.assertIn("/api/replacement/video/options", html)
 
+    def test_handoff_response_exposes_recognized_script(self):
+        handoff = {
+            "id": "rwh_" + "a" * 24,
+            "breakdownAnalysis": {"transcript": {"segments": [
+                {"start": 0, "end": 4, "text": "大家好"},
+                {"start": 4, "end": 8, "text": "推荐这款产品"},
+            ]}},
+        }
+        resp = self.mod.handoff_response(handoff)
+        self.assertIn("大家好", resp["script"])
+        self.assertIn("推荐这款产品", resp["script"])
+
+    def test_replacement_page_prefills_script_from_handoff(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn("scriptBox", html)
+        self.assertIn("json.script", html)
+
     def test_replacement_page_html_supports_note_preview_copy_editing(self):
         html = self.mod.replacement_page_html()
 
@@ -1001,6 +1018,23 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
                 result = self.mod.regenerate_frame_video_job(td, prepared["jobId"], 1, "start")
             self.assertFalse(result["ok"])
             self.assertEqual(result["error"], "replacement_frame_regen_comic_only")
+
+    def test_prepare_maps_script_and_selling_points_to_product_notes(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td,
+                    {"handoffId": handoff_id, "noPersonMode": "1",
+                     "script": "欢迎选购", "sellingPoints": "高级感"},
+                    [],
+                )
+            self.assertTrue(prepared["ok"])
+            job = self.mod.load_job(td, "video", prepared["jobId"])
+            self.assertIn("欢迎选购", job.get("productNotes") or "")
+            self.assertIn("高级感", job.get("productNotes") or "")
 
     def test_prepare_with_direct_url_downloads_into_job_dir(self):
         with tempfile.TemporaryDirectory() as td:
