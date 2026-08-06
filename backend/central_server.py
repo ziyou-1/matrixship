@@ -5013,6 +5013,13 @@ def has_role(handler, org_id=None, min_role="member"):
         return False
     if user.get("_authType") == "root-token":
         return True
+    # 平台管理员(运营方)对所有企业有权。缺了这一条,服务端会一边通过
+    # product_role_for_user() 告诉客户端"你是 platform_admin"、把所有企业列进下拉框,
+    # 一边在这里拒掉除 org-default 以外的每一次操作 —— 因为运营方的隐式成员身份
+    # (implicit_memberships_for_user)只覆盖 org-default,而"添加企业"并不会给创建者
+    # 建成员关系。表现就是:新建企业成功,紧接着按提示去新增成员却 403。
+    if is_platform_admin(handler):
+        return True
     need = ROLE_RANK.get(min_role, ROLE_RANK["member"])
     org_id = normalize_org_id(org_id) if org_id and org_id != "*" else org_id
     memberships = [m for m in user_memberships(user) if m.get("status", "active") == "active"]
