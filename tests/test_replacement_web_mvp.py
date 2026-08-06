@@ -40,11 +40,24 @@ class _WebFakeDownloader:
 
 
 class _WebFakeVideoPipeline:
-    def __init__(self, fail_indices=()):
+    def __init__(self, fail_indices=(), mode=""):
         self.fail_indices = {int(v) for v in fail_indices}
         self.retry_calls = []
+        self.mode = mode
+
+    def regenerate_frame(self, job, segment_index, frame_kind, progress=None):
+        idx = int(segment_index)
+        target = None
+        key = "startFrameRegenerated" if str(frame_kind).lower() == "start" else "endFrameRegenerated"
+        for segment in job.get("segments") or []:
+            if int(segment.get("index")) == idx:
+                segment[key] = True
+                target = segment
+        return {"job": job, "segment": target, "frameKind": str(frame_kind).lower()}
 
     def build_plan(self, job):
+        if self.mode:
+            job["replacementMode"] = self.mode
         job["segments"] = [
             {"index": 1, "start": 0.0, "end": 8.0, "status": "planned"},
             {"index": 2, "start": 8.0, "end": 16.0, "status": "planned"},
@@ -193,6 +206,12 @@ class ReplacementWebModuleTests(unittest.TestCase):
         audio_values = {m["value"] for m in options.get("audioModes") or []}
         self.assertIn("auto", audio_values)
         self.assertIn("tts", audio_values)
+
+    def test_replacement_page_html_has_frame_regen_control(self):
+        html = self.mod.replacement_page_html()
+        self.assertIn('id="video-regen"', html)
+        self.assertIn("/api/replacement/video/regenerate-frame", html)
+        self.assertIn("首尾帧重生", html)
 
     def test_replacement_page_html_has_model_and_audio_controls(self):
         html = self.mod.replacement_page_html()
@@ -942,6 +961,46 @@ class ReplacementVideoLifecycleAdapterTests(unittest.TestCase):
             self.assertEqual(job.get("model"), "test-model")
             self.assertEqual(job.get("audioMode"), "tts")
             self.assertEqual(job.get("voice"), "VoiceA")
+
+    def test_regenerate_frame_on_comic_job_updates_segment(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline(mode="comic_project")
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id, "noPersonMode": "1"}, [])
+                job_id = prepared["jobId"]
+                self.mod.execute_video_job(td, job_id, {})
+                result = self.mod.regenerate_frame_video_job(td, job_id, 1, "start")
+            self.assertTrue(result["ok"])
+            job = self.mod.load_job(td, "video", job_id)
+            seg1 = next(s for s in job["segments"] if int(s["index"]) == 1)
+            self.assertTrue(seg1.get("startFrameRegenerated"))
+
+    def test_regenerate_frame_rejects_invalid_frame_kind(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline(mode="comic_project")
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id, "noPersonMode": "1"}, [])
+                result = self.mod.regenerate_frame_video_job(td, prepared["jobId"], 1, "middle")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "comic_frame_kind_invalid")
+
+    def test_regenerate_frame_rejects_non_comic_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            handoff_id = self._handoff(td)
+            pipeline = _WebFakeVideoPipeline()
+            service = _make_fake_video_service(td, pipeline)
+            with patch.object(self.mod, "build_video_service", return_value=service):
+                prepared = self.mod.prepare_video_job(
+                    td, {"handoffId": handoff_id, "noPersonMode": "1"}, [])
+                result = self.mod.regenerate_frame_video_job(td, prepared["jobId"], 1, "start")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "replacement_frame_regen_comic_only")
 
     def test_prepare_with_direct_url_downloads_into_job_dir(self):
         with tempfile.TemporaryDirectory() as td:

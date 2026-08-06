@@ -7522,7 +7522,8 @@ class Handler(BaseHTTPRequestHandler):
                     '/api/replacement/video/execute',
                     '/api/replacement/video/retry',
                     '/api/replacement/video/concat',
-                    '/api/replacement/video/cancel'):
+                    '/api/replacement/video/cancel',
+                    '/api/replacement/video/regenerate-frame'):
                 if not replacement_web_enabled():
                     return json_response(self, replacement_web.replacement_disabled_payload(), 404)
                 job_id = str(body.get('jobId') or body.get('id') or '')
@@ -7534,6 +7535,13 @@ class Handler(BaseHTTPRequestHandler):
                     result = replacement_web.retry_video_job(DATA_DIR, job_id, segment_indices)
                 elif path == '/api/replacement/video/concat':
                     result = replacement_web.concat_video_job(DATA_DIR, job_id)
+                elif path == '/api/replacement/video/regenerate-frame':
+                    result = replacement_web.regenerate_frame_video_job(
+                        DATA_DIR,
+                        job_id,
+                        body.get('segmentIndex') if body.get('segmentIndex') is not None else body.get('segment_index'),
+                        body.get('frameKind') or body.get('frame_kind'),
+                    )
                 else:
                     result = replacement_web.cancel_video_job(DATA_DIR, job_id)
                 status = 202 if result.get('ok') else (result.get('statusCode') or 400)
