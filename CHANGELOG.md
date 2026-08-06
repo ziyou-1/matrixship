@@ -1,5 +1,21 @@
 ﻿# Changelog
 
+## 2026-08-06 客户端改用 HTTPS 独立子域中心服
+### Fixed
+- 客户端默认中心服由明文 `http://120.26.194.174:9080` 改为 `https://central.yunlingai.net`。明文会让登录密码与会话 token 过公网，并被 `validate_service_url()` 拒绝而使"分解视频"的音频转写失败。
+- 音频转写失败不再中断整个分解。`_transcribe_breakdown_audio()` 捕获服务地址校验的 `ValueError` 并降级，画面与 OCR 分析继续产出报告。
+- 清理三处硬编码的明文旧中心服 `http://39.105.120.104`（`local_browser_worker.py` 两处、`local_login.py` 一处）；`agent_launcher.py` 不再沿用配置文件里的陈旧 central，并修正了那句"这是 MatrixShipAgent.exe 的入口"的失真 docstring。
+
+### Changed
+- 新增 `central_library_file_prefix()`，把两处判断"URL 是否属于中心服素材库"的 path 比较收敛为一处并锚定到 `CENTRAL` 的 path。独立子域下与原字面量完全等价，仅用于免疫将来改成带前缀地址时的静默失配。
+- 分解报告在转写失败时增加"转写失败原因/代码"两行，避免配置错误被一个 `failed` 盖掉。
+- `backend/.env.example` 与 `docs/DEPLOYMENT.md` 同步新默认值与三条约束（HTTPS、公网、独立子域）。
+
+### Verification And Operations
+- 新增 `tests/test_video_breakdown_transcribe_degrade.py`；相关套件 209/209 通过，新增用例已对旧代码做 RED 验证。
+- 服务端：nginx 新增 `central.yunlingai.net` 的 80/443 两个 server 块（净新增 60 行、删除 0 行），Let's Encrypt 证书有效期至 2026-11-04。**自动续期尚未配置。**
+- 客户端改动需重新打包并重传安装包才对下载用户生效；已装旧包的用户需重装。不涉及中心服 API、数据库、`migration.sql` 或密钥。
+
 ## 2026-08-05 客户端默认连接公网中心服
 ### Fixed
 - 本地客户端 `CENTRAL` 默认值由 `http://127.0.0.1:9080` 改为公网生产中心服 `http://120.26.194.174:9080`。公网下载安装的客户端所在机器没有中心服进程，旧默认值会让登录页直接报 `WinError 10061` / `NewConnectionError`。本机开发调试改为显式设置 `MATRIX_CENTRAL`。

@@ -1,4 +1,14 @@
-﻿## 2026-08-05 公网客户端「分解视频」全部失败（视觉分析步骤）
+﻿## 2026-08-06 分解失败 `remote service URL must use https; http is allowed only for loopback hosts`
+- 现象：公网下载安装的客户端，采集和下载都正常，分解视频走到"调用视觉模型分析关键帧"之后失败，报告里只有来源信息，`音频转写: failed`，末尾是上面这条英文错误和一个 errorId。
+- 根因：客户端不直连模型服务，转写用的 base_url 是 `lk888_config()["base_url"]` = `CENTRAL + "/lk888"`。2026-08-05 把 CENTRAL 默认值改成公网明文 `http://120.26.194.174:9080` 之后，`backend/utils/video_transcription.py` 的 `validate_service_url()` 判定"非回环主机必须 HTTPS"而抛 `ValueError`；该异常没有被捕获，一路冒到分解主流程，把整份报告变成失败。改之前默认值是回环地址，这条校验永远放行，所以从未暴露。校验本身是对的——明文会让口播音频和登录凭据一起过公网。
+- 修复：中心服增加 HTTPS 独立入口 `https://central.yunlingai.net`（nginx 新增两个 server 块 + Let's Encrypt 证书），客户端默认中心服改为该地址；`_transcribe_breakdown_audio()` 捕获 `ValueError` 并降级为"转写这一步失败"，画面与 OCR 分析继续，失败原因和错误码写入报告；`_video_breakdown_markdown()` 增加"转写失败原因/代码"两行。
+- 为什么用独立子域而不是在已有站点上挂路径前缀：带前缀时客户端里所有"URL 是否属于中心服"的 path 比较会静默失配——`_xhs_note_source_image_headers()` 会丢鉴权头拿 401，`_central_library_image_to_data_url()` 会直接返回空串把同款替换的参考图悄悄丢掉且毫无报错；中心服 `_central_base()` 按 Host 重建 URL 时也会丢前缀；共享 vhost 还会让 `X-Matrix-User-Token` 的作用域只剩一处 path 判断兜底。
+- 排查：客户端启动日志有 `MatrixShipAgent 启动 v<版本> · 中心服 <URL>`，应显示 `https://central.yunlingai.net`。若分解仍失败，先看报告里的"转写失败原因/代码"——它现在会区分"服务地址不合法"(`transcribe_service_url_invalid`)、"未配置"(`lk888_not_configured`) 和真正的转写错误，不再一律显示 `failed`。中心服侧用 `GET /lk888/v1/models` 验证代理是否通。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown tests.test_video_breakdown_transcribe_degrade tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes tests.test_native_publish tests.test_xhs_note_replacement` 209/209 通过；新增用例先用 `git stash` 对旧代码做 RED 验证（2 失败 + 4 错误）。服务端从公网实测：health 200 且 `ssl_verify_result=0`、HTTP 301 跳 HTTPS、登录 200、`/lk888/v1/models` 200 共 55 个模型。
+- 回滚：服务端 `cp -a /root/ai-education-platform/nginx/nginx.conf.bak-20260805_matrix_https /root/ai-education-platform/nginx/nginx.conf && docker exec ai_education_nginx nginx -t && docker exec ai_education_nginx nginx -s reload`；客户端回滚 `backend/matrix_native_client.py`、`backend/agent_launcher.py`、`backend/local_browser_worker.py`、`backend/local_login.py`、两个测试文件、`backend/.env.example` 与本节，并重新打包安装包。不涉及中心服 API、数据库、`migration.sql` 或密钥。
+- 遗留：证书 2026-11-04 到期，**尚未配置自动续期**；到期未续会导致所有客户端 TLS 校验失败、全线登录不上。
+
+## 2026-08-05 公网客户端「分解视频」全部失败（视觉分析步骤）
 - 现象：从公网下载安装的客户端，登录、内容采集都正常，但「分解视频」到"调用视觉模型分析关键帧"这一步失败。本机开发环境同样失败，但报错不同（`ReadTimeout` / `ConnectionError`，本机中心服的 lk888 代理出网不通）。
 - 根因：客户端不直连模型服务，`lk888_vision()` 会把请求发给 `中心服 + /lk888/v1/chat/completions`。生产中心服的 `LK888_API_KEY` 为空，`lk888_proxy` 在 `if not key:` 处直接返回 503 `lk888_not_configured`，请求根本到不了上游。
 - 修复：在生产 `backend/.env.prod` 填入 `LK888_API_KEY`（该行原本存在但值为空），重启中心服容器使 `env_file` 重新加载。纯配置变更，不改代码、不需要重新打包客户端。

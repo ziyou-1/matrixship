@@ -61,12 +61,36 @@ def validate_central_service_url(value):
     return url
 
 
-# 默认必须是公网中心服。普通用户机器上没有中心服进程,默认指向 127.0.0.1 会让
-# 公网下载安装的客户端在登录页直接报 WinError 10061 / NewConnectionError。
-# 本机开发调试请显式设置 MATRIX_CENTRAL=http://127.0.0.1:9080。
+# 默认必须是公网中心服,且必须是 HTTPS,并且用**独立子域**(path 为空)。
+#
+# 三条约束各有来历:
+#   * 默认指向 127.0.0.1 会让公网安装的客户端在登录页直接报 WinError 10061,
+#     因为普通用户机器上没有中心服进程(2026-08-04 线上事故)。
+#   * 明文 HTTP 会让登录密码和会话 token 明文过公网,并被
+#     utils.video_transcription.validate_service_url() 以
+#     "http is allowed only for loopback hosts" 拒绝,分解视频的音频转写因此失败。
+#   * 用独立子域而不是在共享站点上挂路径前缀:带前缀时,凡是拿 URL 的 path 与
+#     "/api/..." 字面量比较的地方都会静默失配(丢鉴权头 401、参考图被悄悄丢弃),
+#     中心服 _central_base() 按 Host 重建 URL 时还会把前缀丢掉;共享 vhost 也会
+#     让 X-Matrix-User-Token 的作用域只剩一处 path 判断在兜底。
+#
+# 本机开发调试请显式设置 MATRIX_CENTRAL=http://127.0.0.1:9080(回环地址豁免 HTTPS)。
 CENTRAL = validate_central_service_url(
-    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://120.26.194.174:9080"
+    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL")
+    or "https://central.yunlingai.net"
 ).rstrip("/")
+
+
+def central_library_file_prefix(central_parsed=None):
+    """中心素材库文件接口的绝对 path 前缀,用于判断某个 URL 是否属于本中心服。
+
+    正常情况下 CENTRAL 的 path 为空,返回值就是 "/api/library/file/",与写死字面量
+    完全等价。保留这层是为了让判断对"CENTRAL 带路径前缀"免疫 —— 那种情况下写死
+    字面量会静默失配:要么丢掉鉴权头拿到 401,要么直接返回空串把参考图悄悄丢掉,
+    两种都没有明显报错,极难排查。
+    """
+    parsed = central_parsed if central_parsed is not None else urlparse(CENTRAL)
+    return (parsed.path or "").rstrip("/") + "/api/library/file/"
 APP_NAME = "MatrixShipAgent"
 APP_VERSION = "1.1.16"
 ACCENT = "#6366f1"
@@ -7268,7 +7292,9 @@ def _xhs_note_source_image_headers(url, central_base=""):
         )
     except Exception:
         return {}
-    if same_origin and target.path.startswith("/api/library/file/"):
+    # 不要放宽成"只比 origin":在共享站点上,这处 path 判断是 X-Matrix-User-Token
+    # 唯一的作用域边界。
+    if same_origin and target.path.startswith(central_library_file_prefix(central)):
         return _headers()
     return {}
 
@@ -19688,7 +19714,9 @@ def _central_library_image_to_data_url(value):
         )
     except Exception:
         return ""
-    if not same_origin or not target.path.startswith("/api/library/file/"):
+    # 失配时这里返回空串,参考图会被静默丢弃、用户看不到任何报错,所以判断必须
+    # 跟着 CENTRAL 的 path 走,不能写死字面量。
+    if not same_origin or not target.path.startswith(central_library_file_prefix(central)):
         return ""
     with _SLOCK:
         token = _SHARED.get("token") or ""
@@ -20707,8 +20735,17 @@ def _video_breakdown_markdown(data):
         "- OCR 引擎: %s" % (ocr.get("engine") or "-"),
         "- 音频转写: %s" % (transcript.get("status") or "-"),
         "- 重试次数: %s" % int(transcript.get("retryCount") or 0),
-        "",
     ]
+    # 转写失败时必须给出原因。只写一个 "failed" 会把"服务地址配错了"和"这条视频
+    # 本来就没人说话"混为一谈,现场只能靠猜。
+    if (transcript.get("status") or "") == "failed":
+        reason = str(transcript.get("message") or "").strip()
+        code = str(transcript.get("code") or "").strip()
+        if reason:
+            lines.append("- 转写失败原因: %s" % reason)
+        if code:
+            lines.append("- 转写失败代码: %s" % code)
+    lines.append("")
     if transcript.get("truncated"):
         total_duration = float(meta.get("duration") or transcript.get("duration") or 0)
         analyzed_through = float(
@@ -25712,34 +25749,62 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
                 "transcribedThroughSec": exported.get("limit"),
                 "truncated": exported.get("truncated", False),
                 "message": "音频导出失败，已继续使用画面与 OCR 分析。"}
-    cfg = lk888_config()
-    base = (cfg.get("base_url") or "").rstrip("/")
-    key = cfg.get("api_key") or ""
-    if not base or not key:
-        return {"status": "failed", "code": "lk888_not_configured", "text": "",
+    def _transcribe_degraded(code, message):
+        return {"status": "failed", "code": code, "text": "",
                 "segments": [], "chunks": [], "failedRanges": export_failures,
                 "errors": export_errors,
                 "duration": exported.get("duration"),
                 "transcribedThroughSec": exported.get("limit"),
                 "truncated": exported.get("truncated", False),
-                "message": "远程转写未配置，已继续使用画面与 OCR 分析。"}
-    result = transcribe_audio_chunks(
-        chunks=exported.get("chunks") or [],
-        base_url=base,
-        api_key=key,
-        model=model,
-        timeout=timeout,
-        retries=retries,
-        proxies=_lk_proxies(cfg),
-        only_ranges=only_ranges,
-        progress=progress,
-        logger=_CLIENT_JSON_LOGGER,
-        billing_context={
-            "scenario": "video_breakdown",
-            "stage": "audio_transcription",
-            "detail": "audio extraction and speech transcription",
-        },
-    )
+                "message": message}
+
+    # lk888_config() 和 transcribe_audio_chunks() 都会走 validate_service_url(),
+    # 服务地址不是 HTTPS 且非回环时抛 ValueError。转写只是分解的一个子步骤,画面
+    # 与 OCR 分析并不依赖它 —— 让这个异常冒出去会把整份报告变成"分解失败",用户
+    # 一无所得。这里降级为"这一步失败",但**必须把原因带回报告**,否则配置问题会
+    # 被"音频转写: failed"五个字盖掉,现场无从排查。
+    try:
+        cfg = lk888_config()
+        base = (cfg.get("base_url") or "").rstrip("/")
+        key = cfg.get("api_key") or ""
+        if not base or not key:
+            return _transcribe_degraded(
+                "lk888_not_configured", "远程转写未配置，已继续使用画面与 OCR 分析。")
+        result = transcribe_audio_chunks(
+            chunks=exported.get("chunks") or [],
+            base_url=base,
+            api_key=key,
+            model=model,
+            timeout=timeout,
+            retries=retries,
+            proxies=_lk_proxies(cfg),
+            only_ranges=only_ranges,
+            progress=progress,
+            logger=_CLIENT_JSON_LOGGER,
+            billing_context={
+                "scenario": "video_breakdown",
+                "stage": "audio_transcription",
+                "detail": "audio extraction and speech transcription",
+            },
+        )
+    except ValueError as exc:
+        raw_log = json_log(
+            _CLIENT_JSON_LOGGER,
+            "video_breakdown_transcribe_service_invalid",
+            exc=exc,
+            code="transcribe_service_url_invalid",
+        )
+        try:
+            error_id = (json.loads(raw_log) or {}).get("errorId") or ""
+        except Exception:
+            error_id = ""
+        # 异常文案来自校验函数本身(如 "remote service URL must use https; ..."),
+        # 不含地址或密钥,可以直接展示给运维。
+        return _transcribe_degraded(
+            "transcribe_service_url_invalid",
+            "远程转写服务地址不合法：%s%s，已继续使用画面与 OCR 分析。"
+            % (str(exc)[:160], ("（errorId %s）" % error_id) if error_id else ""),
+        )
     remote_failures = list(result.get("failedRanges") or [])
     remote_errors = list(result.get("errors") or remote_failures)
     failed_ranges = export_failures + remote_failures

@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from urllib.parse import urlparse
 import os
 
 
@@ -49,7 +50,26 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         # 安装包分发给普通用户,他们机器上没有中心服进程。默认指向 127.0.0.1 会让
         # 登录页直接报 WinError 10061 / NewConnectionError(2026-08-04 线上事故)。
         # 本机开发调试走 MATRIX_CENTRAL 覆盖,见下一条用例和 start-visible-client.bat。
-        self.assertEqual(client.CENTRAL, "http://120.26.194.174:9080")
+        #
+        # 必须是 HTTPS:明文会让密码和会话 token 过公网,还会被
+        # utils.video_transcription.validate_service_url() 拒绝而使分解失败。
+        # 必须是独立子域(path 为空):带路径前缀时,客户端里判断"URL 是否属于中心服"
+        # 的 path 比较会静默失配。下面两条断言把这两个性质都钉住。
+        self.assertEqual(client.CENTRAL, "https://central.yunlingai.net")
+        self.assertTrue(client.CENTRAL.startswith("https://"), "中心服默认地址必须是 HTTPS")
+        self.assertEqual(urlparse(client.CENTRAL).path, "", "中心服默认地址不得带路径前缀")
+
+    def test_central_library_file_prefix_tracks_the_central_path(self):
+        """URL 归属判断必须跟着 CENTRAL 的 path 走,不能写死字面量。"""
+        with mock.patch.dict(os.environ, {"MATRIX_CENTRAL": "", "CENTRAL_URL": ""}, clear=False):
+            client = load_client()
+        # 独立子域:与写死字面量完全等价
+        self.assertEqual(client.central_library_file_prefix(), "/api/library/file/")
+        # 万一将来又挂到带前缀的地址上,判断要自动跟上
+        self.assertEqual(
+            client.central_library_file_prefix(urlparse("https://example.com/matrix-central")),
+            "/matrix-central/api/library/file/",
+        )
 
     def test_central_env_override_still_supports_local_development(self):
         with mock.patch.dict(os.environ, {
