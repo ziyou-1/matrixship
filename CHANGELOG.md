@@ -1,5 +1,20 @@
 ﻿# Changelog
 
+## 2026-08-07 同款替换只走客户端 + 本地启动脚本可选中心服
+### Changed
+- 原生「同款替换」和「图文同款」两页都移除「打开网页版替换」按钮和它上方的一整行 `web_row`，同时删除 `VideoReplacementPage.open_replacement_web()` 和模块级 `open_replacement_web_page()`。两种同款替换都只在客户端内完成，客户端不再有任何跳转网页的入口。
+- 网页版本身（`backend/replacement_web.py`、`/replacement`、`/api/replacement/*`、`MATRIX_REPLACEMENT_WEB_ENABLED`）未改动，仍然存在，但只剩手工 `/replacement#token=...` 这条本地排查兜底路径可进入。
+- 模块级 `replacement_web_user_context()`、`create_replacement_web_handoff()`、`replacement_web_launch_url()` 保留：它们是交接与脱敏契约且有测试覆盖。副作用是三者目前都没有 UI 调用方，视频交接 `rwh_...` 没有 UI 触发路径。
+- `start-visible-client.bat` 新增 `START_LOCAL_CENTRAL` 开关：`1` 保持原来的本机中心服流程，`0`（新默认）跳过本机中心服直连 `https://central.yunlingai.net`。本机没有漫剧主库 MySQL，`maindb.ping()` 失败会让 `find_login_user()` 降级到本地 JSON 用户表，所以 `1` 只能用 `admin`/`test123456` 登录，漫剧账号登录必须用 `0`。
+- `start-visible-client.bat` 增设 `MATRIX_VIDEO_REPLACEMENT_ENABLED=1` 与 `MATRIX_XHS_ENABLED=1`。客户端不加载 `backend/.env`，这两个开关只认进程环境变量；前者仅客户端检查，后者客户端/中心服/本地执行器三层都检查，连线上中心服时中心服那一层由服务器配置决定，本地设 1 管不到。
+
+### Verification And Operations
+- `py_compile` 通过；`tests.test_replacement_web_mvp`、`tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service`、`tests.test_xhs_note_replacement` 合计 561/561 通过。
+- offscreen 构造两页：`VideoReplacementPage` 14 个按钮、`XhsNoteReplacementPage` 2 个按钮，均无「网页」字样，`b_open_replacement_web` 属性都不存在；模块级 `open_replacement_web_page` 已消失，`replacement_web_launch_url` 与 `create_replacement_web_handoff` 仍在。`MATRIX_VIDEO_REPLACEMENT_ENABLED=1` 下 `nav_feature_enabled("同款替换")` 为 `True`。
+- `start-visible-client.bat` 两种模式各跑了一次副本干跑（`taskkill` 与客户端启动替换为 echo，未触碰真实进程），分别输出 `https://central.yunlingai.net` 与 `http://127.0.0.1:9080`，`VIDEO=1 XHS=1`；文件仍为纯 ASCII、无 BOM。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**，已发布的 `MatrixShipAgent-Setup.exe` 不含本次改动。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚：`git checkout` 恢复 `backend/matrix_native_client.py`、`start-visible-client.bat`、`docs/API_REFERENCE.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和本条目。
+
 ## 2026-08-06 矩阵侧扣费与漫剧侧对齐
 ### Fixed
 - `MAINDB_YUAN_TO_POWER` 由 10 改为 1。线上 `recharge_packages` 本就是 1 元 ≈ 1 算力（50元档=50算力），此前按 10 倍扣费属十倍超收。该常量同时决定扣费与微信充值入账，**必须共用一个值**。

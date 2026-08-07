@@ -743,10 +743,6 @@ def replacement_web_launch_url(handoff_id=""):
     return "http://127.0.0.1:%s/replacement#%s" % (port, urlencode(params))
 
 
-def open_replacement_web_page(handoff_id=""):
-    _open_url(replacement_web_launch_url(handoff_id))
-
-
 def product_role():
     with _SLOCK:
         role = _SHARED.get("appRole") or "normal_user"
@@ -12020,13 +12016,6 @@ class XhsNoteReplacementPage(BasePage):
         self._copy_updating = False
         self.v.addWidget(make_header("图文同款", "小红书图文结构复刻 · 先预览替换方案，再保存到素材发布和资产库"))
         self.v.addWidget(prereq_banner("图文同款 V1 只生成草稿，不自动发布；缺图必须手动选择替换图片后才能生成预览和保存草稿。"))
-        web_row = QtWidgets.QHBoxLayout()
-        self.b_open_replacement_web = QtWidgets.QPushButton("打开网页版替换")
-        self.b_open_replacement_web.setObjectName("ghost")
-        self.b_open_replacement_web.clicked.connect(open_replacement_web_page)
-        web_row.addWidget(self.b_open_replacement_web)
-        web_row.addStretch()
-        self.v.addLayout(web_row)
 
         source = QtWidgets.QFrame()
         source.setObjectName("card")
@@ -14691,13 +14680,6 @@ class VideoReplacementPage(BasePage):
         super().__init__()
         self.v.addWidget(make_header("同款替换", "先提取原片人物/产品/场景槽位，再按上传素材替换生成新视频"))
         self.v.addWidget(prereq_banner("真人脸图必须确认授权；不支持未授权真人、公众人物或明星脸。生成会先提取原片人物/产品/场景槽位：上传人物/产品/场景则强制替换，未上传则保留原片对应槽位。"))
-        web_row = QtWidgets.QHBoxLayout()
-        self.b_open_replacement_web = QtWidgets.QPushButton("打开网页版替换")
-        self.b_open_replacement_web.setObjectName("ghost")
-        self.b_open_replacement_web.clicked.connect(self.open_replacement_web)
-        web_row.addWidget(self.b_open_replacement_web)
-        web_row.addStretch()
-        self.v.addLayout(web_row)
         self._source = {}
         self._product_paths = []
         self._product_urls = []
@@ -15225,20 +15207,6 @@ class VideoReplacementPage(BasePage):
         self.b_review.setEnabled(False)
         self._set_generation_feedback(False)
         self._sync_audio_controls()
-
-    def open_replacement_web(self):
-        if not self._source:
-            QtWidgets.QMessageBox.information(self, "网页版替换", "请先从『分解视频』载入分解结果。")
-            return
-        source_path = str(self._source.get("sourceVideoPath") or "").strip()
-        if not (source_path and os.path.isfile(source_path)):
-            QtWidgets.QMessageBox.information(self, "网页版替换", "当前分解结果缺少可用的本地视频文件。")
-            return
-        result = create_replacement_web_handoff(self._source)
-        if not result.get("ok"):
-            QtWidgets.QMessageBox.warning(self, "网页版替换", "创建网页交接失败：" + str(result.get("error") or "unknown"))
-            return
-        open_replacement_web_page(result.get("handoffId") or "")
 
     def retry_source_transcription(self):
         if self._busy:

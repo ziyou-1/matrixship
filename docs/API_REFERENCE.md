@@ -828,7 +828,7 @@ LK888 实际扣费规则：凡是通过中心服 `/lk888/*` 或同款替换漫�
 
 ## 本地网页替换 MVP
 
-运行单元：本地执行引擎 `127.0.0.1:9081`。功能开关为 `MATRIX_REPLACEMENT_WEB_ENABLED=1`，默认关闭；关闭时 `GET /replacement` 与 `/api/replacement/*` 返回 HTTP 404、`replacement_web_disabled`。`GET /replacement` 只返回本地页面外壳，客户推荐从本地客户端“同款替换 / 图文同款”里的“打开网页版替换”进入；真正创建和查询 job 的 `/api/replacement/*` 仍受 `MATRIX_AGENT_TOKEN_AUTH` 和本机 agent token 保护。
+运行单元：本地执行引擎 `127.0.0.1:9081`。功能开关为 `MATRIX_REPLACEMENT_WEB_ENABLED=1`，默认关闭；关闭时 `GET /replacement` 与 `/api/replacement/*` 返回 HTTP 404、`replacement_web_disabled`。`GET /replacement` 只返回本地页面外壳。**2026-08-07 起客户端不再提供任何“打开网页版替换”按钮**（“同款替换”和“图文同款”两页的入口和 `open_replacement_web_page()` 一并删除），两种同款替换都只在客户端内完成；网页版仅剩手工 `/replacement#token=...` 这条本地排查兜底路径，不要发给客户；真正创建和查询 job 的 `/api/replacement/*` 仍受 `MATRIX_AGENT_TOKEN_AUTH` 和本机 agent token 保护。
 
 ### GET /replacement
 
