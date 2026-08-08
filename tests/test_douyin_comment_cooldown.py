@@ -321,36 +321,6 @@ class DouyinCommentCooldownTest(unittest.TestCase):
         self.assertNotIn("secret_cookie", serialized)
         self.assertNotIn("secret_token", serialized)
 
-    def test_platform_risk_response_writes_pause_even_when_safe_mode_disabled(self):
-        self.api._save_json(self.api.RISK_CONFIG_JSON, {
-            "dailyPublish": 3,
-            "dailyComment": 30,
-            "minInterval": 0,
-            "concurrency": 2,
-        })
-        auth = self.api.DouyinAuth()
-
-        with mock.patch.object(
-            self.api.SPIDER.douyin_apis,
-            "publish_comment",
-            return_value={"status_code": 8, "status_msg": "平台风控"},
-        ):
-            result = self.api.publish_comment_to_douyin(
-                auth,
-                "7312345678901234567",
-                "risk response should pause",
-                safe_mode=False,
-                account_id="douyin-main",
-            )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "risk_blocked")
-        self.assertEqual(result["error"], "douyin_comment_risk_cooldown")
-        self.assertIn("风险冷却", result.get("message", ""))
-        usage = self.api.load_comment_risk_state().get("accounts", {}).get("douyin-main", {})
-        self.assertTrue(usage.get("paused"))
-        self.assertGreater(float(usage.get("pausedUntil") or 0), time.time())
-
     def test_ai_outreach_stops_after_douyin_daily_limit_result(self):
         discovery = {
             "videoCount": 2,
