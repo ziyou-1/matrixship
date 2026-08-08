@@ -2699,6 +2699,20 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(row["display_name"], "SD 2.0 全能参考")
         self.assertEqual(row["type"], "video")
 
+    def test_replacement_supported_model_rows_include_known_hailuo_h3_all_purpose_model(self):
+        supported = self.client._replacement_supported_model_rows([])
+        names = [row["name"] for row in supported]
+
+        self.assertIn("hailuo-h3-quannengcankao", names)
+        row = next(row for row in supported if row["name"] == "hailuo-h3-quannengcankao")
+        self.assertEqual(row["display_name"], "海螺 H3 全能参考")
+        self.assertEqual(row["type"], "video")
+
+    def test_replacement_configured_model_allows_hailuo_h3_all_purpose_model(self):
+        candidates = self.client._replacement_model_candidates({"model": "hailuo-h3-quannengcankao"})
+
+        self.assertEqual(candidates[0], "hailuo-h3-quannengcankao")
+
     def test_principal_replacement_model_candidates_do_not_fallback_to_reference_video(self):
         candidates = self.client._replacement_model_candidates({
             "principalReplacementMode": "source_video_edit",
