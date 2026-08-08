@@ -1225,6 +1225,12 @@ def current_accounts():
             'cookieReady': True,
             'cookieCount': 1,
             'usable': True,
+            # 只有 xhs_profile_ready() 为真才走到这里,即本机登录态可用。
+            # 缺少这三个字段时,客户端合并会回落到中心服记录;账号矩阵登录直连
+            # 本地引擎、不回报中心服,于是登录成功也会显示离线。
+            'online': True,
+            'status': 'online',
+            'needLogin': False,
             'capabilities': xhs_caps,
         }))
     return accounts

@@ -1,4 +1,11 @@
-﻿﻿## 2026-08-08 同款替换 / 图文同款换位台账布局
+﻿﻿## 2026-08-08 小红书账号在线状态补齐
+- `backend/api_server.py#L1218-L1235`：`current_accounts()` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支入口条件是 `xhs_enabled() and xhs_profile_ready(DATA_DIR)`，本机登录态失效时整行不返回，因此置为在线不会误报。
+- 回归来源 `backend/matrix_native_client.py` 的 `submit_account_login_direct()`（2026-08-03 引入）：账号矩阵登录直连本机执行器，不再经中心服本地浏览器任务通道，`backend/central_server.py` 的 `local_browser_upsert_account()` 因此不再被触发。
+- 受影响的消费点：`merge_account_sources()` 合并时 `online` 回落到中心服记录；账号矩阵徽标渲染；`clean_accounts(ready_only=True)` 过滤发布/采集账号下拉；`account_option_label()` 标注“登录态失效”。
+- `tests/test_xhs_account_online_status.py`：跨 `api_server` 与 `matrix_native_client` 的回归，覆盖本地执行器字段、账号矩阵徽标为“在线”、发布/采集下拉保留该账号，以及本机登录态消失后不再显示账号的对照项。只测其中一端会漏掉本 bug。
+- 验证与影响：`tests.test_xhs_account_online_status` 4/4，相邻套件通过，`py_compile` 通过。只改本地执行器账号列表和新增测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。重启本地客户端和本地执行器生效；回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、本条记录和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-08-08 同款替换 / 图文同款换位台账布局
 - 定位方式说明：`docs/IMPLEMENTATION.md` 存在广播式重复（同一 `#L` 引用最多重复 67 次，`matrix_native_client.py#L4733-L4804` 等），行号引用整体不可信，故本条只用符号名定位，不写行号。
 - `backend/matrix_native_client.py` `THEMES`：dark / light 各新增换位台账状态色 `stKeep`/`stSwap`/`stOwe`/`stDone`/`stFail`，以及禁用态与勾选框 token `disBg`/`disBorder`/`checkBg`/`checkBorder`/`checkDisBg`/`checkDisBorder`。亮色下状态色统一压深以保证白卡上的对比度。
 - `backend/matrix_native_client.py` `build_qss()`：新增统一字阶与分区样式（`#eyebrow` 10.5/800、`#zoneTitle` 13.5/750、`#fieldValue` 12.5/600、`#meta` 11/500、`#slotIndex` 等宽数字），新增 `#zone`/`#readyBar`/`#hline`/`#quiet` 与 `QProgressBar` 样式；`QPushButton:disabled`、`QLineEdit:disabled` 系列与 `QCheckBox::indicator` 改为读取上述 token；补充 `QScrollBar:horizontal`。

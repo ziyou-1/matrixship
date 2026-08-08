@@ -1,4 +1,12 @@
-﻿﻿## 2026-08-08 亮色主题下主色按钮、勾选框、禁用按钮看不见
+﻿﻿## 2026-08-08 小红书登录成功后账号矩阵仍显示“离线”
+- 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、账号卡片也出现了，但状态徽标一直是“离线”。同时内容采集、获客寻客和素材发布的账号下拉找不到该账号，或提示“账号已存在，但登录态已失效”。
+- 根因：本地执行器 `/api/accounts` 返回的小红书行没有 `online` / `status` 字段，抖音行有。客户端 `merge_account_sources()` 合并时回落到中心服账号记录；而 2026-08-03 起账号矩阵登录改为直连本机执行器，不再经中心服本地浏览器任务通道，中心服 `local_browser_upsert_account()` 不再被触发，也就没有这条记录，于是 `online=False` → 徽标“离线”。抖音本地行自带 `online`，不受影响。
+- 修复：`backend/api_server.py#L1218-L1235` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支只有 `xhs_profile_ready()` 为真才进入，本机登录态失效时整行不返回，账号矩阵仍会按离线/不显示处理。
+- 排查：先看本机执行器 `/api/accounts` 返回的 `xhs-self` 是否带 `online: true`；如果带了但徽标仍是离线，说明跑的是旧进程，完全退出后用 `start-visible-client.bat` 重启本地客户端和本地执行器。中心服“账号资产总览”里看不到小红书账号是另一件事：中心服进程必须同样带 `MATRIX_XHS_ENABLED=1`，否则 `sync_node_accounts_locked()` 和 `local_browser_upsert_account()` 会静默丢弃所有小红书账号上报。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_account_online_status -v`，再运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_multi_account tests.test_native_publish tests.test_account_matrix_metrics tests.test_xhs_platform_disable tests.test_api_download_contract tests.test_xhs_safety_mode`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-08 亮色主题下主色按钮、勾选框、禁用按钮看不见
 - 现象：切换到亮色主题后，`#primary` 主色按钮（如「生成同款预览」「执行替换生成」）显示为白底白字几乎不可见；`QCheckBox` 勾选框在白卡上完全看不到方框，其中包括「我确认已获得该人物素材授权」这类必须勾选的授权确认项；禁用态按钮为白字压浅灰，读不出按钮文案。
 - 根因一（主色按钮）：页面容器调用了无类型选择器的 `setStyleSheet("background:transparent")`。Qt 中在父控件上设置的无类型选择器会沿继承作用到全部子控件，从而把子级 `#primary` 按钮的主色背景一并刷成透明；暗色主题下白字压深色卡片仍可辨认，因此该问题长期只在亮色主题下暴露。
 - 根因二（勾选框）：`QCheckBox::indicator` 的描边与底色在 QSS 中硬编码为 `rgba(255,255,255,*)`，亮色主题的卡片本身是白色，白描边压白卡等于没有边框。

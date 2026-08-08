@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-08 小红书登录成功后账号矩阵仍显示离线
+### Fixed
+- 本地执行器 `/api/accounts` 返回小红书 `xhs-self` 时补写 `online` / `status` / `needLogin`，与抖音账号行对齐。该分支的前置条件已经是 `xhs_profile_ready()`，即本机登录态可用，所以直接置为在线；登录态消失时整行不再返回，账号矩阵仍按离线处理。
+- 这是 2026-08-03「账号矩阵登录直连本机执行器」的回归：登录不再经中心服 `/api/local-browser/task`，`local_browser_upsert_account()` 不再被触发，而中心服账号记录是小红书 `online` 的唯一来源。抖音本地行自带 `online`，因此未受影响。
+- 同一根因还导致内容采集、获客寻客和素材发布的账号下拉把已登录的小红书账号过滤掉（`clean_accounts(ready_only=True)` 依赖 `online`），并误报“账号已存在，但登录态已失效”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_account_online_status`（4 条，含本机登录态消失后不显示账号的对照项）；相邻套件 `tests.test_douyin_multi_account tests.test_native_publish tests.test_account_matrix_metrics tests.test_xhs_platform_disable tests.test_api_download_contract tests.test_xhs_safety_mode` 通过；`py_compile` 通过。
+- 本次只改本地执行器账号列表和新增回归测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。需退出后用 `start-visible-client.bat` 重启本地客户端和本地执行器生效。中心服若未设置 `MATRIX_XHS_ENABLED=1`，账号资产总览仍不会收录小红书账号，三个运行单元的开关需一致。回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-08 同款替换 / 图文同款界面改版
 
 ### Changed
