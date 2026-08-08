@@ -1,4 +1,11 @@
-﻿﻿## 2026-08-08 中心服小红书恢复开关接线
+﻿﻿## 2026-08-08 小红书登录成功写入就绪 marker
+- `backend/api_server.py` `run_xhs_login()` 登录成功分支新增 `_save_json(DATA_DIR/xhs_auth_state.json, {loggedIn, cookieCount, profileDir, savedAt})`，与云登录路径 `_read_login_state()` 写 marker 的行为对齐。
+- 根因：`platform_adapters.xhs_login()` 的登录判定接受强 cookie `XHS_STRONG_LOGIN_COOKIES` 或 DOM 登录态；而就绪判定 `xhs_profile_ready()` 无 marker 时只调 `_xhs_profile_has_login_cookie()` 找强 cookie。DOM/主站 `web_session` 登录成功但缺强 cookie 时两者分歧，`current_accounts()` 不返回 xhs 行，卡片显示 0 个授权账号。
+- `tests/test_xhs_account_online_status.py`：mock `xhs_login` 返回 `logged_in=True` 但 profile 无强 cookie、无 marker，先断言就绪为假/账号 0（复现），修复后断言就绪为真/账号 1。测点选在 `run_xhs_login` 接缝，不需要 playwright。
+- 运行现场：排查时 9080/9081 由 codex-runtime 老客户端占用，其 agent token 与 `backend/datas/agent_token.txt` 不一致，无法直接读其账号列表；故用代码级接缝复现，与具体运行实例解耦。
+- 验证与影响：`tests.test_xhs_account_online_status` 5/5，相邻套件合计 193/193，`py_compile` 通过。不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 中心服小红书恢复开关接线
 - `backend/central_server.py#L161-L172`：新增 `_xhs_route_blocked()`，`xhs_enabled()` 为真时返回 `None`，否则复用 `_xhs_disabled()` 生成脱敏的 `platform_disabled` 结果。原 `_xhs_disabled()` 里的 `_ = XHS_ENABLED_ENV` 只是空引用，不构成任何判断。
 - `backend/central_server.py` 三个闸门改为先取 `_xhs_route_blocked()` 再决定是否 404：`create_task()`（`/api/xhs*` 与 `payload_uses_xhs()`）、`local_browser_create_task()`（`xhs.*` 任务类型）、POST 分发器（路径与 payload 双重判断）。
 - 同文件 `sync_node_accounts_locked()`、账号资产过滤和 `local_browser_upsert_account()` 早已正确调用 `xhs_enabled()`，此次只补齐漏掉的三处路由闸门。

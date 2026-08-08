@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +87,40 @@ class XhsAccountOnlineStatusTest(unittest.TestCase):
         merged = self.client.merge_account_sources([], self.local_xhs_accounts())
 
         self.assertEqual(merged, [], "本机登录态消失后不应再显示小红书账号")
+
+    def test_run_xhs_login_marks_profile_ready_on_success(self):
+        """账号矩阵登录成功后账号卡片必须出现。
+
+        账号矩阵登录走 /api/xhs/login -> run_xhs_login() -> platform_adapters.xhs_login()。
+        旧实现登录成功只组 job、不写 xhs_auth_state.json;而账号列表就绪判定
+        xhs_profile_ready() 无 marker 时只认强 cookie(id_token/customerClientId/
+        galaxy_creator_session_id/access-token-creator)。主站/DOM 判定登录成功但
+        profile 缺这些强 cookie 时,登录成功却显示 0 个授权账号。
+        """
+        # 登录前:没有 marker,profile 也没有强 cookie(模拟主站登录)。
+        (self.data_dir / "xhs_auth_state.json").unlink()
+        self.assertEqual(self.local_xhs_accounts(), [])
+
+        adapters = importlib.import_module("platform_adapters")
+
+        def fake_xhs_login(data_dir="", login_timeout=None):
+            prof = Path(data_dir) / "xhs_profile" / "Default" / "Network"
+            prof.mkdir(parents=True, exist_ok=True)
+            (prof / "Cookies").write_bytes(b"")
+            return {"logged_in": True, "cookieCount": 7, "platform": "xhs"}
+
+        with mock.patch.object(adapters, "xhs_login", side_effect=fake_xhs_login):
+            self.api.run_xhs_login("job-xhs-login-test")
+
+        job = self.api.STATE["cookie_jobs"].get("job-xhs-login-test") or {}
+        self.assertTrue(job.get("loggedIn"), "前置:登录应成功")
+        self.assertTrue(
+            adapters.xhs_profile_ready(str(self.data_dir)),
+            "登录成功后 xhs_profile_ready 必须为真",
+        )
+        rows = self.local_xhs_accounts()
+        self.assertEqual(len(rows), 1, "登录成功后账号卡片应显示 1 个授权账号")
+        self.assertTrue(rows[0]["online"])
 
 
 if __name__ == "__main__":

@@ -5684,6 +5684,19 @@ def run_xhs_login(job_id, fresh=False):
             'fresh': bool(fresh),
             'error': None if logged else 'login_not_detected',
         }
+        if logged:
+            # 账号列表就绪判定 xhs_profile_ready() 无 marker 时只认强 cookie;
+            # 主站/DOM 判定登录成功但 profile 缺强 cookie 时会显示 0 个授权账号。
+            # 与云登录路径(_read_login_state)一致地写入 marker,保证登录态即就绪。
+            try:
+                _save_json(os.path.join(DATA_DIR, 'xhs_auth_state.json'), {
+                    'loggedIn': True,
+                    'cookieCount': res.get('cookieCount', 0),
+                    'profileDir': xhs_profile,
+                    'savedAt': time.time(),
+                })
+            except Exception:
+                pass
     except Exception as e:
         if fresh and bak:
             _profile_restore_aside(xhs_profile, bak)

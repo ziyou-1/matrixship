@@ -1,4 +1,13 @@
-﻿﻿## 2026-08-08 内容采集选小红书搜索报 `搜索失败:platform_disabled`
+﻿﻿## 2026-08-08 小红书登录提示“账号已入矩阵”但卡片显示 0 个授权账号
+- 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、提示“登录成功，账号已入矩阵”，但小红书卡片仍是“0 个授权账号 / 暂无授权账号”。抖音正常。
+- 根因：账号矩阵登录走 `/api/xhs/login` → `run_xhs_login()` → `platform_adapters.xhs_login()`。登录判定接受 DOM 登录态或主站 `web_session`，但登录成功后**没有写 `xhs_auth_state.json`**。账号列表就绪判定 `xhs_profile_ready()` 无 marker 时只认强 cookie（`id_token`/`customerClientId`/`galaxy_creator_session_id`/`access-token-creator`）。主站/DOM 登录成功但 profile 缺这些强 cookie 时，`current_accounts()` 返回 0 个小红书账号。
+- 修复：`run_xhs_login()` 登录成功后写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径一致，让“登录成功”即“就绪”。
+- 排查：先确认客户端连的是哪个执行器/中心服，以及跑的是不是本仓库最新代码。**注意**：如果 9081 被安装版/codex-runtime 老客户端占用（见端口冲突条目），双击 `start-visible-client.bat` 启的新执行器抢不到 9081，你看到的仍是老代码——完全退出所有客户端进程后再重启。修复后重新登录小红书，卡片应显示 1 个授权账号。
+- 边界：账号移除会删除或禁用 `xhs_auth_state.json`；重新登录会重新写入并恢复显示。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_account_online_status -v`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 内容采集选小红书搜索报 `搜索失败:platform_disabled`
 - 现象：账号矩阵里小红书账号已显示“可用”，内容采集页选小红书、填关键词点搜索，状态栏立刻返回 `搜索失败:platform_disabled`。抖音搜索正常。
 - 根因：内容采集搜索走 `submit_local_task()` → 中心服 `/api/local-browser/task`（与账号矩阵登录不同，登录 2026-08-03 起已改为直连本机执行器）。中心服的三个小红书闸门 `create_task()`、`local_browser_create_task()` 和 POST 分发器**无条件**返回 `platform_disabled`，从不读取 `MATRIX_XHS_ENABLED`。本地客户端和本地执行器都正确读了开关，所以账号能登录、能显示在线，唯独任务派发被中心服拦死。
 - 修复：新增 `_xhs_route_blocked()`，开关打开返回 `None` 放行，关闭时维持原 `platform_disabled` 脱敏契约；三个闸门改为调用它。生产默认（不设开关）行为不变。

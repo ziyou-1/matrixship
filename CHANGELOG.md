@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-08 小红书账号矩阵登录成功却显示 0 个授权账号
+### Fixed
+- `run_xhs_login()`（账号矩阵 `/api/xhs/login` 的执行体）登录成功后现在写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径 `_read_login_state()` 对齐。此前该路径只组 job、不写 marker。
+- 影响：账号列表就绪判定 `xhs_profile_ready()` 在无 marker 时只认强 cookie（`id_token` / `customerClientId` / `galaxy_creator_session_id` / `access-token-creator.xiaohongshu.com`）。而 `xhs_login()` 的登录判定还接受 DOM 登录态和主站 `web_session`——两套标准不一致，主站/DOM 登录成功但 profile 缺强 cookie 时，`current_accounts()` 返回 0 个小红书账号，卡片显示“暂无授权账号”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_account_online_status.test_run_xhs_login_marks_profile_ready_on_success`：mock `platform_adapters.xhs_login` 返回登录成功但 profile 无强 cookie，断言修复前 `xhs_profile_ready` 为假、账号数 0，修复后为真、账号数 1。相邻套件合计 193/193 通过；`py_compile` 通过。
+- 运行现场说明：排查时线上 9080/9081 由 codex-runtime 老客户端占用（token 与 `backend/datas/agent_token.txt` 不一致，无法直接内省其账号列表），本 bug 通过 `run_xhs_login` 接缝在代码级复现，不依赖具体运行实例。要看到修复效果必须重启加载本仓库代码的本地执行器。
+- 只改本地执行器登录持久化和新增测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-08 中心服小红书恢复开关未接线导致内容采集搜索固定失败
 ### Fixed
 - 中心服三个小红书路由闸门（`create_task()`、`local_browser_create_task()`、POST 分发器）此前**无条件**返回 `platform_disabled`，从不检查 `MATRIX_XHS_ENABLED`。新增 `_xhs_route_blocked()`，开关打开时返回 `None` 放行，关闭时仍返回原有脱敏的 `platform_disabled` 契约。
