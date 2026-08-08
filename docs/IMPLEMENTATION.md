@@ -1,4 +1,16 @@
-﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+﻿## 2026-08-07 视觉分析失败不再污染同款替换提示词
+- `backend/replacement_analysis.py#L35-L91`：新增 `_visual_status_ok/_visual_status_failed/_visual_status_empty/_visual_status_skipped` 和 `breakdown_visual_failure()`。失败记录只带 `status/errorId/code` 和一句固定中文，异常原文留在结构化日志，避免上游主机名和端点随分析结果进入任务负载；缺少 `visualStatus` 的历史分析按 ok 处理。
+- `backend/replacement_analysis.py#L242-L268`、`backend/replacement_analysis.py#L300-L307`、`backend/matrix_native_client.py#L8146-L8172`、`backend/matrix_native_client.py#L8199-L8206`：视觉模型失败、无可用关键帧和分解整体失败时 `visual` 一律置空，失败信息写进 `visualStatus`，不再拼 `视觉模型分析失败（errorId: ...）: <异常> + frameNotes`。
+- `backend/matrix_native_client.py#L21292-L21318`：新增 `_REPLACEMENT_DIAGNOSTIC_NOISE_RE` 和 `_replacement_strip_diagnostic_noise()`，按行丢弃报错文本、URL、域名、`host=/port=/timeout=`、`/v1/` 类接口路径和 `.jpg/.png/.mp4/.log` 文件名；`_replacement_current_shot_constraints()`（时间轴取材与 `visual` 兜底两处）和 `_replacement_safe_breakdown_evidence()` 都在拼提示词前调用它，历史任务里已被污染的分析结果同样被过滤。
+- `backend/matrix_native_client.py#L12916-L12931`：`_comic_visual_prompt_text()` 增加 `describable_visual_line()` 白名单校验，标注块和普通行两条路径都要求文本含中文描述且不含技术噪声，才允许进入 storyboard `description`。原有 `drop_markers` 黑名单保留，只作为第一层过滤。
+- `backend/matrix_native_client.py#L20894-L20907`、`backend/matrix_native_client.py#L20927`：新增 `_breakdown_visual_status_label()`，分解报告“来源”区输出 `- 视觉分析: ok` 或 `- 视觉分析: 失败（错误编号 err-xxxx）`。
+- `backend/matrix_native_client.py#L16675-L16696`、`backend/matrix_native_client.py#L15344`：`VideoReplacementPage._confirm_visual_analysis_failure()` 在 `start_generation()` 收集完片段编辑后拦截，视觉分析未成功时弹确认框并默认取消。
+- `backend/replacement_pipeline.py#L100-L111`：`build_plan()` 把 `breakdown_visual_failure()` 结果写进 `job["visualAnalysisFailure"]`，失败时输出 `video_replace_visual_analysis_unavailable` 结构化日志（只带 jobId、状态和错误编号）。
+- `tests/test_replacement_service.py#L160-L168`、`#L410-L462`：`_replacement_analysis()` 支持注入 `vision_runner`；新增视觉失败/成功两条契约用例，断言 `visual` 为空、`visualStatus` 完整，且序列化后的分析结果不含上游主机名和端点。
+- `tests/test_video_replacement.py#L2101-L2150`、`tests/test_video_replacement_v2.py#L1212-L1256`、`tests/test_video_breakdown.py#L244-L267`：回归覆盖被污染分析不进视频/关键帧/漫剧三类提示词、漫剧画面描述只保留中文描述行、`build_plan()` 记录视觉失败，以及报告显示视觉分析状态。
+- 验证与影响：上述用例先在旧实现下 RED；修复后引用这三个文件的 38 个测试模块共 974 条用例通过，仅剩两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）。本次只影响本地客户端与本地服务层，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `tools/aicanvas_remote/server_current.py#L14554-L14566` 在首尾帧路径上仍拼“七帧中的每一帧”前缀，属于远端文案问题，本次未改。
+
+## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
 - `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
 - `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。

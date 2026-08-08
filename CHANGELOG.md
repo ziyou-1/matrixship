@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-07 同款替换首尾帧提示词不再混入视觉分析报错
+### Fixed
+- 视觉模型分析失败时不再把异常文本写进 `breakdownAnalysis.visual`。失败改为记录在新的 `visualStatus`（`status/errorId/code/message`）里，`visual` 保持为空，异常原文只留在结构化日志中，避免上游主机名、端点和抽帧文件名随分析结果流入任务负载。
+- 同款替换的镜头约束和拆解证据在进入提示词前统一经过 `_replacement_strip_diagnostic_noise()`，丢弃报错文本、URL、`host=/port=`、接口路径和 `[1.24s] frame_01.jpg` 这类抽帧清单；漫剧模式的画面描述再经白名单校验，只保留含中文描述且不含技术噪声的行。历史任务里已被污染的分析结果同样被过滤。
+- 分解报告“来源”区新增 `- 视觉分析:` 一行，失败时显示错误编号；同款替换点击“开始替换生成”前，若源视频视觉分析未成功会弹窗确认，默认取消。
+- `HybridReplacementPipeline.build_plan()` 在任务上记录 `visualAnalysisFailure`，并写出 `video_replace_visual_analysis_unavailable` 结构化日志。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service.ReplacementServiceContractTests.test_visual_analysis_failure_is_recorded_instead_of_becoming_visual_text`、`tests.test_video_replacement.VideoReplacementHelpersTest.test_failed_visual_analysis_text_never_reaches_replacement_prompts`、`test_comic_visual_prompt_keeps_only_describable_chinese_lines`、`tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_build_plan_records_failed_visual_analysis_on_job` 和 `tests.test_video_breakdown.VideoBreakdownHelpersTest.test_breakdown_markdown_reports_visual_analysis_failure_with_error_id`。
+- 引用 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py` 的 38 个测试模块共 974 条用例，除两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）外全部通过；`py_compile` 通过。
+- 本次只影响本地客户端与本地服务层；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `_expand_comic_storyboard_image_submit_kwargs()` 在首尾帧路径上仍拼接“七帧中的每一帧”前缀，属于远端文案问题，本次未改。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

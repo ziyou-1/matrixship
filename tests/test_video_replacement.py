@@ -2098,6 +2098,56 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             "这段最终口播稿只用于配音，不能写进画面提示词。",
         )
 
+    def test_failed_visual_analysis_text_never_reaches_replacement_prompts(self):
+        poisoned_visual = (
+            "视觉模型分析失败（errorId: err-c049b473454f4dc6）: "
+            "HTTPSConnectionPool(host='central.yunlingai.net', port=443): "
+            "Max retries exceeded with url: /lk888/v1/chat/completions\n"
+            "[1.24s] frame_01.jpg\n[2.47s] frame_02.jpg\n[3.71s] frame_03.jpg"
+        )
+        analysis = {
+            "report": "## 内容总览\n汽车销售口播视频，展厅中景讲解。\n",
+            "visual": poisoned_visual,
+            "frameNotes": "[1.24s] frame_01.jpg\n[2.47s] frame_02.jpg",
+        }
+        segment = {"index": 1, "start": 17.29, "end": 19.76}
+        video_prompt = self.client._build_replacement_prompt(segment, analysis, "", "")
+        prompts = [
+            video_prompt,
+            self.client._build_replacement_keyframe_prompt(segment, analysis, "", ""),
+            self.client._comic_visual_prompt_text({"index": 1, "prompt": video_prompt}),
+        ]
+
+        for prompt in prompts:
+            for leaked in (
+                    "视觉模型分析失败",
+                    "errorId",
+                    "central.yunlingai.net",
+                    "HTTPSConnectionPool",
+                    "Max retries",
+                    "/lk888/v1/chat/completions",
+                    "frame_01.jpg",
+            ):
+                self.assertNotIn(leaked, prompt)
+
+    def test_comic_visual_prompt_keeps_only_describable_chinese_lines(self):
+        segment = {
+            "index": 1,
+            "prompt": "\n".join([
+                "画面：展厅中景，主播站在展车旁讲解",
+                "err-c049b473454f4dc6",
+                "[1.24s] frame_01.jpg",
+                "SSLEOFError(8, '[SSL: ",
+                "https://cdn.example/start.png",
+            ]),
+        }
+
+        visual = self.client._comic_visual_prompt_text(segment)
+
+        self.assertIn("展厅中景", visual)
+        for leaked in ("err-c049b473454f4dc6", "frame_01.jpg", "SSLEOFError", "https://"):
+            self.assertNotIn(leaked, visual)
+
     def test_comic_uploaded_assets_replace_old_entities_in_visual_contract(self):
         segment = {
             "index": 1,

@@ -32,6 +32,57 @@ def _safe_url_parts(value):
     }
 
 
+def _visual_status_ok():
+    return {"status": "ok", "errorId": "", "code": "", "message": ""}
+
+
+def _visual_status_failed(error_id, code):
+    """Failure marker for画面描述.
+
+    The raw exception stays in the structured log only: this record travels
+    with the analysis into job payloads and prompts, so it carries an error id
+    instead of upstream hosts and endpoints.
+    """
+    return {
+        "status": "failed",
+        "errorId": str(error_id or "-"),
+        "code": str(code or "visual_analysis_failed"),
+        "message": "视觉模型分析失败，详情见结构化日志。",
+    }
+
+
+def _visual_status_empty(message):
+    return {
+        "status": "empty",
+        "errorId": "",
+        "code": "visual_analysis_empty",
+        "message": str(message or "")[:160],
+    }
+
+
+def _visual_status_skipped(message):
+    return {
+        "status": "skipped",
+        "errorId": "",
+        "code": "visual_analysis_skipped",
+        "message": str(message or "")[:160],
+    }
+
+
+def breakdown_visual_failure(analysis):
+    """Return the visual-analysis failure record, or {} when画面描述 is usable.
+
+    Older analyses have no ``visualStatus`` at all; those are treated as ok so
+    existing jobs keep working.
+    """
+    status = (analysis or {}).get("visualStatus") if isinstance(analysis, dict) else None
+    if not isinstance(status, dict):
+        return {}
+    if str(status.get("status") or "ok") == "ok":
+        return {}
+    return dict(status)
+
+
 def _analysis_duration(analysis):
     meta = analysis.get("meta") if isinstance(analysis, dict) else {}
     try:
@@ -238,6 +289,7 @@ class ReplacementAnalysis:
                         billing_stage="visual_analysis",
                         billing_detail="workflow assistant key frame visual analysis",
                     )
+                    out["visualStatus"] = _visual_status_ok()
                 except Exception as exc:
                     error_id = self._log_error(
                         "workflow_reference_vision_failed",
@@ -245,13 +297,16 @@ class ReplacementAnalysis:
                         code="workflow_reference_vision_failed",
                         video_path=video_path,
                     )
-                    out["visual"] = "视觉模型分析失败（errorId: %s）: %s\n%s" % (
-                        error_id or "-",
-                        str(exc)[:160],
-                        out.get("frameNotes") or "",
+                    # Diagnostics never become画面描述: the raw exception used to be
+                    # written into `visual`, and every downstream prompt builder
+                    # treated it as源片证据.
+                    out["visual"] = ""
+                    out["visualStatus"] = _visual_status_failed(
+                        error_id, "workflow_reference_vision_failed"
                     )
             else:
-                out["visual"] = "未抽取到可供视觉模型分析的关键帧。"
+                out["visual"] = ""
+                out["visualStatus"] = _visual_status_empty("未抽取到可供视觉模型分析的关键帧。")
 
             notify("生成完整拆解报告…")
             report, message = self.report_builder(out)
@@ -286,6 +341,10 @@ class ReplacementAnalysis:
                 "message": str(exc)[:160],
             }
             out["transcript"] = out.get("transcript") or self._diagnostic_transcript(str(exc))
+            out["visual"] = out.get("visual") or ""
+            out["visualStatus"] = out.get("visualStatus") or _visual_status_failed(
+                error_id, "workflow_reference_analysis_failed"
+            )
             out["report"] = "## 分解失败\nerrorId: %s\n\n%s" % (error_id or "-", str(exc)[:500])
             return {
                 "analysis": out,
@@ -319,6 +378,7 @@ class ReplacementAnalysis:
             },
             "transcript": self._diagnostic_transcript("视频真实性校验未通过。"),
             "visual": "",
+            "visualStatus": _visual_status_skipped("视频真实性校验未通过。"),
             "report": (
                 "## 分解失败\n"
                 "源视频未通过真实性校验，未把不可验证内容交给同款替换。\n\n"
@@ -363,6 +423,7 @@ class ReplacementAnalysis:
             },
             "transcript": self._diagnostic_transcript(message),
             "visual": "",
+            "visualStatus": _visual_status_skipped(message),
             "report": "## Source Rejected\n- code: %s" % validation["code"],
             "error": validation["code"],
             "message": str(message or "")[:160],

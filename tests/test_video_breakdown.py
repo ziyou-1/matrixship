@@ -241,6 +241,30 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         self.assertGreaterEqual(chat.call_args.kwargs["max_tokens"], 4200)
         self.assertEqual(message, "分析完成（已自动修复报告栏目）")
 
+    def test_breakdown_markdown_reports_visual_analysis_failure_with_error_id(self):
+        markdown = self.client._video_breakdown_markdown({
+            "meta": {"duration": 20, "width": 720, "height": 1280},
+            "visual": "",
+            "visualStatus": {
+                "status": "failed",
+                "errorId": "err-c049b473454f4dc6",
+                "code": "video_breakdown_vision_failed",
+                "message": "视觉模型分析失败，详情见结构化日志。",
+            },
+            "report": "## 内容总览\n产品口播视频。",
+        })
+
+        self.assertIn("- 视觉分析: 失败（错误编号 err-c049b473454f4dc6）", markdown)
+
+    def test_breakdown_markdown_reports_visual_analysis_ok_by_default(self):
+        markdown = self.client._video_breakdown_markdown({
+            "meta": {"duration": 20, "width": 720, "height": 1280},
+            "visual": "人物在室内展示产品。",
+            "report": "## 内容总览\n产品口播视频。",
+        })
+
+        self.assertIn("- 视觉分析: ok", markdown)
+
     def test_report_failure_fallback_keeps_all_sections_in_contract_order(self):
         data = {
             "meta": {"duration": 20, "width": 720, "height": 1280},
