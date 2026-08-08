@@ -158,6 +158,18 @@ os.makedirs(MATERIAL_QUARANTINE_DIR, exist_ok=True)
 LOCK = threading.RLock()
 
 
+def _xhs_route_blocked(route="", task_type="", stage="route"):
+    """Return the platform_disabled payload, or None when the recovery switch is on.
+
+    恢复开关 MATRIX_XHS_ENABLED=1 必须在中心服这一侧真的放行:本地客户端和本地
+    执行器各自读同一个环境变量,只有中心服拦死时,内容采集搜索会固定失败在
+    `搜索失败:platform_disabled`。
+    """
+    if xhs_enabled():
+        return None
+    return _xhs_disabled(route=route, task_type=task_type, stage=stage)
+
+
 def _xhs_disabled(route="", task_type="", stage="route"):
     # Recovery switch: MATRIX_XHS_ENABLED=1 restores Xiaohongshu task routing.
     _ = XHS_ENABLED_ENV
@@ -7284,7 +7296,9 @@ def pick_node(task=None):
 def create_task(path, method="POST", body=None, wait_sec=None, preferred_node=None):
     body = body or {}
     if str(path or "").startswith("/api/xhs") or payload_uses_xhs(body):
-        return None, _xhs_disabled(route=path, stage="task_preflight"), 404
+        blocked = _xhs_route_blocked(route=path, stage="task_preflight")
+        if blocked is not None:
+            return None, blocked, 404
     recover_stale_tasks(normalize_org_id((body or {}).get("orgId")), dry_run=False, limit=50)
     tid = uuid.uuid4().hex
     if wait_sec is None:
@@ -14749,11 +14763,13 @@ def local_browser_create_task(handler, body):
     user = current_user(handler) or {}
     task_type = (body.get("type") or "xhs.discover").strip()
     if task_type.lower().startswith("xhs.") or payload_uses_xhs(body):
-        return _xhs_disabled(
+        blocked = _xhs_route_blocked(
             route="/api/local-browser/task",
             task_type=task_type,
             stage="task_preflight",
-        ), 404
+        )
+        if blocked is not None:
+            return blocked, 404
     if task_type not in LOCAL_BROWSER_ALLOWED_TYPES:
         return {"ok": False, "error": "unsupported_local_browser_task", "type": task_type}, 400
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -16283,7 +16299,9 @@ class Handler(BaseHTTPRequestHandler):
 
             body = read_body(self)
             if path.startswith("/api/xhs") or payload_uses_xhs(body):
-                return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
+                blocked = _xhs_route_blocked(route=path, stage="payload")
+                if blocked is not None:
+                    return json_response(self, blocked, 404)
 
             if path == MINIMAX_GENERATE_PATH:
                 return minimax_generate(self, body)

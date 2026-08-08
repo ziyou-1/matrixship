@@ -1,4 +1,13 @@
-﻿﻿## 2026-08-08 小红书登录成功后账号矩阵仍显示“离线”
+﻿﻿## 2026-08-08 内容采集选小红书搜索报 `搜索失败:platform_disabled`
+- 现象：账号矩阵里小红书账号已显示“可用”，内容采集页选小红书、填关键词点搜索，状态栏立刻返回 `搜索失败:platform_disabled`。抖音搜索正常。
+- 根因：内容采集搜索走 `submit_local_task()` → 中心服 `/api/local-browser/task`（与账号矩阵登录不同，登录 2026-08-03 起已改为直连本机执行器）。中心服的三个小红书闸门 `create_task()`、`local_browser_create_task()` 和 POST 分发器**无条件**返回 `platform_disabled`，从不读取 `MATRIX_XHS_ENABLED`。本地客户端和本地执行器都正确读了开关，所以账号能登录、能显示在线，唯独任务派发被中心服拦死。
+- 修复：新增 `_xhs_route_blocked()`，开关打开返回 `None` 放行，关闭时维持原 `platform_disabled` 脱敏契约；三个闸门改为调用它。生产默认（不设开关）行为不变。
+- 排查：先确认客户端连的是哪个中心服——`start-visible-client.bat` 的 `START_LOCAL_CENTRAL=0` 时连的是公网中心服 `https://central.yunlingai.net`，本机不会监听 9080。**本修复只改本仓库代码，连远程中心服时必须等该中心服也部署本修复并带 `MATRIX_XHS_ENABLED=1` 重启后才生效。** 本地测试把 `START_LOCAL_CENTRAL` 设为 `1`，注意该模式没有漫剧主库，只有 `admin / test123456` 能登录，余额和任务也不是生产数据。
+- 边界：`LOCAL_BROWSER_ALLOWED_TYPES` 在 import 期计算，开关必须在中心服启动前设置；启动后再改环境变量不会生效。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_platform_disable -v`，确认既有「关闭时拦截」和新增「打开后放行」两个方向都通过。
+- 回滚：恢复 `backend/central_server.py`、`tests/test_xhs_platform_disable.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及 OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 小红书登录成功后账号矩阵仍显示“离线”
 - 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、账号卡片也出现了，但状态徽标一直是“离线”。同时内容采集、获客寻客和素材发布的账号下拉找不到该账号，或提示“账号已存在，但登录态已失效”。
 - 根因：本地执行器 `/api/accounts` 返回的小红书行没有 `online` / `status` 字段，抖音行有。客户端 `merge_account_sources()` 合并时回落到中心服账号记录；而 2026-08-03 起账号矩阵登录改为直连本机执行器，不再经中心服本地浏览器任务通道，中心服 `local_browser_upsert_account()` 不再被触发，也就没有这条记录，于是 `online=False` → 徽标“离线”。抖音本地行自带 `online`，不受影响。
 - 修复：`backend/api_server.py#L1218-L1235` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支只有 `xhs_profile_ready()` 为真才进入，本机登录态失效时整行不返回，账号矩阵仍会按离线/不显示处理。

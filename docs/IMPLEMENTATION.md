@@ -1,4 +1,12 @@
-﻿﻿## 2026-08-08 小红书账号在线状态补齐
+﻿﻿## 2026-08-08 中心服小红书恢复开关接线
+- `backend/central_server.py#L161-L172`：新增 `_xhs_route_blocked()`，`xhs_enabled()` 为真时返回 `None`，否则复用 `_xhs_disabled()` 生成脱敏的 `platform_disabled` 结果。原 `_xhs_disabled()` 里的 `_ = XHS_ENABLED_ENV` 只是空引用，不构成任何判断。
+- `backend/central_server.py` 三个闸门改为先取 `_xhs_route_blocked()` 再决定是否 404：`create_task()`（`/api/xhs*` 与 `payload_uses_xhs()`）、`local_browser_create_task()`（`xhs.*` 任务类型）、POST 分发器（路径与 payload 双重判断）。
+- 同文件 `sync_node_accounts_locked()`、账号资产过滤和 `local_browser_upsert_account()` 早已正确调用 `xhs_enabled()`，此次只补齐漏掉的三处路由闸门。
+- `LOCAL_BROWSER_ALLOWED_TYPES` 仍由 `filter_xhs_capabilities()` 在 import 期计算，开关需在中心服启动前设置，符合既有「重启三个运行单元」的操作契约。
+- `tests/test_xhs_platform_disable.py`：新增 `test_central_restores_xhs_task_routing_when_flag_is_set`、`test_central_local_browser_channel_accepts_xhs_task_when_flag_is_set` 覆盖「打开后放行」方向；`test_local_browser_xhs_task_type_is_disabled` 由源码字符串 grep 改为真正调用 `local_browser_create_task()` 断言 404。旧测试只覆盖关闭方向，是本 bug 长期未被发现的直接原因。
+- 验证与影响：`tests.test_xhs_platform_disable` 13/13，相邻套件合计 162/162，`py_compile` 通过；未设开关时中心服仍返回 404 `platform_disabled`，已单独验证。不涉及 OpenAPI 路径、JSON Schema、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书账号在线状态补齐
 - `backend/api_server.py#L1218-L1235`：`current_accounts()` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支入口条件是 `xhs_enabled() and xhs_profile_ready(DATA_DIR)`，本机登录态失效时整行不返回，因此置为在线不会误报。
 - 回归来源 `backend/matrix_native_client.py` 的 `submit_account_login_direct()`（2026-08-03 引入）：账号矩阵登录直连本机执行器，不再经中心服本地浏览器任务通道，`backend/central_server.py` 的 `local_browser_upsert_account()` 因此不再被触发。
 - 受影响的消费点：`merge_account_sources()` 合并时 `online` 回落到中心服记录；账号矩阵徽标渲染；`clean_accounts(ready_only=True)` 过滤发布/采集账号下拉；`account_option_label()` 标注“登录态失效”。

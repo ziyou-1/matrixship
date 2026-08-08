@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-08 中心服小红书恢复开关未接线导致内容采集搜索固定失败
+### Fixed
+- 中心服三个小红书路由闸门（`create_task()`、`local_browser_create_task()`、POST 分发器）此前**无条件**返回 `platform_disabled`，从不检查 `MATRIX_XHS_ENABLED`。新增 `_xhs_route_blocked()`，开关打开时返回 `None` 放行，关闭时仍返回原有脱敏的 `platform_disabled` 契约。
+- 影响：文档承诺的「设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服」在中心服这一侧从未生效。本地客户端和本地执行器都放行，只有中心服拦死，内容采集选小红书搜索固定失败在 `搜索失败:platform_disabled`。
+- `_xhs_disabled()` 里原有的 `_ = XHS_ENABLED_ENV` 是个空引用，只是把开关名字提了一下，没有任何判断逻辑。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_platform_disable` 新增的 `test_central_restores_xhs_task_routing_when_flag_is_set` 和 `test_central_local_browser_channel_accepts_xhs_task_when_flag_is_set`；原 `test_local_browser_xhs_task_type_is_disabled` 从「grep 源码字符串」改为真正调用 `local_browser_create_task()` 断言 404。相邻套件共 162/162 通过；`py_compile` 通过。
+- 生产默认行为不变：未设 `MATRIX_XHS_ENABLED` 时中心服仍返回 404 `platform_disabled`，已单独验证。
+- `LOCAL_BROWSER_ALLOWED_TYPES` 仍在 import 期由 `filter_xhs_capabilities()` 计算，所以开关必须在中心服**启动前**设置，与既有「重启三个运行单元」的操作说明一致。
+- 只改中心服路由闸门和测试，不涉及 OpenAPI 路径、JSON Schema、数据库、Docker 镜像结构或 `migration.sql`。连接远程中心服的客户端要等该中心服同时部署本修复并带 `MATRIX_XHS_ENABLED=1` 重启后才会生效；本地测试请把 `start-visible-client.bat` 的 `START_LOCAL_CENTRAL` 设为 `1`。回滚 `backend/central_server.py`、`tests/test_xhs_platform_disable.py` 和本条记录即可。
+
 ## 2026-08-08 小红书登录成功后账号矩阵仍显示离线
 ### Fixed
 - 本地执行器 `/api/accounts` 返回小红书 `xhs-self` 时补写 `online` / `status` / `needLogin`，与抖音账号行对齐。该分支的前置条件已经是 `xhs_profile_ready()`，即本机登录态可用，所以直接置为在线；登录态消失时整行不再返回，账号矩阵仍按离线处理。

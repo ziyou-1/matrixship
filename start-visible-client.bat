@@ -12,7 +12,7 @@ REM       (MySQL) here, so maindb.ping() fails, find_login_user() falls back to
 REM       the local JSON user table, and only admin / test123456 can log in.
 REM   0 = use the public central server. Comic accounts can log in, but balance,
 REM       charges and tasks are then real production data.
-set "START_LOCAL_CENTRAL=0"
+set "START_LOCAL_CENTRAL=1"
 if "%START_LOCAL_CENTRAL%"=="1" (
   set "MATRIX_CENTRAL=http://127.0.0.1:9080"
 ) else (
