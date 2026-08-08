@@ -1,5 +1,188 @@
 ﻿# Changelog
 
+## 2026-08-07 音频上传接通，视频支持多文件
+### Added
+- 新增音频上传按钮 `ref_audio_btn` 与统一的 `pick_media_files(media)` / `clear_media_files(media)`,按模型 schema 的 `*_limit` 显隐。`kling-avatar-image2video`(`sound_file` 必填)、`vidu-mv`(`audio_url` 必填)、`wan2.6-shouzheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao` 从「完全用不了」变成可用。
+- 新增 `_prodgen_media_reference_urls(paths, media, title)`,视频/音频共用一条上传通道;`_prodgen_run_video()` 现在会上传音频并把 `reference_audio_url` 传进 payload —— 此前 `_agent_video_payload()` 早就接受这个参数,但**调用方从来没传过**,音频端到端不通。
+- 视频/音频都支持多文件:`self._media_files = {"video": [], "audio": []}`,条目新增 `referenceVideos` / `referenceAudios`。`referenceVideo` 保留为取首个的属性别名,历史条目与老代码不受影响。
+- 输入框下方新增媒体行,列出已选文件名与配额(`参考视频 2/3：a.mp4、b.mp4　参考音频 1/3：voice.mp3`);必填未传时显示「该模型必须上传参考音频」。右键该行清空全部媒体。
+- 换到不收该类素材的模型时自动清掉已选文件,不会偷偷带着走。
+
+### Fixed
+- `is_array` 判定补上「上限 >1 也必须是数组」。`hailuo-h3-quannengcankao` 的 `video_url` 是**单数名却收 3 个**,3 个 URL 塞不进一个字符串。
+- 上传数量解析补上量词「段」「条」。音频描述写的是「参考音频最多 3 段」「上传0~3段参考音频」,此前一律解析失败退回 1。
+- 描述里没写数量时,视频/音频不再拿上限当默认值。`wan2.7-xuxie` 的 `clips` 描述是「上传首段视频」,此前因为是复数名直接取 `_AGENT_REF_SLOT_CAP=10`,界面上能选 10 个视频。图片路径不变(仍被 legacy 硬顶压回)。
+- `_agent_video_payload()` 的 `reference_video_url` / `reference_audio_url` 同时接受单个字符串与列表,并按各自 `*_limit` 截断。
+
+### Notes
+- **未做真实生成验证**(按约定不跑模型)。本次让这些模型多发视频/音频字段,若上游拒绝,回滚粒度是 `_agent_schema_media_defaults()` 那一行 `requirements.update(...)`。
+- 图片参考图仍被 `MAX_REFS = 4` 封顶:`hailuo-h3-quannengcankao` 的提示语写着「参考图片 ≤9 张」,实际只能传 4 张。这是既有的 UI 上限,本次没动。
+- `wan2.7-cankaosheng` 的 `video_field` 仍以覆盖表的 `video` 为准(schema 说 `reference_video`),两边都没有实跑证据。
+
+### Verification And Operations
+- `tests` 全量 **1599 通过 / 1 失败**,失败的是与本次无关、已知顺序依赖的 `test_douyin_comment_cooldown`(同一份代码上时绿时红)。
+- `tests/test_agent_video_upload_contract.py` 增至 14 条:音频按 schema 字段名进 payload、多视频成数组、单数名但上限 >1 也成数组、「段」量词解析、无数量描述默认 1 个、单字符串仍可读、超限截断、必填缺失阻断提交、音视频按钮显隐、换模型清空。
+- 离屏核对:`hailuo-h3-quannengcankao` 三个上传口齐全 + 媒体行显示 `参考视频 2/3`、`参考音频 1/3`;`vidu-mv` 只出音频口并提示必填。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 声明了视频上传的模型终于能传视频
+### Fixed
+- 新增 `_agent_schema_media_defaults()`,`_agent_video_media_requirements()` 现在按模型自己的 schema 推导视频/音频上传契约(`*_limit` / `*_field` / `*_required` / `*_is_array`),手写的 `_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES` 仍然**优先**(那些是线上验证过的)。
+- 症状:13 个视频模型在 schema 里声明了非图片上传,客户端的手写契约只覆盖 3 个,其余 **10 个连上传按钮都不出现**。现在 `kling-motion-control`、`wan2.2-animate-mix`、`wan2.7-xuxie`、`kling-v3-omni-videoref`、`hailuo-h3-zaishengcheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao` 的视频上传入口都回来了。
+- `_agent_video_payload()`:复数名字段按 LK888 自己的约定传数组。`wan2.7-xuxie` 的 `clips` 现在发 `["https://..."]` 而不是裸字符串。
+
+### Notes
+- **音频上传仍然不可用**,这次没做。5 个模型声明了音频上传(`kling-avatar-image2video` 的 `sound_file` 必填、`vidu-mv` 的 `audio_url` 必填、`wan2.6-shouzheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao`)。契约层已经能算出 `audio_limit`/`audio_field`,`_agent_video_payload()` 也早就接受 `reference_audio_url`,但**界面上没有音频上传控件**,且 `_prodgen_run_video()` 从不把音频 URL 传下去。要做需要:新增上传按钮 + 条目字段 + 上传通道 + 生成卡展示。
+- `wan2.7-cankaosheng` 的 `video_field`:schema 说 `reference_video`,覆盖表说 `video`,按规则覆盖表赢。这一条**两边都没有实跑证据**,先保持现状不动。
+- 多文件视频上传暂未支持:界面只有一个 `self._reference_video` 单值,所以 `wan2.7-xuxie`(schema 上限 10)、`hailuo-h3-quannengcankao`(3)实际只能传 1 个。
+- 本次改动会让这些模型**多发一个视频字段**,未做真实生成验证(按约定不跑模型)。回滚:删掉 `_agent_schema_media_defaults()` 那一行 `requirements.update(...)`。
+
+### Verification And Operations
+- `tests` 全量 **1589 通过**。
+- 新增 `tests/test_agent_video_upload_contract.py`(7 条):遍历全部 67 个模型断言「声明了 video/audio 上传就必须有非零上限」、字段名取自 schema、覆盖表优先、无视频上传的模型保持 0、复数名传数组、单数名传字符串、以及离屏断言上传按钮的显隐。
+- 排查时注意:目录没同步时 `_sync_model_ui()` 会把不在列表里的模型**静默换回第一个**并 early return。用离屏脚本核对前必须先灌好 `_video_models`,否则测的是另一个模型。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 grok-video-3 恢复首帧图上传
+### Fixed
+- `_AGENT_VIDEO_REFERENCE_LIMITS["grok-video-3"]` 由 `0` 改为 `1`,界面上重新出现参考图槽位。此前写 `0` 导致这个模型在客户端里**根本不给传图**,而它的 schema 明确写着 `images` 可选、1 张作首帧、「不传则为文生视频」,lk888 自己的表单也是可以传的。
+- `_agent_video_payload()` 把 `grok-video-3` 并入 `grok-imagine-video-1.5-preview` 那条分支:有图时只发 schema 声明的 `params.images`(1 张),不发顶层那一堆别名。`size` / `duration` / `pop(aspect_ratio, resolution)` 的处理完全不动 —— 那部分是线上验证过的(`docs/TROUBLESHOOTING.md` 2026-08-03)。
+- 不传图时行为不变,仍是文生视频,不会塞一个空 `images`。
+
+### Notes
+- 这个 `0` 没有任何排查记录支撑。仓库里唯一的 grok-video-3 事故记录讲的是 5 秒时长没有可用渠道分组,与参考图无关。测试里那条 `assertNotIn("images", ...)` 和上限表的 `0` 是同一个猜测的两半,一起改掉了。
+- 顺带确认 `grok-imagine-video-1.5-preview`(展示名 **grok-video-3.5**)本来就能传图且 `required=True`。菜单里两个名字很像,选错容易误判成「传不了」。
+- **未做**:schema 说 `grok-video-3` 的 duration 有 `6` 和 `10` 两档,客户端目前只暴露 `10`。那是 2026-08-03 因「5 秒找不到可用渠道分组」收窄的,`6` 秒从未验证过,没有证据就不动。
+- 本次是**请求内容的变更**(多发一个 `params.images`),但未做真实生成验证 —— 按之前的约定不跑模型。若上游拒绝,回滚只需把上限改回 `0`。
+
+### Verification And Operations
+- `tests` 全量 **1582 通过**,唯一失败是与本次无关的 `test_douyin_comment_cooldown`(顺序依赖,上一轮全量跑为绿)。
+- `tests/test_agent_video_duration.py`:`test_agent_grok_video3_payload_matches_lk888` 改为断言首帧图进入 `params.images` 且不发顶层别名;新增 `test_agent_grok_video3_without_a_reference_stays_text_to_video`。
+- 离屏核对:`grok-video-3` 上传槽位由 0 变 1,`grok-imagine-video-1.5-preview` 与 `kling-v2-6` 不受影响。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 已生成但没下载下来的成品可以恢复，不再白扣
+### Fixed
+- 事故:Agent.模式视频生成成功(成品 4.55MB 确实在 `cos.lingkeai.vip` 上,实测 HTTP 200 可下载),下载时 TLS 被掐断抛 `SSLEOFError`,整条被标记为「失败」,用户界面上还直接显示了 `HTTPSConnectionPool(host='cos.lingkeai.vip'...` 这样的原始报错。
+- **钱是白扣的**:扣费发生在 lk888 返回结果那一刻(中心服反代按实际用量结算,`central_server.py` `settle_lk888_actual_charge`),比下载早;而 `product_video` 在 `_SERVER_CHARGED_CAPS` 里,`_start` 那行 `refund_cap` 对这类能力**一行网络请求都不发、直接返回成功**。远程任务是成功的,中心服的失败退款分支也永远不会命中。此前 Agent.模式只继承了漫剧的「不退款」,没继承它的「可恢复」。
+- `_prodgen_remember_result()` + `lk888_media_task(..., on_result=)`:在**下载之前**就把结果 URL 与 task_id 落进条目的 `pendingDownloadRecovery`。同时存 task_id 是因为签名 URL 会过期,过期后只能拿 task_id 重新换一条新鲜链接。
+- `_start` 区分「下载失败」与「生成失败」:前者状态为 `下载失败`、文案是「已生成成功，本地下载失败，可点『恢复下载』重试（不再扣费）」,并累计 `downloadAttempts`。
+- 新增 `ProductGenPage.recover_download()` 与生成卡上的「恢复下载」按钮:**只重新拉文件,不碰 `_prodgen_generate` / `try_charge` / `_start`**。走那条路等于再开一个 LK888 任务、再花一次钱。
+- `_wf_download()` 加固:2 次退避重试(仅限 `SSLError`/`ConnectionError`/`Timeout`/`ChunkedEncodingError` 与 408/429/5xx)、`stream=True` + `.part` + `os.replace`、`trust_env=False`、可选 `cancel_check`。**403 一次就死** —— 那是签名过期,手里只有死 URL,重试一百次还是 403,而且会掩盖真实原因。
+- `_prodgen_download_error_text()`:不再把 host、路径和 SSL 栈甩给用户;链接过期时引导「重新生成」而不是让用户对着死链反复点「恢复下载」。
+
+### Notes
+- **`_PRODGEN_RUNTIME_KEYS` 必须包含 `pendingDownloadRecovery`**,已加。`regen` 是黑名单复制,漏掉它「再次生成」出来的新卡片会带着上一条的结果 URL,用户点「恢复下载」拿到的是上一次的视频 —— 静默的错误结果,比报错难查得多。已有专门测试守住。
+- 图片模式一次出 2 张时,`targets` 记的是「已下好的 + 本次这张」,避免第 2 张失败时把第 1 张一并丢掉。
+- `_wf_download` 有 12 个调用方(数字人 ×2、同款替换 ×6、Agent ×2、资产库 ×1)。核实过没有任何一个依赖它快速失败、没有一个在轮询循环里调它、没有一个按它的异常文本做语义分支;漫剧走的是另一条 `download_media`,不受影响。下载本身不计费,重试不会重复扣费 —— 反而今天的快速失败逼用户点「再次生成」,那才是真的再扣一次。
+- 未改中心服、未重新打包、未上传。
+
+### Verification And Operations
+- `tests` 全量 **1581 通过 / 0 失败**。
+- 新增 `tests/test_agent_download_recovery.py`(12 条):403 绝不重试、瞬时故障必重试、本地磁盘错误不算网络重试、断一次后重试成功仍能拿到文件、失败后不留半截文件、结果 URL 与 task_id 在下载前落盘、`on_result` 在 `return url` 之前调用、恢复下载不调用任何计费/生成函数、用户看不到原始 SSL 栈、链接过期给的是「重新生成」。
+- 需重启本地客户端生效。回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_download_recovery.py`、`tests/test_agent_mode_defaults.py`、`docs/` 和本条目。
+
+## 2026-08-07 生成结果不能是本次上传的参考图
+### Fixed
+- `_extract_lk888_media_url()` 新增 `exclude` 参数,`lk888_media_task()` 新增 `exclude_urls`,`_prodgen_run_image` / `_prodgen_run_video` 把本次上传的参考图/参考视频 URL 传下去。命中输入 URL 时跳过继续找,找不到就让轮询继续、最终按超时报错。
+- 症状:Agent.模式改图(`人物变成短发`,Nano Banana 2,带待修改图),页面上两张「生成结果」与上传的原图 **sha1 完全相同**(`23cc0878ab075ba0`,3452447 字节)。模型不可能生成出与输入逐字节相同的 PNG,所以下载到的就是输入本身。
+- 机制:`_extract_lk888_media_url` 遍历任务状态,**遇到第一个 `.png` 结尾的 URL 就当成结果返回**,它不知道哪些 URL 是本次传进去的。而 `_agent_image_payload` 把参考图 URL 塞进 7 个字段(顶层 `image_urls`/`images`/`reference_images`/`referenceImages` + `params` 里三个),只要任务状态回显请求参数,回显的参考图就排在成品前面被选中。`images`/`image_urls`/`reference_images` 都不在优先键名表里,走的正是「遍历所有键、第一个 `.png` 就返回」那条路。
+- 这个失败形态比报错更糟:**不报错、照常扣费、用户拿回自己的图**。本次两笔各扣 0.1584(task 97267053 / 97267189)。
+- 顺带修掉生成卡上写死的「图片质量: 自适应」—— 那是个字面量,不管实际发的是什么都这么显示(本次实际发的是 `imageSize=1K`,而 Nano Banana 2 根本没有 `quality` 参数)。现在按 `paramsMeta` 显示本次真正发出去的参数。同时删掉没有任何点击行为的「设置分组」死 chip。
+
+### Notes
+- **未能抓到原始响应**:直连 `api.lk888.ai` 返回 503、走代理不稳、中心服反代需要客户端会话 token。所以「任务状态回显请求参数」是**依据代码推断**,不是实测确认。但这个修法在两种成因下都成立 —— 无论是响应回显导致挑错,还是模型真的把输入原样返回,排除输入 URL 都是对的。
+- 修完之后如果这类情况再发生,行为从「静默返回原图」变成「生成超时报错」。报错至少看得见;要拿回那笔钱仍需按实际计费规则处理。
+
+### Verification And Operations
+- `tests` 全量 **1569 通过**(上一轮 1568,本轮新增 1)。唯一间歇失败的 `test_douyin_comment_cooldown` 与本次无关,是已记录的测试间状态污染(同一份代码上时绿时红)。
+- 新增 `tests/test_agent_result_not_input_echo.py`(9 条):回显的参考图不被当成结果、签名变化后仍能匹配、只有输入时宁可返回空也不返回用户自己的图、参考视频同样排除、没有 exclude 时行为不变、优先键名场景不被破坏。
+- 修复过程中撞到 `tests/test_lk888_media_task_parsing.py` 的隔离方式:它把 `_extract_lk888_media_url` 的 AST 单独抽出来 exec,所以该函数**必须自包含**,不能引用模块级 helper。归一化逻辑因此内嵌成闭包。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_result_not_input_echo.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式「更多参数」抽屉
+### Added
+- 胶囊行新增「更多参数 N 项 ▾」,打开 `AgentMoreParamsDialog`:按当前模型 schema 逐个渲染它自己的参数(比例/时长以外的全部)。选项型给下拉、文本型给输入框、必填标 `*必填`,**每个字段的说明文字放在控件下方页面内可见** —— 客户端全局禁用 `setToolTip`,而且像「错峰模式:开启后价格减半,任务将在 1-5 小时内完成」这种正是用户填表的依据,藏进悬停框等于没搬过来。
+- 抽屉里改过的参数**真的会发给模型**:`_agent_apply_entry_params()` 在 `_prodgen_run_image` / `_prodgen_run_video` 组装完 payload 后把它们合并进 `params`。上一版这些参数只是一行只读文字,现在是能点且生效的控件。
+- 参数被改过时「更多参数」胶囊变金色并显示改动条数,输入框下方列出「已改动的模型参数：图片质量=高清」。
+
+### Notes
+- **没改过就等于没有**:只有与该模型默认值不同的项才会进条目的 `params`,进而进请求。抽屉一次没开过时,请求与上一版逐字节相同。这是本次能在不逐模型开闸的前提下让控件「真生效」的原因 —— 爆炸半径就是用户自己点的那几个键。
+- 每个值发出前都要过该模型 schema 的校验:字段必须存在、值必须在它的 `options` 里,否则丢弃并记日志,绝不把模型没声明过的键值发上去。
+- 语义重复的字段既不做胶囊、也不进抽屉:`happyhorse-r2v` 的 `aspect_ratio` 与 `ratio` 同为比例,两个一起发会 400(见 `docs/TROUBLESHOOTING.md`),现在标 `duplicate_role` 后被彻底挡住,不可能从抽屉里溜进请求。
+- 本次仍**未跑任何真实生成**。`_AGENT_SCHEMA_MODELS` 还是空集,payload 主体仍由既有的两个 builder 组装。
+
+### Verification And Operations
+- `tests` 全量 **1560 通过 / 1 失败**,唯一失败仍是与本次无关的 `test_douyin_comment_cooldown`(已单独记录,在未改动代码上同样失败)。
+- `tests/test_agent_page_offscreen.py` 增至 15 条,新增四条守住抽屉的核心契约:抽屉不与胶囊重复;重复语义字段进不了抽屉;**没碰过抽屉时请求逐字节不变**;抽屉里点的值确实出现在请求里;模型没声明过的键值被丢弃。
+- 离屏渲染核对:`mj_imagine` 抽屉 5 项(模型风格/质量/风格化/混乱度/风格)、`gpt-image-2` 1 项(图片质量)、`viduq3-turbo-cankaosheng` 3 项(分辨率/水印/错峰模式)。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_page_offscreen.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式输入框按模型 schema 渲染(UI 接线)
+### Changed
+- 提示语改用模型自己的 `input_hint`。`gpt-image-2` 现在显示它自己的「温馨提示：本模型性价比高，选择 2K/4K 出图时分辨率、比例偶尔无法精准命中…」,`happyhorse-video-edit` 显示「本模型按 [输入视频时长 + 输出视频时长] 合计扣费」。拿不到 schema 才回落 `BASE_HINT`。
+- 比例/时长胶囊由「固定档位」改成**按角色绑定当前模型的字段**:模型没有这个参数,整条胶囊消失。实测 `wan2.7-shouweizhen` 没有比例胶囊、`happyhorse-video-edit` 两条都没有;选项数也随模型变(`gpt-image-2` 的 size 有 34 项、`gemini-3-pro-image-preview` 的 aspectRatio 有 10 项、`kling-v2-6` 的 duration 有 2 项)。
+- 可选参数的菜单顶部多一项「默认(不指定)」。选它就整个不发这个参数,等于 lk888 上没碰过这个控件。
+- 参考图槽的数量上限、槽位标签、以及是否有视频/音频上传口,改由模型声明的 upload 参数决定(`wan2.7-shouweizhen` 显示「首帧/尾帧」上限 2,`happyhorse-video-edit` 出现视频上传口)。
+- 换模型时同语义的选择会沿用(在 `kling-v2-6` 选了 9:16,切到 `vidu-jieshuoman` 还是 9:16);目标模型不支持该值就回到它自己的默认值。
+- 修 `_agent_aspect_from_size` 的像素档位表,改为模块级 `_AGENT_SIZE_TO_ASPECT` 并由它推出反向表 `_AGENT_ASPECT_TO_SIZE`。图片模式的请求只由 `size` 决定,两个方向同源之后不会再出现「界面显示 16:9、上游收到 3:2」。
+
+### Notes
+- **请求的形状一点没变**:仍然是 `_agent_image_payload` / `_agent_video_payload` 组装,条目字段仍是 `size`/`aspect_ratio`/`duration`。变的只是「可选的值来自模型自己」。`_AGENT_SCHEMA_MODELS` 仍是空集,schema 装配器没有接到任何模型上。
+- 已知副作用:图片模式选 16:9 之前实际发的是 `1536x1024`(= 3:2),现在发 `1920x1088`(= 真 16:9)。这是修 bug,但它会改变每一张图的实际尺寸,单独列在这里以便回滚定位。
+- 接不进请求的参数**不画成能点的假控件**,而是在输入框下方列成一行只读说明(「该模型另有参数：图片质量 —— 尚未接入请求，暂用模型默认值。」)。渲染出来的控件一定是会被发出去的。
+- 本次**未跑任何真实生成**,没有花算力。逐模型开闸仍待安排。
+
+### Verification And Operations
+- `tests` 全量 **1556 通过 / 1 失败**。唯一失败 `tests/test_douyin_comment_cooldown.py::test_platform_risk_response_writes_pause_even_when_safe_mode_disabled` 与本次改动无关:它在 `git stash` 后的未改动代码上同样失败,且本次会话早先三轮全量(1520/1533/1545)都通过,属测试间共享 agent 数据目录导致的顺序/状态依赖,已单独记录待修。
+- 新增 `tests/test_agent_page_offscreen.py`(11 条),断言的是**渲染结果**而不是源码字符串:胶囊可见性、选项数随模型不同、提示语来自 input_hint、上传槽媒体类型与上限、跨模型迁移、以及「界面显示的比例 == 会发出去的比例」。测试会把页面真正 show 出来 —— 不显示的话 `isVisible()` 恒为 False,「胶囊消失了」的断言会假绿。
+- 离屏渲染核对 7 个模型的输入框,参数区确实各不相同。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_page_offscreen.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式参数按模型 schema 动态化(引擎部分)
+### Added
+- `backend/lk888_schema_snapshot.py`(新增,28KB,由 `tools/gen_lk888_schema_snapshot.py` 生成):67 个模型的表单 schema 随包快照。首次冷启动、断网、LK888 不可用时参数区仍按各模型真实字段渲染,不会退回「所有模型一个样」。
+- 单模型 schema 取用层:`_lk888_model_schema()`(后台线程,发网络)与 `_lk888_model_schema_cached()`(UI 线程,只读)。降级链 内存 → 网络 → 内存(过期 stale) → 磁盘 → 随包快照 → 空,任何一级失败都不抛异常。失败走 120 秒负缓存,不会被一次 502 冻住;成功缓存 24 小时并落盘。
+- 表单模型 `_agent_schema_form()`:schema → FORM/FIELD 规范化结构(name/kind/role/required/options/default/placement/limit/is_array…)。实测 67 个模型全部产出有效表单,零异常、零未知控件。
+- 请求装配 `_agent_dynamic_payload()` + `_agent_payload_gate()` + `_agent_validate_form()`,三条规则:必填一定发;可选且用户没设过整个不发;值恒取自该字段 options 且恒为字符串。
+- `_AGENT_MODEL_OVERRIDES`:schema 表达不了或与线上验证冲突的少数条目,每条必须写 `why`。目前只有 2 条(`veo3.1` 两个开关线上是 true、`wan2.7-shouweizhen` 首尾帧顺序)。
+
+### Fixed
+- `regen()` 复制条目由 12 字段白名单改成只剔除运行态字段的黑名单。旧实现让视频「再次生成」每次都丢掉 `duration` 和 `referenceVideo` —— 这是本次之前就存在的 bug,与 schema 改造无关。
+
+### Notes
+- 本次是**引擎**,尚未接到 UI 和真实请求上:`_AGENT_SCHEMA_MODELS` 是空集,所有模型仍走既有的 `_agent_image_payload`/`_agent_video_payload`,线上行为逐字节未变。逐模型开闸需要先拿 schema 与今天发的值逐条比对、并真跑一次生成确认(尤其带参考图的模型要肉眼确认参考图生效 —— 参考图被静默忽略不报错)。
+- 已知 schema 与生产记录冲突一例:`grok-video-3` 的 schema 说 `size` 唯一合法值 `720P`、`aspect_ratio` 必填,而 `docs/TROUBLESHOOTING.md` 2026-08-01 那条踩过 400 之后的记录说要发 `horizontal_hd/vertical_hd` 并省略 `aspect_ratio`。**在 A/B 实跑给出结论之前这个模型不开闸。**
+- `kling-v2-6` 的 `sound` 现在从 options 取字符串 `on`/`off`,不再可能发出 Python `False` —— 那条已记录的 400 从类型上就不可能再发生。
+
+### Verification And Operations
+- `py_compile` 通过;`tests` 全量 **1545/1545** 通过(基线 1520 + 新增 25)。
+- 新增 `tests/test_agent_schema_fetch.py`(9)、`tests/test_agent_payload_contract.py`(12)、`tests/test_agent_regen_keeps_params.py`(4)。契约测试对**全部 67 个模型**跑不变式:顶层只有 prompt/params、params 键必属该模型 schema、无 Python 布尔、无 None、值必在 options 内、上传只落一个规范键。
+- 实测 `https://api.lk888.ai/v1/skills/models/{name}` 与 `/api/v1/...` 同源同结果,中心服 `lk888_proxy` 已透传 `/lk888/*`,**未改 `backend/central_server.py`**。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及 OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`backend/lk888_schema_snapshot.py`、`tools/gen_lk888_schema_snapshot.py`、`tests/fixtures/lk888_model_schemas.json`、三个新测试文件、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式输入框改成 lk888 版式
+### Changed
+- 参考图槽由 112×56 横条改成 84×84 方形缩略图，并从「独占一整行」挪到提示词左侧与之并排（`body` 行：左 `ref_strip`、右 `prompt_col`），对齐 lk888 模型输入框的排布。参考图用法说明不再作为一个胶囊塞进参考图行，改为按当前模式追加到提示语后面（`_ref_hint_text()` / `_apply_ref_hint()`）。
+- 综合最优 / 条数 / 比例 / 时长 / 模型五个胶囊由「点一下切到下一项」改成点击展开下拉菜单（`_menu_choice()` + `_pick_style/_pick_count/_pick_aspect/_pick_video_duration/_pick_model`），文案尾部统一补 `▾`，菜单弹在胶囊正下方。8 种风格此前只能盲目轮换，现在可直接选。
+- 胶囊按参数着色（风格紫、条数金、比例青、时长蓝、模型天蓝，`_prod_menu_pill_style()`），发送键改成 lk888 的青绿圆形按钮。
+- 输入框右上角新增工具条：清空输入（✕）、清空参考图（🗑）、计费徽章、计费说明（ⓘ）。原先挤在底部胶囊行右侧的「清空输入」垃圾桶按钮移到这里。
+- 输入框随内容在 78~138px 之间自适应长高（`_autosize_input()`），不再一上来就撑满，composer 整体从 ~311px 收到 ~264px。
+- 新增 `bolt` / `info` / `close` / `chevron` 四个手绘矢量图标。
+
+### Notes
+- 计费徽章显示的是**云豆余额**，不是 lk888 截图里的「0.08~0.24/次」价格区间。Agent.模式的 `product_image` / `product_video` 属于 `_SERVER_CHARGED_CAPS`，由中心服按 LK888 实际用量后付费，客户端在提交前拿不到确定单价；写一个预估价会误导用户。点徽章或 ⓘ 弹出计费说明，逐笔明细仍在『账户中心』。
+
+### Verification And Operations
+- `py_compile` 通过；`tests` 全量 1520/1520 通过。
+- offscreen + 真字体两次渲染核对版式：composer 1232×268，参考图槽 84×109，槽下「点击替换 / 右键删除」单行不折行，发送键 46×46，五个下拉胶囊 `▾` 正常显示。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚：`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`tests/test_agent_video_duration.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
 ## 2026-08-07 同款替换只走客户端 + 本地启动脚本可选中心服
 ### Changed
 - 原生「同款替换」和「图文同款」两页都移除「打开网页版替换」按钮和它上方的一整行 `web_row`，同时删除 `VideoReplacementPage.open_replacement_web()` 和模块级 `open_replacement_web_page()`。两种同款替换都只在客户端内完成，客户端不再有任何跳转网页的入口。

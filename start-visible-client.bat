@@ -106,5 +106,13 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%LOCAL_API_PORT% .*LI
     taskkill /F /PID %%P >nul 2>nul
   )
 )
+REM Killing by port is not enough. The engine is a thread inside the client
+REM process, so only the client that WON port 9081 dies above. A client that
+REM lost the race keeps running with its embedded local-browser worker still
+REM polling central, forwarding tasks to whoever owns 9081 -- the same task then
+REM executes twice and browsers pop up repeatedly. Clear every stale client.
+REM The name filter is required: without it the powershell.exe running this line
+REM matches its own command line and kills itself. $PID exclusion is a backstop.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*matrix_native_client.py*' } | ForEach-Object { Write-Host ('Stopping stale client PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 1 /nobreak >nul
 exit /b 0

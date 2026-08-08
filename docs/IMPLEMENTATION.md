@@ -1,4 +1,67 @@
-﻿## 2026-08-05 网页替换按 job 模式选管线（漫剧/hybrid）+ 网页启动器
+﻿## 2026-08-07 下载失败的成品可恢复
+- `backend/matrix_native_client.py`(`_PRODGEN_RUNTIME_KEYS`):新增 `pendingDownloadRecovery`。`regen` 是黑名单复制,不加会把上一条的结果 URL 带进新条目。
+- `backend/matrix_native_client.py`(`_prodgen_entry_by_id` / `_prodgen_download_recovery` / `_prodgen_download_error_text`):按 id 取条目、判定是否可恢复(必须有 `resultUrl`)、把网络错误翻成不含 host 与 SSL 栈的中文文案(403 引导「重新生成」而非「恢复下载」)。
+- `backend/matrix_native_client.py`(`_prodgen_remember_result`):下载前写入 `pendingDownloadRecovery = {status, createdAt, taskId, resultUrl, model, mode, targets, downloadAttempts, lastError}`。字段名与漫剧的 `pendingComicVideoRecovery` 同构,便于日后合并。
+- `backend/matrix_native_client.py`(`lk888_media_task`):新增 `on_result(url, task_id)`,在 `return url` **之前**回调,回调异常只记日志不外抛(落盘失败不能反过来把已生成的结果弄丢)。`_prodgen_run_image` 传 `files + [p]`,保住部分成功的那几张。
+- `backend/matrix_native_client.py`(`_wf_download` / `_wf_download_should_retry` / `_WF_DOWNLOAD_RETRY_STATUS`):退避重试仅限连接层瞬时故障与 408/429/5xx。`HTTPError` 是 `RequestException` 的子类,所以必须先按异常类分流再看状态码,否则会把 403 也重试掉,正好踩爆 `raise_for_status` 那条注释守的不变量。流式下载 + `.part` + `os.replace`,避免半截文件骗过调用方「已存在就跳过」的判断。`trust_env=False` 绕开系统代理。
+- `backend/matrix_native_client.py`(`ProductGenPage._start`):异常分支先查 `pendingDownloadRecovery`,命中则写 `status="下载失败"` 并累计 `downloadAttempts`,否则维持原「失败」路径。
+- `backend/matrix_native_client.py`(`ProductGenPage.recover_download` + `GenCard` 的 `下载失败` 分支与「恢复下载」按钮):只调 `_wf_download`,不调 `_prodgen_generate` / `try_charge` / `_start` / `lk888_media_task`。成功后清空 `pendingDownloadRecovery`。
+- `tests/test_agent_download_recovery.py`:12 条。`test_recovering_a_download_never_starts_a_new_paid_generation` 用 AST 取实际被调用的函数名(不看注释),避免文档措辞误伤。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式「更多参数」抽屉
+- `backend/matrix_native_client.py`(`_agent_schema_field`):新增 `duplicate_role` 字段。同一模型内同角色的第二个字段除了不当胶囊,还会被置 `hidden=True`,因此 `_agent_form_drawer_fields` 也拿不到它。`happyhorse-r2v` 的 `aspect_ratio` 由此彻底进不了请求 —— 它和 `ratio` 同时出现会 400。
+- `backend/matrix_native_client.py`(`_agent_form_visible_fields` / `_agent_form_drawer_fields`):前者收敛为「会渲染且一定会被发出去的字段」,后者是它里面 role 不属于 aspect/duration 的部分,即抽屉内容。
+- `backend/matrix_native_client.py`(`_agent_entry_extra_params` / `_agent_apply_entry_params`):把条目里用户显式改过的参数合并进已组装好的 payload。合并前逐个过该模型 schema:字段不存在、是上传/未知类型、值不在 `options` 里,一律丢弃并 `log`。`_prodgen_run_image` 与 `_prodgen_run_video` 在 `lk888_media_task` 之前各调一次。
+- `backend/matrix_native_client.py`(`class AgentMoreParamsDialog`):抽屉对话框。choice/toggle → `QComboBox`(可选项在最前面插「默认(不指定)」)、textarea → `QPlainTextEdit`、input/number → `QLineEdit`;必填标 `*必填`;单选项字段渲染但禁用。`description` 一律落成控件下方的灰色可见文案 —— `tests/test_native_tooltips.py` 用 AST 扫全文件禁止任何非空 `setToolTip`。`values()` 只返回与默认值不同的项。
+- `backend/matrix_native_client.py`(`ProductGenPage._changed_extra_params` / `_open_more_params`、`b_more` 胶囊):抽屉是这批参数的唯一来源,确认时先清掉旧值再写入,避免残留。改动条数反映在胶囊文案与配色上,并在 `param_note` 列出「已改动的模型参数：…」。
+- `backend/matrix_native_client.py`(`_send_confirmed`):条目新增 `params`(只含改过的项)与 `paramsMeta`(给生成卡显示的快照)。`regen` 已是黑名单复制,这两个字段会自动跟着重跑。
+- 设计取舍:让抽屉「真生效」而不必逐模型开闸,靠的是**只发用户显式改过的键**。没开过抽屉 → `params` 为空 → 请求与上一版逐字节相同;开过 → 增量就是用户自己点的那几个键,且值必来自模型自己的 options。这样既不留假控件,也没有把 67 个模型的装配权一次性交给 schema。
+- `tests/test_agent_page_offscreen.py`:新增 `test_the_drawer_holds_every_parameter_that_is_not_already_a_pill`、`test_a_duplicate_role_field_is_hidden_from_the_drawer_too`、`test_untouched_drawer_leaves_the_request_byte_for_byte_unchanged`、`test_a_value_picked_in_the_drawer_actually_reaches_the_request`、`test_a_value_the_model_never_declared_is_dropped_instead_of_sent`。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式输入框按模型 schema 渲染(UI 接线)
+- `backend/matrix_native_client.py#L2796-L2820`:`_agent_aspect_from_size` 里的局部 mapping 提为模块级 `_AGENT_SIZE_TO_ASPECT`,并由它推出反向表 `_AGENT_ASPECT_TO_SIZE`(每个比例取 1K 档)与新函数 `_agent_size_from_aspect()`。图片模式的请求只由 `size` 决定(`_prodgen_run_image` 只把 size 传下去),两个方向必须同源,否则界面说 16:9、上游收到 3:2。
+- `backend/matrix_native_client.py#L27352-L27470`:`ProductGenPage` 新增 `_current_form/_request_model_schema/_model_values/_field_value/_set_field_value/_field_label_for/_pick_field/_bind_role_pill/_sync_param_bar`。`_bind_role_pill` 把 `b_aspect`/`b_duration` 绑到当前模型的 aspect/duration 角色字段上,字段不存在就 `setVisible(False)`。`_pick_field` 对可选字段在菜单顶部插一项「默认(不指定)」,选中即 `AGENT_PARAM_UNSET`。
+- `backend/matrix_native_client.py#L27556-L27600`:`_pick_aspect`/`_pick_video_duration` 改为读表单字段弹菜单;`_select_aspect`/`_select_duration` 保留下标入口(没有 schema 时 `ASPECTS`/`duration_slots` 仍是兜底档位),但会把对应的 schema 取值一并写进 `_param_values`。`_current_video_duration` 优先读表单值。
+- `backend/matrix_native_client.py#L27380-L27400`:`_set_current_model` 换模型时清掉该 (model, mode) 的表单缓存并起后台取 schema;`_sync_model_ui` 末尾改调 `_sync_param_bar`;`_sync_duration_ui` 降为它的薄封装(名字保留,`tests/test_agent_video_duration.py` 以它为锚点)。
+- `backend/matrix_native_client.py#L27700-L27712`:新增 `_current_input_hint()`,提示语优先用模型自己的 `input_hint`(多行压成一行),`_apply_ref_hint` 以它为基准而不是 `BASE_HINT`。
+- `backend/matrix_native_client.py#L27810-L27832`:新增 `_aspect_entry_fields()` 适配器,把比例胶囊的取值折回条目既有的 `(aspectLabel, size, aspect_ratio)` 三个字段。字段名本身就是 `size`(gpt-image-2)或值形如 `1920x1088` 时原样透传,否则用 `_agent_size_from_aspect` 换算。**请求的形状一点没变**,`_send_confirmed` 里 `self.ASPECTS[self.aspect_i]` 换成这个方法的返回值。
+- `backend/matrix_native_client.py#L26560-L26566`、`#L26760-L26770`:`__init__` 新增 `_forms/_param_values/_role_values/_schema_pending` 四个状态与只读的 `param_note` 标签;`_on` 新增 `prodgen_model_schema` 分支;`on_show` 预取当前模型的 schema。
+- 假控件的处理口径:`_agent_form_visible_fields` 对未开闸模型只返回 role ∈ {aspect,duration} 的字段,其余参数由 `param_note` 列成一行只读文字(「该模型另有参数：… —— 尚未接入请求」)。**渲染出来的控件一定是会被发出去的**,不画点了不影响请求的控件。description 一律落成页面内可见文案 —— `tests/test_native_tooltips.py` 用 AST 扫全文件禁止任何非空 `setToolTip`。
+- `tests/test_agent_page_offscreen.py`(新增 11 条):断言渲染结果而非源码字符串。关键一点是 `setUpClass` 里必须把页面真正 `show()` 出来 —— 未显示的控件 `isVisible()` 恒为 False,「胶囊消失了」这类断言会假绿(第一版就踩了这个,`test_the_page_is_actually_visible_so_visibility_assertions_mean_something` 专门守住)。
+- 离屏实测(不发网络,全部走随包快照):`gpt-image-2` 比例 34 项无时长胶囊 / `gemini-3-pro-image-preview` 比例 10 项 / `mj_imagine` 另有 5 个未接入参数 / `kling-v2-6` 比例 3 项时长 2 项 / `wan2.7-shouweizhen` 无比例胶囊、上传槽「首帧 尾帧」上限 2 / `happyhorse-video-edit` 两条胶囊全无、多出视频上传口 / `vidu-jieshuoman` 比例 6 项时长 3 项。
+- 运行说明、已知副作用(16:9 由 `1536x1024` 改为 `1920x1088`)与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式参数按模型 schema 动态化(引擎部分)
+- `backend/matrix_native_client.py#L2556-L2572`:新增单模型 schema 的缓存常量。与 `_LK888_MODEL_CACHE` 分开的原因是后者是裸 dict、且失败按成功 TTL 缓存 300 秒;schema 这边成功 24 小时、失败 120 秒负缓存,并且复合读改写全程持 `_LK888_SCHEMA_LOCK`(UI 线程读、后台线程写)。
+- `backend/matrix_native_client.py#L3243-L3290`:`_lk888_schema_disk_path/_load/_save` 磁盘缓存(`data_dir()/lk888_model_schemas.json`,`_atomic_write_json`,按 ts 淘汰到 200 条)。坏文件、版本不符一律当空,不让一份损坏缓存拖垮参数区。
+- `backend/matrix_native_client.py#L3292-L3345`:`_lk888_schema_snapshot()` 读随包快照;`_lk888_schema_normalize()` 把上游返回收敛成固定形状(params 恒 list、option 恒 `{value:str,label:str}`),对 `params` 非 list、option 缺 value、裸字符串 option 等敌意输入全部容错。
+- `backend/matrix_native_client.py#L3347-L3410`:`_lk888_model_schema_cached()`(只读,UI 线程用)与 `_lk888_model_schema()`(发网络,只在后台线程调)。后者失败时**保留上一次成功的结果**再落降级链,否则一次 502 会把 stale 兜底一起抹掉。
+- `backend/matrix_native_client.py#L3050-L3120`:`AGENT_PARAM_UNSET`、`_AGENT_SCHEMA_MODELS`(逐模型开闸集合,当前空集)、`AGENT_DYNAMIC_PARAMS` 总开关、角色字段名表、`_AGENT_UPLOAD_PLURAL`(直接抄 LK888 写在 77/78 条上传描述样板里的契约,不靠猜)、`_AGENT_MODEL_OVERRIDES` 与其闭合键集 `_AGENT_OVERRIDE_KEYS`。
+- `backend/matrix_native_client.py#L3122-L3260`:`_agent_param_kind/_agent_param_role/_agent_clean_description/_agent_desc_count_limit/_agent_upload_media/_agent_upload_is_array/_agent_upload_limit/_agent_param_default`。其中 `_agent_param_role` 对同一模型内同角色只认第一个字段 —— `happyhorse-r2v` 的 params 顺序是 `resolution, duration, ratio, aspect_ratio`,绑到 `ratio` 后 `aspect_ratio` 既不渲染也不发送,机械避开 `docs/TROUBLESHOOTING.md` 记录的那条互斥 400。
+- `backend/matrix_native_client.py#L3196-L3232`:`_agent_param_default` 的八级阶梯。关键取舍是规则 4:**可选 choice/toggle 一律返回 `AGENT_PARAM_UNSET`,不预填也不发送**。schema 里 356 个参数一个 `default` 都没有,若照抄 `options[0]` 会造成静默改档(实测 pixverse 全系 `options[0]` 是 `360P` 而今天发 `720p`,kwvideo 是 `480p`,`kling-v3.resolution` 是 `2k` 而今天发 `1k`)。
+- `backend/matrix_native_client.py#L3262-L3400`:`_agent_schema_field/_agent_schema_form/_agent_legacy_form/_agent_schema_form_for_ui/_agent_form_field/_agent_form_role_field/_agent_form_visible_fields`。`_agent_schema_form` 整体 try/except 退回 `_agent_legacy_form`,参数区绝不空白。`_agent_form_visible_fields` 对未开闸模型只返回 role ∈ {aspect,duration} 的字段 —— **渲染出来的一定是会被发出去的**,不画点了不影响请求的假控件。
+- `backend/matrix_native_client.py#L3402-L3520`:`_agent_serialize_value`(值恒取自 options 且恒为字符串,消灭 `sound=false` 与 `watermark=False` 两类)、`_agent_dynamic_payload`(R1 必填必发 / R2 可选未设不发 / R4 值域收敛)、`_agent_payload_gate`(params 键必属该模型 schema,被丢的只记键名不记值)、`_agent_validate_form`(扣费前拦截,choice/toggle 说「请选择」、自由文本说「请填写」)、`_agent_params_meta`。
+- `backend/matrix_native_client.py#L19800-L19806`、`#L27470-L27480`:`_PRODGEN_RUNTIME_KEYS` + `regen()` 白名单改黑名单。旧实现只抄 12 个字段,视频重跑丢 `duration`/`referenceVideo`;参数动态化后每个模型字段各不相同,白名单更不可能列全。
+- `tools/gen_lk888_schema_snapshot.py`(新增):抓全量 schema → 生成 `backend/lk888_schema_snapshot.py`(gzip+base64 单常量,PyInstaller 靠 import 自动收集,不用改打包配方)与 `tests/fixtures/lk888_model_schemas.json`。少于 20 个模型时拒绝覆盖快照。
+- 契约测试口径:`tests/test_agent_payload_contract.py` 对全部 67 个模型跑通用不变式,而不是逐模型钉死 payload —— 装配是通用的,守护也必须是通用的。踩过坑的模型(`kling-v2-6` sound、`happyhorse-r2v` 互斥、`veo3.1` 双开关、`vidu-jieshuoman` 主文本字段叫 `script_content`)另有具名用例。
+- 一个真实发现:`vidu-mv.duration`(number)与 `vidu-jieshuoman.script_name`(input)都是 required 但没有 options,客户端不能凭空编默认值,只能由 `_agent_validate_form` 在提交前拦住让用户填。这是契约测试跑出来的,不是设计时想到的。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。`_AGENT_SCHEMA_MODELS` 为空集时线上行为逐字节未变。
+
+## 2026-08-07 Agent.模式输入框改成 lk888 版式
+- `backend/matrix_native_client.py#L4816`：`_draw_icon()` 新增 `bolt`（计费徽章闪电）、`info`（圆圈 i）、`close`（清空叉）、`chevron` 四种手绘图标。
+- `backend/matrix_native_client.py#L25971`、`#L25989`、`#L25997`、`#L26002`：新增 `_PROD_MENU_PILL_TPL` / `_prod_menu_pill_style(accent)`（按参数着色的下拉胶囊）、`_PROD_COST_CHIP`、`_PROD_SEND_BTN`（青绿圆形发送键）、`_menu_pill_label()`（文案尾部补 `▾`）、`_prod_menu(parent)`（统一深色菜单，`_pick_model` 也改用它）。
+- `backend/matrix_native_client.py#L25984`：`REF_SLOT_W/H` 由 112×56 改为 84×84，`REF_SLOT_RADIUS` 13→14。84 是让槽下「点击替换 / 右键删除」在 8.5px 字号下单行放得下的宽度。
+- `backend/matrix_native_client.py#L26575`：composer 重排为「工具条 → body（左参考图 / 右提示语+输入）→ 分隔线 → 胶囊行 → 模型元信息」。工具条含清空输入、清空参考图、计费徽章、计费说明；底部胶囊行去掉原来的清空输入垃圾桶。
+- `backend/matrix_native_client.py#L26806`、`#L26819`、`#L26827`：`_sync_cost_chip()` 读 `_SHARED["balance"]` 渲染云豆余额，`_refresh_cost_chip()` 在 `on_show` 起后台 `fetch_balance()` 并经 `BRIDGE` 的 `prodgen_balance` 回主线程刷新，`_show_billing_note()` 弹计费说明。徽章不显示单价：`product_image`/`product_video` 在 `_SERVER_CHARGED_CAPS` 里，由中心服按 LK888 实际用量后付费，提交前无确定单价。
+- `backend/matrix_native_client.py#L26859`：`_autosize_input()` 按文档高度把输入框钉在 78~138px，接 `textChanged`。此前 `QPlainTextEdit` 直接撑到 `maximumHeight`，composer 白占一截高度。
+- `backend/matrix_native_client.py#L26865`：`_menu_choice(button, options, current_index, on_pick)` 在胶囊正下方弹选项菜单；`_cycle_aspect/_cycle_count/_cycle_style/_cycle_video_duration` 全部替换为 `_pick_*` + `_select_*`。新增类常量 `COUNTS = (1, 2)`，发送时的 `count` 改读 `self.COUNTS[self.count_i]`。
+- `backend/matrix_native_client.py#L26524`、`#L27026`、`#L27038`：`BASE_HINT` 只留通用提示语；参考图用法由 `_ref_hint_text()` 按模式产出、`_apply_ref_hint()` 追加到 `self.hint`（`__init__` 里先建槽后建提示语，故做空值保护），不再作为一个 QLabel 塞进 `ref_strip`。
+- `tests/test_agent_mode_defaults.py`、`tests/test_agent_video_duration.py`：源码契约断言跟随更新（`body.addLayout(ref_strip)` / `prompt_col.addWidget(self.inp)` / `REF_SLOT_W = 84` / `def _pick_video_duration`），`_mode_set` 块的切分锚点由 `def _cycle_aspect(self):` 改为 `def _menu_choice(`。
+- 验证：`py_compile` 通过，`tests` 全量 1520/1520 通过；offscreen 与真字体各渲染一次 composer 核对版式（1232×268，参考图槽 84×109，胶囊 `▾` 正常）。需重启本地客户端生效，未打包、未上线。
+
+## 2026-08-05 网页替换按 job 模式选管线（漫剧/hybrid）+ 网页启动器
 - `backend/matrix_native_client.py#L11690`、`#L11727`：新增 `_ReplacementServicePipeline` / `_replacement_service_pipeline()`，为 `/replacement` 网页与 Qt 共享服务按 job 的 `replacementMode` 路由 hybrid 或 comic_project 管线（镜像 `_replacement_pipeline_for_job`）；缺模式的网页 job 在 `build_plan` 时补产品默认 `VIDEO_REPLACE_DEFAULT_MODE`（默认 `comic_project`）并持久化到 job.json，使后续 execute/retry/concat 路由一致；已有模式的 Qt 共享 job 不被覆盖。修复此前网页服务 `_build_pipeline` 写死 hybrid、忽略默认漫剧模式的 gap。
 - `backend/replacement_web.py` 的 `_build_pipeline()`：`build_video_service` 改用 `_replacement_service_pipeline()` 路由管线，取代只用 `_replacement_hybrid_pipeline()`。
 - `tests/test_video_replacement_v2.py`：新增 4 个路由测试（缺模式默认 comic、legacy 默认 hybrid、显式模式优先并路由 execute、`build_video_service` 使用路由管线）；并修复 `test_keyframe_references_migrate_existing_central_library_urls_in_memory` —— 该迁移仅对回环中心库 URL 适用，测试显式钉 `CENTRAL=http://127.0.0.1:9080`，不再依赖出厂默认（现为公网 `120.26.194.174`，见 d349f9c）。

@@ -1,0 +1,7850 @@
+{
+ "doubao-seedance-1-5-pro-251215": {
+  "display_name": "即梦 3.5 Pro",
+  "input_hint": "描述视频内容、动作和场景，可上传首帧或首尾帧图片控制视频生成。支持4-12秒有声视频。",
+  "name": "doubao-seedance-1-5-pro-251215",
+  "params": [
+   {
+    "description": "参考图片 URL 数组：传 1 张作为首帧参考；传 2 张时第 1 张为首帧、第 2 张为尾帧。请把图片放在 params.images，不要使用 inputs/parameters 格式。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成视频的秒数（4-12秒）",
+    "label": "视频时长",
+    "name": "audio_duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "480p",
+      "value": "480p"
+     },
+     {
+      "label": "720p",
+      "value": "720p"
+     },
+     {
+      "label": "1080p",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "视频比例",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "竖屏 3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "传统 4:3",
+      "value": "4:3"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频是否包含声音，无声视频价格更优惠",
+    "label": "声音模式",
+    "name": "generate_audio",
+    "options": [
+     {
+      "label": "有声",
+      "value": "true"
+     },
+     {
+      "label": "无声",
+      "value": "false"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "首帧参考图",
+   "首尾帧",
+   "有声视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "doubao-seedream-4-5-251128": {
+  "display_name": "即梦 4.5",
+  "input_hint": "描述你想要生成的图片，支持上传多张参考图实现多图融合效果，300字以内效果最佳",
+  "name": "doubao-seedream-4-5-251128",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "描述",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片，支持多图融合（可选）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的分辨率",
+    "label": "分辨率",
+    "name": "size",
+    "options": [
+     {
+      "label": "2K",
+      "value": "2K"
+     },
+     {
+      "label": "4K",
+      "value": "4K"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "生成图片的宽高比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横屏",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖屏",
+      "value": "3:4"
+     },
+     {
+      "label": "16:9 宽屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 手机竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "3:2 横屏",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖屏",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "doubao-seedream-5-0-260128": {
+  "display_name": "即梦 5.0",
+  "input_hint": "描述你想要生成的图片，支持上传多张参考图实现多图融合效果，300字以内效果最佳",
+  "name": "doubao-seedream-5-0-260128",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "描述",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片，支持多图融合（可选）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的分辨率",
+    "label": "分辨率",
+    "name": "size",
+    "options": [
+     {
+      "label": "2K",
+      "value": "2K"
+     },
+     {
+      "label": "3K",
+      "value": "3K"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "生成图片的宽高比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横屏",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖屏",
+      "value": "3:4"
+     },
+     {
+      "label": "16:9 宽屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 手机竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "3:2 横屏",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖屏",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "开启联网搜索，可获取实时信息生成图片",
+    "label": "联网搜索",
+    "name": "web_search",
+    "options": [
+     {
+      "label": "联网搜索",
+      "value": "true"
+     },
+     {
+      "label": "关闭搜索",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "多图融合",
+   "联网搜索生图",
+   "3k",
+   "即梦"
+  ],
+  "type": "image"
+ },
+ "doubao-seedream-5-0-pro-260628": {
+  "display_name": "即梦 5.0 Pro",
+  "input_hint": "描述你想要生成的图片，支持上传多张参考图实现多图融合，300字以内效果最佳",
+  "name": "doubao-seedream-5-0-pro-260628",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "描述",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片，支持多图融合（可选）；首张免费，第2张起按张计费。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的分辨率，1K/2K 两档价格不同",
+    "label": "分辨率",
+    "name": "size",
+    "options": [
+     {
+      "label": "2K",
+      "value": "2K"
+     },
+     {
+      "label": "1K",
+      "value": "1K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成图片的宽高比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横屏",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖屏",
+      "value": "3:4"
+     },
+     {
+      "label": "16:9 宽屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 手机竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "3:2 横屏",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖屏",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "多图融合",
+   "2K高清",
+   "即梦"
+  ],
+  "type": "image"
+ },
+ "gemini-3-pro-image-preview": {
+  "display_name": "Nano Banana Pro",
+  "input_hint": "描述你想要生成的图片内容，支持上传参考图片进行图生图，最多14张",
+  "name": "gemini-3-pro-image-preview",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-14张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspectRatio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "4:5 竖版",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4 横版",
+      "value": "5:4"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "imageSize",
+    "options": [
+     {
+      "label": "1K 标清",
+      "value": "1K"
+     },
+     {
+      "label": "2K 高清",
+      "value": "2K"
+     },
+     {
+      "label": "4K 超清",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "4k",
+   "高清",
+   "香蕉"
+  ],
+  "type": "image"
+ },
+ "gemini-3-pro-image-preview-guan": {
+  "display_name": "Banana pro官转",
+  "input_hint": "描述你想要生成的图片内容；可纯文字生成，也可上传参考图进行图生图（最多 11 张）。支持中英文提示词、可视化标记精修，官方直连通道出图更快更稳。",
+  "name": "gemini-3-pro-image-preview-guan",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-11张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspectRatio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "4:5 竖版",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4 横版",
+      "value": "5:4"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "imageSize",
+    "options": [
+     {
+      "label": "1K 标清",
+      "value": "1K"
+     },
+     {
+      "label": "2K 高清",
+      "value": "2K"
+     },
+     {
+      "label": "4K 超清",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "4k",
+   "高清",
+   "香蕉",
+   "官转直连"
+  ],
+  "type": "image"
+ },
+ "gemini-3.1-flash-image-preview": {
+  "display_name": "Nano Banana 2",
+  "input_hint": "描述你想要生成的图片内容，支持上传参考图片进行图生图，最多14张",
+  "name": "gemini-3.1-flash-image-preview",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-14张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspectRatio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "4:5 竖版",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4 横版",
+      "value": "5:4"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     },
+     {
+      "label": "1:4 超竖版",
+      "value": "1:4"
+     },
+     {
+      "label": "4:1 超横版",
+      "value": "4:1"
+     },
+     {
+      "label": "1:8 极竖版",
+      "value": "1:8"
+     },
+     {
+      "label": "8:1 极横版",
+      "value": "8:1"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "imageSize",
+    "options": [
+     {
+      "label": "0.5K 极速",
+      "value": "0.5K"
+     },
+     {
+      "label": "1K 标清",
+      "value": "1K"
+     },
+     {
+      "label": "2K 高清",
+      "value": "2K"
+     },
+     {
+      "label": "4K 超清",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "开启联网搜索，可获取实时信息和图片搜索生成图片",
+    "label": "联网搜索",
+    "name": "web_search",
+    "options": [
+     {
+      "label": "联网搜索",
+      "value": "true"
+     },
+     {
+      "label": "关闭搜索",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "控制模型思考深度",
+    "label": "思考等级",
+    "name": "thinkingLevel",
+    "options": [
+     {
+      "label": "快速",
+      "value": "minimal"
+     },
+     {
+      "label": "深度",
+      "value": "high"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "4k",
+   "高清",
+   "香蕉"
+  ],
+  "type": "image"
+ },
+ "gemini-3.1-flash-image-preview-guan": {
+  "display_name": "Banana2 官转",
+  "input_hint": "描述你想要生成的图片内容；可纯文字生成，也可上传参考图进行图生图（最多 11 张）。支持联网搜索生图、图片搜索接地与思考等级控制，官方直连通道高效出图。",
+  "name": "gemini-3.1-flash-image-preview-guan",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-11张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspectRatio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "4:5 竖版",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4 横版",
+      "value": "5:4"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     },
+     {
+      "label": "1:4 超竖版",
+      "value": "1:4"
+     },
+     {
+      "label": "4:1 超横版",
+      "value": "4:1"
+     },
+     {
+      "label": "1:8 极竖版",
+      "value": "1:8"
+     },
+     {
+      "label": "8:1 极横版",
+      "value": "8:1"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "imageSize",
+    "options": [
+     {
+      "label": "1K 标清",
+      "value": "1K"
+     },
+     {
+      "label": "2K 高清",
+      "value": "2K"
+     },
+     {
+      "label": "4K 超清",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "开启联网搜索，可获取实时信息和图片搜索生成图片",
+    "label": "联网搜索",
+    "name": "web_search",
+    "options": [
+     {
+      "label": "联网搜索",
+      "value": "true"
+     },
+     {
+      "label": "关闭搜索",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "控制模型思考深度",
+    "label": "思考等级",
+    "name": "thinkingLevel",
+    "options": [
+     {
+      "label": "快速",
+      "value": "minimal"
+     },
+     {
+      "label": "深度",
+      "value": "high"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "4k",
+   "高清",
+   "香蕉",
+   "官转直连",
+   "联网搜索"
+  ],
+  "type": "image"
+ },
+ "gpt-image-2": {
+  "display_name": "GPT Image 2",
+  "input_hint": "描述画面中的物体、风格及文字排版，注重指令精准与细节还原。\n温馨提示：本模型性价比高，选择 2K/4K 出图时分辨率、比例偶尔无法精准命中，属该模型已知特性；如需稳定精准的高清出图，建议选择「GPT Image 2 官转」（价格更高，分辨率更有保障）。",
+  "name": "gpt-image-2",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-14张图片作为参考。支持公网直链URL或 data:<mime>;base64,<数据> 内联传入",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的尺寸。推荐 auto，由模型自动决定。除下方列出的常用尺寸外，也可自传符合官方规则的任意尺寸：宽高均为16的倍数、宽高比1:3～3:1之间、总像素655360～8294400，例如 1024x1360、1792x1024。⚠️ 重要：size 实际只稳定决定【宽高比档位】，不保证输出像素与所选值一致——部分价格优先渠道会降采样，例如选 1920x1088(16:9) 常返回 1280x720、选 1024x1536(2:3) 常返回 832x1248，比例正确但分辨率更低。请勿按 size 预判真实像素，应以下载到的图片实际宽高为准。追求稳定精准的高清效果，请选择「GPT Image 2 官转」。另注：渠道分组按名称后缀标注能力档位，分组名带 -1K 的仅支持1K档（总像素≤约260万），提交2K/4K尺寸时会自动剔除这类分组；自定义渠道策略下若白名单只含 -1K 分组会返回403。",
+    "label": "图片比例",
+    "name": "size",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "auto"
+     },
+     {
+      "label": "正方形 (1:1)",
+      "value": "1024x1024"
+     },
+     {
+      "label": "竖版 (2:3)",
+      "value": "1024x1536"
+     },
+     {
+      "label": "横版 (3:2)",
+      "value": "1536x1024"
+     },
+     {
+      "label": "竖版 (3:4)",
+      "value": "960x1280"
+     },
+     {
+      "label": "横版 (4:3)",
+      "value": "1280x960"
+     },
+     {
+      "label": "竖版 (9:16)",
+      "value": "1088x1920"
+     },
+     {
+      "label": "横版 (16:9)",
+      "value": "1920x1088"
+     },
+     {
+      "label": "竖版 (4:5)",
+      "value": "1024x1280"
+     },
+     {
+      "label": "横版 (5:4)",
+      "value": "1280x1024"
+     },
+     {
+      "label": "竖版 (1:2)",
+      "value": "960x1920"
+     },
+     {
+      "label": "横版 (2:1)",
+      "value": "1920x960"
+     },
+     {
+      "label": "2K 正方形 (1:1)",
+      "value": "2048x2048"
+     },
+     {
+      "label": "2K 竖版 (2:3)",
+      "value": "2048x3072"
+     },
+     {
+      "label": "2K 横版 (3:2)",
+      "value": "3072x2048"
+     },
+     {
+      "label": "2K 竖版 (3:4)",
+      "value": "1920x2560"
+     },
+     {
+      "label": "2K 横版 (4:3)",
+      "value": "2560x1920"
+     },
+     {
+      "label": "2K 竖版 (9:16)",
+      "value": "1440x2560"
+     },
+     {
+      "label": "2K 横版 (16:9)",
+      "value": "2560x1440"
+     },
+     {
+      "label": "2K 竖版 (4:5)",
+      "value": "2048x2560"
+     },
+     {
+      "label": "2K 横版 (5:4)",
+      "value": "2560x2048"
+     },
+     {
+      "label": "2K 竖版 (1:2)",
+      "value": "1280x2560"
+     },
+     {
+      "label": "2K 横版 (2:1)",
+      "value": "2560x1280"
+     },
+     {
+      "label": "4K 正方形 (1:1)",
+      "value": "2880x2880"
+     },
+     {
+      "label": "4K 竖版 (2:3)",
+      "value": "2304x3456"
+     },
+     {
+      "label": "4K 横版 (3:2)",
+      "value": "3456x2304"
+     },
+     {
+      "label": "4K 竖版 (3:4)",
+      "value": "2400x3200"
+     },
+     {
+      "label": "4K 横版 (4:3)",
+      "value": "3200x2400"
+     },
+     {
+      "label": "4K 竖版 (9:16)",
+      "value": "2160x3840"
+     },
+     {
+      "label": "4K 横版 (16:9)",
+      "value": "3840x2160"
+     },
+     {
+      "label": "4K 竖版 (4:5)",
+      "value": "2560x3200"
+     },
+     {
+      "label": "4K 横版 (5:4)",
+      "value": "3200x2560"
+     },
+     {
+      "label": "4K 竖版 (1:2)",
+      "value": "1920x3840"
+     },
+     {
+      "label": "4K 横版 (2:1)",
+      "value": "3840x1920"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成图片的质量。推荐 auto，由模型自动决定。",
+    "label": "图片质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "auto"
+     },
+     {
+      "label": "高",
+      "value": "high"
+     },
+     {
+      "label": "中",
+      "value": "medium"
+     },
+     {
+      "label": "低",
+      "value": "low"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "gpt-image-2-guan": {
+  "display_name": "GPT Image 2 官转",
+  "input_hint": "商业级描述结构：《主体 + 材质 + 场景 + 光影 + 镜头 + 风格》；可上传 1~10 张参考图进行图生图与多图融合。",
+  "name": "gpt-image-2-guan",
+  "params": [
+   {
+    "description": "所需图像的文字描述，最多 1000 字符。",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片进行图生图或编辑，最多14张。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的尺寸。推荐 auto，由模型自动决定。除下方列出的常用尺寸外，也可自传符合官方规则的任意尺寸：宽高均为16的倍数、宽高比1:3～3:1之间、总像素655360～8294400，例如 1024x1360、1792x1024。",
+    "label": "图片比例",
+    "name": "size",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "auto"
+     },
+     {
+      "label": "正方形 (1:1)",
+      "value": "1024x1024"
+     },
+     {
+      "label": "竖版 (2:3)",
+      "value": "1024x1536"
+     },
+     {
+      "label": "横版 (3:2)",
+      "value": "1536x1024"
+     },
+     {
+      "label": "竖版 (3:4)",
+      "value": "960x1280"
+     },
+     {
+      "label": "横版 (4:3)",
+      "value": "1280x960"
+     },
+     {
+      "label": "竖版 (9:16)",
+      "value": "1088x1920"
+     },
+     {
+      "label": "横版 (16:9)",
+      "value": "1920x1088"
+     },
+     {
+      "label": "竖版 (4:5)",
+      "value": "1024x1280"
+     },
+     {
+      "label": "横版 (5:4)",
+      "value": "1280x1024"
+     },
+     {
+      "label": "竖版 (1:2)",
+      "value": "960x1920"
+     },
+     {
+      "label": "横版 (2:1)",
+      "value": "1920x960"
+     },
+     {
+      "label": "2K 正方形 (1:1)",
+      "value": "2048x2048"
+     },
+     {
+      "label": "2K 竖版 (2:3)",
+      "value": "2048x3072"
+     },
+     {
+      "label": "2K 横版 (3:2)",
+      "value": "3072x2048"
+     },
+     {
+      "label": "2K 竖版 (3:4)",
+      "value": "1920x2560"
+     },
+     {
+      "label": "2K 横版 (4:3)",
+      "value": "2560x1920"
+     },
+     {
+      "label": "2K 竖版 (9:16)",
+      "value": "1440x2560"
+     },
+     {
+      "label": "2K 横版 (16:9)",
+      "value": "2560x1440"
+     },
+     {
+      "label": "2K 竖版 (4:5)",
+      "value": "2048x2560"
+     },
+     {
+      "label": "2K 横版 (5:4)",
+      "value": "2560x2048"
+     },
+     {
+      "label": "2K 竖版 (1:2)",
+      "value": "1280x2560"
+     },
+     {
+      "label": "2K 横版 (2:1)",
+      "value": "2560x1280"
+     },
+     {
+      "label": "4K 正方形 (1:1)",
+      "value": "2880x2880"
+     },
+     {
+      "label": "4K 竖版 (2:3)",
+      "value": "2304x3456"
+     },
+     {
+      "label": "4K 横版 (3:2)",
+      "value": "3456x2304"
+     },
+     {
+      "label": "4K 竖版 (3:4)",
+      "value": "2400x3200"
+     },
+     {
+      "label": "4K 横版 (4:3)",
+      "value": "3200x2400"
+     },
+     {
+      "label": "4K 竖版 (9:16)",
+      "value": "2160x3840"
+     },
+     {
+      "label": "4K 横版 (16:9)",
+      "value": "3840x2160"
+     },
+     {
+      "label": "4K 竖版 (4:5)",
+      "value": "2560x3200"
+     },
+     {
+      "label": "4K 横版 (5:4)",
+      "value": "3200x2560"
+     },
+     {
+      "label": "4K 竖版 (1:2)",
+      "value": "1920x3840"
+     },
+     {
+      "label": "4K 横版 (2:1)",
+      "value": "3840x1920"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "生成图片的质量。推荐 auto，由模型自动决定。",
+    "label": "图片质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "auto"
+     },
+     {
+      "label": "高",
+      "value": "high"
+     },
+     {
+      "label": "中",
+      "value": "medium"
+     },
+     {
+      "label": "低",
+      "value": "low"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "grok-imagine-video-1.5-preview": {
+  "display_name": "grok-video-3.5",
+  "input_hint": "上传一张首帧参考图，描述你想要的画面动作与运镜（本模型仅支持图生视频，必须上传一张首帧参考图）",
+  "name": "grok-imagine-video-1.5-preview",
+  "params": [
+   {
+    "description": "描述你想要生成的视频画面与动作",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1张图片作为视频首帧（本模型仅支持图生视频，必须上传）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首帧参考图",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "选择视频的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "横屏 3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "竖屏 2:3",
+      "value": "2:3"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频画质",
+    "label": "画质",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "高清 720p",
+      "value": "720p"
+     },
+     {
+      "label": "标清 480p",
+      "value": "480p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频时长（1~15秒，按秒计费）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "1秒",
+      "value": "1"
+     },
+     {
+      "label": "2秒",
+      "value": "2"
+     },
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首帧参考图",
+   "自带音频",
+   "1~15秒",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "grok-video-3": {
+  "display_name": "grok-video-3",
+  "input_hint": "描述视频动作、场景及氛围，上传首帧参考图效果更佳（上传后视频比例将跟图片一致）",
+  "name": "grok-video-3",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1张图片作为视频首帧（可选，不传则为文生视频）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首帧参考图",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择视频的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "横屏 3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "方形 1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频画质",
+    "label": "画质",
+    "name": "size",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "首帧参考图",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-2.3": {
+  "display_name": "海螺 2.3",
+  "input_hint": "描述视频内容、场景和动作，海螺在动作表现和物理效果上尤其出色，建议详细描述主体、动作、环境和镜头运动。",
+  "name": "hailuo-2.3",
+  "params": [
+   {
+    "description": "选择标准版或极速版，标准版画质更优，极速版生成更快价格更低",
+    "label": "模型版本",
+    "name": "model_version",
+    "options": [
+     {
+      "label": "标准版",
+      "value": "2.3"
+     },
+     {
+      "label": "极速版",
+      "value": "2.3-fast"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长，支持6秒和10秒",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频输出分辨率，1080P画质更清晰",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "768P",
+      "value": "768P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "是否自动优化提示词，开启后会自动优化传入的提示词以提升生成质量",
+    "label": "提示词优化",
+    "name": "enhance_prompt",
+    "options": [
+     {
+      "label": "开启优化",
+      "value": "Enabled"
+     },
+     {
+      "label": "不优化",
+      "value": "Disabled"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "可选，上传参考图片作为视频首帧或尾帧。不上传则为文生视频模式。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首帧参考图",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "描述视频内容的文字提示",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-h3": {
+  "display_name": "海螺 H3 文生视频",
+  "input_hint": "描述视频画面、主体动作与镜头运动，海螺 H3 支持 2K 直出与自动音效；请选择画面比例（文生视频必选）。",
+  "name": "hailuo-h3",
+  "params": [
+   {
+    "description": "生成视频时长（秒），4~15 的整数；按秒计费，时长越长费用越高。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的画面比例，文生视频必选具体比例（不支持自适应）。",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "输出分辨率：768P 性价比高出片快；2K 超高清单价更高。建议先出 768P 试稿，满意后在成片上一键升级 2K，仅补差价。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "768P",
+      "value": "768P"
+     },
+     {
+      "label": "2K",
+      "value": "2K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "有声视频",
+   "2K",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-h3-cankaosheng": {
+  "display_name": "海螺 H3 参考生",
+  "input_hint": "上传 1~9 张参考图 + 描述词，生成主体与风格一致的 2K 有声视频；前 5 张图片免费，第 6 张起按张加收费用。",
+  "name": "hailuo-h3-cankaosheng",
+  "params": [
+   {
+    "description": "生成视频时长（秒），4~15 的整数；按秒计费，时长越长费用越高。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的画面比例，默认自适应（由参考图自动选择最佳比例），也可指定具体比例。",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "输出分辨率：768P 性价比高出片快；2K 超高清单价更高。建议先出 768P 试稿，满意后在成片上一键升级 2K，仅补差价。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "768P",
+      "value": "768P"
+     },
+     {
+      "label": "2K",
+      "value": "2K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传 1~9 张参考图，模型智能融合主体、风格与构图。前 5 张免费，第 6 张起每张加收费用。支持 JPG/PNG/WEBP/HEIC/HEIF，单张 ≤30MB，宽高 256~5760px。必须至少上传 1 张。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "有声视频",
+   "2K",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-h3-quannengcankao": {
+  "display_name": "海螺 H3 全能参考",
+  "input_hint": "描述你想要的视频；注意上传参考视频后，总时长=输入视频时长+输出时长；可组合参考图片（≤9 张）、参考视频（≤3 个，总时长 ≤15 秒）与参考音频（≤3 段），至少需 1 张图片或 1 个参考视频。",
+  "name": "hailuo-h3-quannengcankao",
+  "params": [
+   {
+    "description": "生成视频时长（秒），4~15 的整数；按秒计费，时长越长费用越高。参考视频的时长会按输出分辨率单价额外计费。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的画面比例，默认自适应（由参考素材自动选择最佳比例），也可指定具体比例。",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "输出分辨率：768P 性价比高出片快；2K 超高清单价更高（含参考视频时输入秒数也按此单价计）。建议先出 768P 试稿，满意后在成片上一键升级 2K，仅补差价。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "768P",
+      "value": "768P"
+     },
+     {
+      "label": "2K",
+      "value": "2K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "参考图片最多 9 张，融合角色、物体与风格。前 5 张免费，第 6 张起每张加收费用。支持 JPG/PNG/WEBP/HEIC/HEIF，单张 ≤30MB。图片与参考视频至少传其一。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "参考视频最多 3 个，单段 2~15 秒且总时长 ≤15 秒；MP4/MOV，单个 ≤50MB，帧率 23.976~60。参考视频时长将按输出分辨率单价额外计费。图片与参考视频至少传其一。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "参考音频最多 3 段，单段 2~15 秒且总时长 ≤15 秒；WAV/MP3，单个 ≤15MB。用于参考音色，免费不计费；不可只传音频。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考音频",
+    "name": "audio_url",
+    "required": false,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "多模态参考",
+   "图参视参音参",
+   "有声视频",
+   "2K",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-h3-shouweizhen": {
+  "display_name": "海螺 H3 首尾帧",
+  "input_hint": "上传 1~2 张图片（1 张=首帧，2 张=首尾帧）并配合描述词生成视频；画面比例自动跟随图片，必须至少上传 1 张图片。",
+  "name": "hailuo-h3-shouweizhen",
+  "params": [
+   {
+    "description": "生成视频时长（秒），4~15 的整数；按秒计费，时长越长费用越高。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "输出分辨率：768P 性价比高出片快；2K 超高清单价更高。建议先出 768P 试稿，满意后在成片上一键升级 2K，仅补差价。画面比例自动跟随输入图片。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "768P",
+      "value": "768P"
+     },
+     {
+      "label": "2K",
+      "value": "2K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传 1~2 张图片：1 张=首帧，2 张=首尾帧（第 1 张首帧、第 2 张尾帧）。支持 JPG/PNG/WEBP/HEIC/HEIF，单张 ≤30MB，宽高 256~5760px，宽高比 0.4~2.5。必须至少上传 1 张。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首尾帧",
+   "有声视频",
+   "2K",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "hailuo-h3-zaishengcheng": {
+  "display_name": "海螺 H3 视频升2K",
+  "input_hint": "上传海螺 H3 生成的 768P 成片，并原样填写当时的最终提示词（如有参考图也请原样上传），一键升级为 2K 超高清。",
+  "name": "hailuo-h3-zaishengcheng",
+  "params": [
+   {
+    "description": "必传：海螺 H3 生成的 768P 成片（含音轨、24fps、约 4~15 秒），仅支持 1 个。不支持任意视频的通用超分。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "768P 源视频",
+    "name": "video_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "若源视频生成时带了参考图片，请原样上传（最多 9 张，可选）；输入与原生成不一致可能影响升级效果。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片（原生成输入，可选）",
+    "name": "image_url",
+    "required": false,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "视频再生成",
+   "768P升2K",
+   "有声视频",
+   "2K"
+  ],
+  "type": "video"
+ },
+ "happyhorse-1.1-i2v": {
+  "display_name": "快乐马1.1-首帧",
+  "input_hint": "上传一张首帧图，用文字描述镜头运动与画面动作；仅限图生视频，请先在参考区上图后再发起生成。",
+  "name": "happyhorse-1.1-i2v",
+  "params": [
+   {
+    "description": "描述视频内容和动作，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传首帧图片（必传），支持JPEG/PNG/WEBP，宽高不小于三百像素，宽高比介于1:2.5至2.5:1，不超过10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首帧参考图",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "快乐马首帧图原始地址",
+    "label": "首帧图地址",
+    "name": "_first_frame_url",
+    "required": false,
+    "type": "input"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首帧驱动",
+   "物理真实",
+   "运镜连贯",
+   "720P",
+   "1080P",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-1.1-r2v": {
+  "display_name": "快乐马1.1-参考生",
+  "input_hint": "上传 1～5 张参考图；提示词中按图片顺序指向各参考图的主体，接着写剧情、镜头与节奏。",
+  "name": "happyhorse-1.1-r2v",
+  "params": [
+   {
+    "description": "描述视频内容、动作与镜头；可用 character1、character2 ... 指代参考图主体，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传 1-5 张参考图片（必传），支持 JPEG/PNG/WEBP，短边不低于 400 像素，单张不超过 10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:5",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4",
+      "value": "5:4"
+     },
+     {
+      "label": "9:21",
+      "value": "9:21"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "历史任务宽高比",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:5",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4",
+      "value": "5:4"
+     },
+     {
+      "label": "9:21",
+      "value": "9:21"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "多主体融合",
+   "character指代",
+   "角色一致",
+   "多宽高比",
+   "720P",
+   "1080P",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-1.1-t2v": {
+  "display_name": "快乐马1.1-文生视频",
+  "input_hint": "用文字描述你想生成的视频内容，包括场景、动作、镜头运动等。",
+  "name": "happyhorse-1.1-t2v",
+  "params": [
+   {
+    "description": "描述视频内容和动作，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频画幅比例",
+    "label": "宽高比",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:5",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4",
+      "value": "5:4"
+     },
+     {
+      "label": "9:21",
+      "value": "9:21"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "物理真实",
+   "运镜连贯",
+   "720P",
+   "1080P",
+   "多比例",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-i2v": {
+  "display_name": "快乐马-首帧",
+  "input_hint": "上传一张首帧图，用文字描述镜头运动与画面动作；仅限图生视频，请先在参考区上图后再发起生成。",
+  "name": "happyhorse-i2v",
+  "params": [
+   {
+    "description": "描述视频内容和动作，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传首帧图片（必传），支持JPEG/PNG/WEBP，宽高不小于三百像素，宽高比介于1:2.5至2.5:1，不超过10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首帧参考图",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "快乐马首帧图原始地址",
+    "label": "首帧图地址",
+    "name": "_first_frame_url",
+    "required": false,
+    "type": "input"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首帧驱动",
+   "物理真实",
+   "运镜连贯",
+   "720P",
+   "1080P",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-r2v": {
+  "display_name": "快乐马-参考生",
+  "input_hint": "上传 1～5 张参考图；提示词中按图片顺序指向各参考图的主体，接着写剧情、镜头与节奏。",
+  "name": "happyhorse-r2v",
+  "params": [
+   {
+    "description": "描述视频内容、动作与镜头；可用 character1、character2 ... 指代参考图主体，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传 1-5 张参考图片（必传），支持 JPEG/PNG/WEBP，短边不低于 400 像素，单张不超过 10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "历史任务宽高比",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "多主体融合",
+   "character指代",
+   "角色一致",
+   "多宽高比",
+   "720P",
+   "1080P",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-t2v": {
+  "display_name": "快乐马-文生视频",
+  "input_hint": "用文字描述你想生成的视频内容，包括场景、动作、镜头运动等。",
+  "name": "happyhorse-t2v",
+  "params": [
+   {
+    "description": "描述视频内容和动作，2500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频画幅比例",
+    "label": "宽高比",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（3-15秒，影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "物理真实",
+   "运镜连贯",
+   "720P",
+   "1080P",
+   "多比例",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "happyhorse-video-edit": {
+  "display_name": "快乐马-视频编辑",
+  "input_hint": "先上传待编辑的正片视频（必选），可选再传最多 5 张参考图；用文字说明想「改什么」，如换装、换背景、调色、去污、风格化或局部增减元素。⚠️ 本模型按「输入视频时长 + 输出视频时长」合计扣费（如输入6秒+输出8秒=按14秒计）。",
+  "name": "happyhorse-video-edit",
+  "params": [
+   {
+    "description": "描述编辑意图，如换装、风格、局部替换等",
+    "label": "编辑指令",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传待编辑的源视频（MP4/MOV，约3～60秒）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "待编辑参考视频",
+    "name": "video",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "可选：0～5 张参考图，用于指定服装、风格等。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "输出视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "输出是否保留原片声音",
+    "label": "声音",
+    "name": "audio_setting",
+    "options": [
+     {
+      "label": "智能",
+      "value": "auto"
+     },
+     {
+      "label": "保留原声",
+      "value": "origin"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "是否添加水印",
+    "label": "水印",
+    "name": "watermark",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "视频编辑",
+   "指令改片",
+   "换装",
+   "风格迁移",
+   "可选参考图",
+   "720P",
+   "1080P",
+   "阿里云百炼"
+  ],
+  "type": "video"
+ },
+ "kling-avatar-image2video": {
+  "display_name": "可灵-数字人",
+  "input_hint": "上传数字人参考图和音频，让数字人开口说话或唱歌，支持2-300秒",
+  "name": "kling-avatar-image2video",
+  "params": [
+   {
+    "description": "数字人参考图，支持.jpg/.jpeg/.png格式，文件大小不超过10MB，图片宽高尺寸不小于300px，宽高比介于1:2.5~2.5:1之间。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "音频文件，支持.mp3/.wav/.m4a/.aac格式，文件大小不超过5MB，时长2-300秒。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "音频文件",
+    "name": "sound_file",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "正向文本提示词，可定义数字人动作、情绪及运镜等，不超过2500个字符",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "生成视频的模式。std标准模式性价比高，pro专家模式生成视频质量更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准模式",
+      "value": "std"
+     },
+     {
+      "label": "专家模式",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "数字人",
+   "视频生成"
+  ],
+  "type": "video"
+ },
+ "kling-image-o1": {
+  "display_name": "可灵 o1",
+  "input_hint": "详细描述想要生成的画面内容（主体、构图、光影及逻辑关系），可灵O1模型具备强大的语义理解与推理能力，支持上传参考图以保持高度一致性。",
+  "name": "kling-image-o1",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-10张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "2k 高清",
+      "value": "2k"
+     },
+     {
+      "label": "1K 标清",
+      "value": "1k"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "kling-motion-control": {
+  "display_name": "可灵-动作控制",
+  "input_hint": "上传参考视频和图片，可以让图片中的人物按照视频逻辑动起来",
+  "name": "kling-motion-control",
+  "params": [
+   {
+    "description": "文本提示词，可包含正向描述和负向描述，为画面增加元素、实现运镜效果等，不能超过2500个字符",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "参考图像URL，生成视频中的人物、背景等元素均以参考图为准。支持.jpg/.jpeg/.png格式，文件大小不超过10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "参考视频URL，生成视频中的人物动作与参考视频一致。支持.mp4/.mov格式，文件大小不超过100MB，时长3-30秒，视频宽度需在340-3850px之间，上游对最低帧率有要求（参考同系列模型≥ 24fps），过低会报“视频fps超限”。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "可选择是否保留视频原声",
+    "label": "保留原声",
+    "name": "keep_original_sound",
+    "options": [
+     {
+      "label": "保留原声",
+      "value": "yes"
+     },
+     {
+      "label": "不保留原声",
+      "value": "no"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "生成视频中人物的朝向，可选择与图片一致或与视频一致。与图片一致时视频最长10秒，与视频一致时最长30秒",
+    "label": "人物朝向",
+    "name": "character_orientation",
+    "options": [
+     {
+      "label": "与视频一致",
+      "value": "video"
+     },
+     {
+      "label": "与图片一致",
+      "value": "image"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的模式。std标准模式性价比高，pro专家模式生成质量更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准模式",
+      "value": "std"
+     },
+     {
+      "label": "专家模式",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "动作控制",
+   "视频生成"
+  ],
+  "type": "video"
+ },
+ "kling-motion-control-v3": {
+  "display_name": "可灵-动作控制 V3",
+  "input_hint": "上传参考视频和图片，V3版本动作控制，让图片中的人物按照视频逻辑动起来",
+  "name": "kling-motion-control-v3",
+  "params": [
+   {
+    "description": "文本提示词，可包含正向描述和负向描述，为画面增加元素、实现运镜效果等，不能超过2500个字符",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "参考图像URL，生成视频中的人物、背景等元素均以参考图为准。支持.jpg/.jpeg/.png格式，文件大小不超过10MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "参考视频URL，生成视频中的人物动作与参考视频一致。支持.mp4/.mov格式，文件大小不超过100MB，时长3-30秒。注意：视频需包含至少3秒的连续有效运动，多切镜或有效运动不足会被拒绝（此时上游报错可能显示为\"视频时长超限\"，实际原因是连续运动不足）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "可选择是否保留视频原声",
+    "label": "保留原声",
+    "name": "keep_original_sound",
+    "options": [
+     {
+      "label": "保留原声",
+      "value": "yes"
+     },
+     {
+      "label": "不保留原声",
+      "value": "no"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "生成视频中人物的朝向，可选择与图片一致或与视频一致。与图片一致时视频最长10秒，与视频一致时最长30秒",
+    "label": "人物朝向",
+    "name": "character_orientation",
+    "options": [
+     {
+      "label": "与视频一致",
+      "value": "video"
+     },
+     {
+      "label": "与图片一致",
+      "value": "image"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的模式。std标准模式性价比高，pro专家模式生成质量更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准模式",
+      "value": "std"
+     },
+     {
+      "label": "专家模式",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "动作控制",
+   "视频生成",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kling-v2-6": {
+  "display_name": "可灵 2.6 Pro",
+  "input_hint": "描述视频内容、动作和场景，可文生视频，可图生视频，支持5-10秒有声视频。\r\n\r\n有图片的时候，最终视频的宽高比将随图片而定。",
+  "name": "kling-v2-6",
+  "params": [
+   {
+    "description": "生成视频的时长，支持5秒和10秒",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "可选，上传1张参考图片。不上传则为文生视频模式。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "描述视频内容的文字提示",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "不希望出现在视频中的内容",
+    "label": "负向提示词",
+    "name": "negative_prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "选择视频是否包含声音，无声视频价格更优惠",
+    "label": "声音模式",
+    "name": "sound",
+    "options": [
+     {
+      "label": "有声",
+      "value": "on"
+     },
+     {
+      "label": "无声",
+      "value": "off"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "方形 1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kling-v3": {
+  "display_name": "可灵-V3",
+  "input_hint": "描述你想要生成的图片内容，支持上传参考图进行图生图\r\n\r\n支持1K标清/2K高清，8种画面比例可选",
+  "name": "kling-v3",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "2K 高清",
+      "value": "2k"
+     },
+     {
+      "label": "1K 标清",
+      "value": "1k"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "高清"
+  ],
+  "type": "image"
+ },
+ "kling-v3-omni": {
+  "display_name": "可灵-V3-Omni",
+  "input_hint": "描述你想要生成的图片内容，支持上传多张参考图片（最多10张）\r\n\r\n支持1K/2K/4K三档清晰度，多图融合时主体一致性佳",
+  "name": "kling-v3-omni",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容，用 <<<image_N>>> 引用参考图",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-10张图片作为参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "图片清晰度",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "1K 标清",
+      "value": "1k"
+     },
+     {
+      "label": "2K 高清",
+      "value": "2k"
+     },
+     {
+      "label": "4K 超高清",
+      "value": "4k"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图",
+   "多图融合",
+   "4k",
+   "高清"
+  ],
+  "type": "image"
+ },
+ "kling-v3-omni-cankao": {
+  "display_name": "可灵-Omni 参考生",
+  "input_hint": "描述视频内容，可上传1-7张参考图片\r\nAI将参考图片中的角色、风格、场景等元素生成视频\r\n\r\n支持纯文生视频，也支持上传参考图生成",
+  "name": "kling-v3-omni-cankao",
+  "params": [
+   {
+    "description": "生成视频的时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1-7张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "描述视频内容、动作和声音",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "标准模式性价比高，高品质画质更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准",
+      "value": "std"
+     },
+     {
+      "label": "高品质",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "参考生视频",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kling-v3-omni-shouweizhen": {
+  "display_name": "可灵-Omni 首尾帧",
+  "input_hint": "上传1张图片作为视频首帧，或2张图片作为首帧+尾帧\r\n描述视频内容和动作，AI智能分镜生成有声视频\r\n\r\n图片为必传，不支持纯文生视频\r\n画面比例跟随首帧图，无需设置",
+  "name": "kling-v3-omni-shouweizhen",
+  "params": [
+   {
+    "description": "生成视频的时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1-2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "描述视频内容、动作和声音",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "标准模式性价比高，高品质画质更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准",
+      "value": "std"
+     },
+     {
+      "label": "高品质",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kling-v3-omni-videoref": {
+  "display_name": "可灵-Omni 视频参考",
+  "input_hint": "上传一段参考视频（必传，3-10秒），描述视频内容\r\n可选上传0-4张参考图片\r\n\r\n视频参考：参考视频的运镜/风格生成新视频\r\n视频编辑：指令修改原视频内容，自动保留原声",
+  "name": "kling-v3-omni-videoref",
+  "params": [
+   {
+    "description": "生成视频的时长（视频参考模式有效，指令变换模式跟随输入视频）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "可选上传0-4张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "上传1个参考视频，支持 mp4/mov、最大100MB；视频宽度不应小于700px，过小会被上游拒绝。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频参考=参考风格/运镜生成新视频；指令变换=编辑原视频",
+    "label": "参考类型",
+    "name": "refer_type",
+    "options": [
+     {
+      "label": "视频参考",
+      "value": "feature"
+     },
+     {
+      "label": "编辑视频",
+      "value": "base"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "是否保留参考视频的原始声音（视频参考模式有效）",
+    "label": "保留原声",
+    "name": "keep_original_sound",
+    "options": [
+     {
+      "label": "保留原声",
+      "value": "yes"
+     },
+     {
+      "label": "不保留",
+      "value": "no"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "描述视频内容、动作和声音",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "标准模式性价比高，高品质画质更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准",
+      "value": "std"
+     },
+     {
+      "label": "高品质",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "视频参考",
+   "视频编辑",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kling-v3-video": {
+  "display_name": "可灵-V3-video",
+  "input_hint": "描述视频内容、动作和场景\r\n可文生视频，可上传图片作为首帧/尾帧生成视频\r\n\r\n传入图片后画面比例设置无效，视频将跟随首帧图",
+  "name": "kling-v3-video",
+  "params": [
+   {
+    "description": "生成视频的时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1-2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "描述视频内容、动作和声音",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "标准模式性价比高，高品质画质更佳",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准",
+      "value": "std"
+     },
+     {
+      "label": "高品质",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kwvideo-v2": {
+  "display_name": "SD 2.0 首尾帧",
+  "input_hint": "不传图 = 文生视频 | 1张图 = 首帧 | 2张图 = 首尾帧\nPrompt 必填，描述越详细效果越好\n图片：JPEG/PNG/WebP/BMP/TIFF/GIF，单张 ≤ 30MB，300~6000px",
+  "name": "kwvideo-v2",
+  "params": [
+   {
+    "description": "标准版质量更高，快速版/Mini版生成视频更快且价格更低",
+    "label": "速度版本",
+    "name": "version",
+    "options": [
+     {
+      "label": "Mini",
+      "value": "Mini"
+     },
+     {
+      "label": "快速",
+      "value": "快速"
+     },
+     {
+      "label": "标准",
+      "value": "标准"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频时长，自动模式由模型自主选择最佳时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "自动",
+      "value": "auto"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频宽高比例，自适应模式会根据输入图片自动选择",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "视频分辨率：480p / 720p / 1080p / 4K。其中 1080p、4K 仅标准版（version=标准）支持，快速版/Mini 版只支持 480p / 720p。【高价提醒】4K 价格非常高，一条 10 秒视频可能花费几十元甚至上百元，请谨慎使用。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "480p",
+      "value": "480p"
+     },
+     {
+      "label": "720p",
+      "value": "720p"
+     },
+     {
+      "label": "1080p",
+      "value": "1080p"
+     },
+     {
+      "label": "4K",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传0~2张图片：0张=文生视频，1张=首帧图生视频，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "SD2.0 人像形象 id 数组（例 [101]）。先调 POST /v1/skills/avatars 创建形象（真人需扫码活体认证），轮询 GET /v1/skills/avatars/{avatar_id} 至 status=ready 后方可引用；未就绪引用任务会失败。形象与 images 参考图共占参考槽位，合并上限 9 张；带形象的任务仅 XH 渠道可执行（火山官网渠道不支持真人形象）",
+    "label": "人像形象",
+    "name": "avatar_ids",
+    "required": false,
+    "type": "input"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "即梦",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kwvideo-v2-quannengcankao": {
+  "display_name": "SD 2.0 全能参考",
+  "input_hint": "描述你想要生成的视频；可叠加参考图片、参考视频或参考音频作为多模态参考，至少需要 1 张图片或 1 个视频。输出支持 480p / 720p / 1080p。",
+  "name": "kwvideo-v2-quannengcankao",
+  "params": [
+   {
+    "description": "选择当前使用场景：「全能参考」默认生成、「编辑视频」在原视频上做主体替换/对象增删改/局部重绘。两种模式上游API调用一致，仅前端校验与引导不同。",
+    "label": "使用模式",
+    "name": "_quan_neng_mode",
+    "options": [
+     {
+      "label": "全能参考",
+      "value": "quan_neng"
+     },
+     {
+      "label": "编辑视频",
+      "value": "edit"
+     },
+     {
+      "label": "延长视频",
+      "value": "extend"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "标准版质量更高，快速/Mini 版出图更快且价格更低（快速/Mini 仅支持 480p/720p）",
+    "label": "速度版本",
+    "name": "version",
+    "options": [
+     {
+      "label": "Mini",
+      "value": "Mini"
+     },
+     {
+      "label": "快速",
+      "value": "快速"
+     },
+     {
+      "label": "标准",
+      "value": "标准"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长。“自动”会根据参考素材智能选择最佳时长；其余按指定秒数生成。预扣费按 15 秒上限计算，结算时按实际时长多退少补。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "自动",
+      "value": "auto"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "输出视频画面的宽高比例。“自适应”贴合首帧/第一张参考图的原始比例（推荐）；其它选项会强制裁切或填充到指定比例。",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "输出视频分辨率，直接影响计费单价。1080p 单价最高，480p / 720p 同档；输入若包含参考视频，所有档位单价都会更便宜。结算按实际生成 token 数。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "480p",
+      "value": "480p"
+     },
+     {
+      "label": "720p",
+      "value": "720p"
+     },
+     {
+      "label": "1080p",
+      "value": "1080p"
+     },
+     {
+      "label": "4K",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传0~9张参考图片。注意：上游内容审核会拒绝包含真人/真实人脸的参考图（报错“输入图片可能包含真人”），真人形象请改用 avatar_ids 人像形象通道（POST /v1/skills/avatars 实名认证后引用）。⚠️ 本模型强制要求参考素材：image_url / video_url / avatar_ids 至少提供其一（单字段各自可选，但不能全部留空，否则报「请至少上传 1 张参考图或 1 个参考视频」）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "上传0~3个参考视频，mp4/mov格式。⚠️ 本模型强制要求参考素材：image_url / video_url / avatar_ids 至少提供其一（单字段各自可选，但不能全部留空，否则报「请至少上传 1 张参考图或 1 个参考视频」）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "上传0~3段参考音频，仅支持 wav/mp3 格式（m4a/aac/flac 等其它格式会被上游拒绝，请先转码）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "音频文件",
+    "name": "audio_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "SD2.0 人像形象 id 数组（例 [101]）。先调 POST /v1/skills/avatars 创建形象（真人需扫码活体认证），轮询 GET /v1/skills/avatars/{avatar_id} 至 status=ready 后方可引用；未就绪引用任务会失败。形象与 image_url 参考图共占参考槽位，合并上限 9 张；带形象的任务仅 XH 渠道可执行（火山官网渠道不支持真人形象）",
+    "label": "人像形象",
+    "name": "avatar_ids",
+    "required": false,
+    "type": "input"
+   }
+  ],
+  "tags": [
+   "多模态参考",
+   "图参视参音参",
+   "即梦",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "kwvideo-v2-ref": {
+  "display_name": "SD 2.0 参考生",
+  "input_hint": "上传 1~9 张参考图 + 描述词，生成风格一致的视频\nPrompt 必填，参考图至少 1 张，最多 9 张\n图片：JPEG/PNG/WebP/BMP/TIFF/GIF，单张 ≤ 30MB，300~6000px",
+  "name": "kwvideo-v2-ref",
+  "params": [
+   {
+    "description": "标准版质量更高，快速版常常出图更快且价格更低",
+    "label": "速度版本",
+    "name": "version",
+    "options": [
+     {
+      "label": "Mini",
+      "value": "Mini"
+     },
+     {
+      "label": "快速",
+      "value": "快速"
+     },
+     {
+      "label": "标准",
+      "value": "标准"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频时长，自动模式由模型自主选择最佳时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "自动",
+      "value": "auto"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频宽高比例，自适应模式会根据输入图片自动选择",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自适应",
+      "value": "adaptive"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "视频分辨率：480p / 720p / 1080p / 4K。其中 1080p、4K 仅标准版（version=标准）支持，快速版/Mini 版只支持 480p / 720p。【高价提醒】4K 价格非常高，一条 10 秒视频可能花费几十元甚至上百元，请谨慎使用。",
+    "label": "视频分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "480p",
+      "value": "480p"
+     },
+     {
+      "label": "720p",
+      "value": "720p"
+     },
+     {
+      "label": "1080p",
+      "value": "1080p"
+     },
+     {
+      "label": "4K",
+      "value": "4K"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1~9张参考图片，模型会智能融合参考图的风格、元素和構图生成新视频。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "SD2.0 人像形象 id 数组（例 [101]）。先调 POST /v1/skills/avatars 创建形象（真人需扫码活体认证），轮询 GET /v1/skills/avatars/{avatar_id} 至 status=ready 后方可引用；未就绪引用任务会失败。形象计入参考图数量（与 images 合并上限 9 张，且可单独满足“至少 1 张参考”要求）；带形象的任务仅 XH 渠道可执行（火山官网渠道不支持真人形象）",
+    "label": "人像形象",
+    "name": "avatar_ids",
+    "required": false,
+    "type": "input"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "有声视频",
+   "参考生视频",
+   "即梦",
+   "720p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "mj_imagine": {
+  "display_name": "Midjourney",
+  "input_hint": "描述你想要生成的图片内容，支持上传最多4张参考图作为垫图",
+  "name": "mj_imagine",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-4张图片作为垫图参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择 MJ 或 Niji 模式",
+    "label": "模型风格",
+    "name": "botType",
+    "options": [
+     {
+      "label": "MJ 写实模式",
+      "value": "MID_JOURNEY"
+     },
+     {
+      "label": "Niji 动漫模式",
+      "value": "NIJI_JOURNEY"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片的宽高比例",
+    "label": "图片比例",
+    "name": "aspectRatio",
+    "options": [
+     {
+      "label": "1:1 正方形",
+      "value": "1:1"
+     },
+     {
+      "label": "16:9 横屏",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16 竖屏",
+      "value": "9:16"
+     },
+     {
+      "label": "4:3 横版",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4 竖版",
+      "value": "3:4"
+     },
+     {
+      "label": "3:2 横版",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3 竖版",
+      "value": "2:3"
+     },
+     {
+      "label": "4:5 竖版",
+      "value": "4:5"
+     },
+     {
+      "label": "5:4 横版",
+      "value": "5:4"
+     },
+     {
+      "label": "21:9 超宽屏",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "图片精细度，数值越高生成越慢但质量越好",
+    "label": "质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "0.25 快速",
+      "value": "0.25"
+     },
+     {
+      "label": "0.5 标准",
+      "value": "0.5"
+     },
+     {
+      "label": "1 高清",
+      "value": "1"
+     },
+     {
+      "label": "2 超清",
+      "value": "2"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "艺术风格强度，0=写实，1000=极度艺术化",
+    "label": "风格化",
+    "name": "stylize",
+    "options": [
+     {
+      "label": "0 写实",
+      "value": "0"
+     },
+     {
+      "label": "50 轻微",
+      "value": "50"
+     },
+     {
+      "label": "100 默认",
+      "value": "100"
+     },
+     {
+      "label": "250 中等",
+      "value": "250"
+     },
+     {
+      "label": "500 强烈",
+      "value": "500"
+     },
+     {
+      "label": "750 极强",
+      "value": "750"
+     },
+     {
+      "label": "1000 极致",
+      "value": "1000"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "变化多样性，0=稳定一致，100=差异很大",
+    "label": "混乱度",
+    "name": "chaos",
+    "options": [
+     {
+      "label": "0 稳定",
+      "value": "0"
+     },
+     {
+      "label": "25 轻微变化",
+      "value": "25"
+     },
+     {
+      "label": "50 中等变化",
+      "value": "50"
+     },
+     {
+      "label": "75 大变化",
+      "value": "75"
+     },
+     {
+      "label": "100 最大变化",
+      "value": "100"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "图片风格模式",
+    "label": "风格",
+    "name": "style",
+    "options": [
+     {
+      "label": "默认",
+      "value": ""
+     },
+     {
+      "label": "Raw 原始",
+      "value": "raw"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "omni-flash": {
+  "display_name": "omni-flash",
+  "input_hint": "用文字描述视频动作、镜头与场景；可选上传 1–3 张参考图用于人物/物体/场景参考，不传则走文生视频；选择 16:9 或 9:16 画面比例。",
+  "name": "omni-flash",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容（动作、场景、镜头）",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传 1–3 张参考图片（可选，不传则走文生视频）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择视频的宽高比",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择生成视频的时长（不同时长价格不同，实际计价请以 pricing 接口返回的 option_prices 为准）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "开启后自动将中文改写成英文提示词，提升生成质量",
+    "label": "提示词优化",
+    "name": "enhance_prompt",
+    "options": [
+     {
+      "label": "关闭",
+      "value": "false"
+     },
+     {
+      "label": "开启",
+      "value": "true"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "开启后输出更高清晰度的视频",
+    "label": "视频超分",
+    "name": "enable_upsample",
+    "options": [
+     {
+      "label": "关闭",
+      "value": "false"
+     },
+     {
+      "label": "开启",
+      "value": "true"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "参考生视频",
+   "多图参考",
+   "有音视频",
+   "6/8/10秒",
+   "Google Gemini"
+  ],
+  "type": "video"
+ },
+ "omni_flash-10s": {
+  "display_name": "Omni Flash 10秒",
+  "input_hint": "用文字描述视频动作、镜头与场景；可选上传 1-7 张参考图用于人物/物体/场景参考，不传则走文生视频；固定生成 10 秒 720P，支持 16:9 / 9:16。",
+  "name": "omni_flash-10s",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容（动作、镜头、场景等）",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "可选上传最多 7 张参考图（人物/物体/场景参考），不传则走文生视频。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择输出视频的画面比例（固定 720P）",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "参考生视频",
+   "多图参考",
+   "有音视频",
+   "10秒",
+   "720P",
+   "Google Gemini"
+  ],
+  "type": "video"
+ },
+ "pixverse-c1-cankaosheng": {
+  "display_name": "Pix C1 参考生",
+  "input_hint": "不传图=文生视频，传图=参考生（1-7张参考图）\n描述视频内容和动作，生成有声视频\n支持多种画面比例和分辨率",
+  "name": "pixverse-c1-cankaosheng",
+  "params": [
+   {
+    "description": "视频分辨率（清晰度），档位越高画面越清晰、费用越高。",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "360P",
+      "value": "360P"
+     },
+     {
+      "label": "540P",
+      "value": "540P"
+     },
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长（秒），时长越长费用越高；可选 3/6/9/12/15 秒。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面的宽高比，与分辨率档位共同决定最终输出尺寸；参考生视频时建议与参考图比例保持一致。",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "竖屏 3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "传统 4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "横屏 3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "竖屏 2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "超宽 21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "上传1~4张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "参考生",
+   "有声视频",
+   "高清",
+   "动态场景"
+  ],
+  "type": "video"
+ },
+ "pixverse-c1-shouweizhen": {
+  "display_name": "Pix C1 首尾帧",
+  "input_hint": "上传1张图=首帧生视频，上传2张图=首尾帧\n描述视频内容和动作，生成有声视频\n视频宽高比跟随首帧图片",
+  "name": "pixverse-c1-shouweizhen",
+  "params": [
+   {
+    "description": "视频分辨率（清晰度），档位越高画面越清晰、费用越高。",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "360P",
+      "value": "360P"
+     },
+     {
+      "label": "540P",
+      "value": "540P"
+     },
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长（秒），时长越长费用越高；可选 3/6/9/12/15 秒。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1~2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "高清",
+   "动态场景"
+  ],
+  "type": "video"
+ },
+ "pixverse-v5.6-r2v": {
+  "display_name": "Pix V5.6 参考生",
+  "input_hint": "描述视频内容（必填），上传1-7张参考图片\nAI将参考图中的角色、风格、场景融合生成有声视频\n\n支持文生视频（不传图），也支持上传1-7张参考图片\n宽高比选择适用于所有模式",
+  "name": "pixverse-v5.6-r2v",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容（动作、场景、镜头等），将结合上传的参考图片生成视频。",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-7张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率（清晰度），档位越高画面越清晰、费用越高；其中 1080P 不支持 10 秒时长。",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "360P",
+      "value": "360P"
+     },
+     {
+      "label": "540P",
+      "value": "540P"
+     },
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长（秒），按秒计费，时长越长费用越高；可选 5/8/10 秒，其中 1080P 分辨率不支持 10 秒。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面的宽高比，与分辨率档位共同决定最终输出尺寸；参考生视频时建议与参考图比例保持一致。",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "多图参考",
+   "有声视频",
+   "图生视频",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "pixverse-v5.6-shouweizhen": {
+  "display_name": "Pix V5.6 首尾帧",
+  "input_hint": "不传图=文生视频，1张图=首帧生视频，2张图=首尾帧\n描述视频内容和动作，生成有声视频\n\n文生视频支持宽高比选择，图生/首尾帧跟随首帧图宽高比",
+  "name": "pixverse-v5.6-shouweizhen",
+  "params": [
+   {
+    "description": "生成视频的分辨率档位",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "360P",
+      "value": "360P"
+     },
+     {
+      "label": "540P",
+      "value": "540P"
+     },
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传0-2张图片，0张=文生视频，1张=图生视频，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "文生视频模式下的画面比例，图生/首尾帧跟随首帧图",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "pixverse-v6-shouweizhen": {
+  "display_name": "Pix V6 首尾帧",
+  "input_hint": "不传图=文生视频，1张图=首帧生视频，2张图=首尾帧\n描述视频内容和动作，生成有声视频\n\n文生视频支持宽高比选择，图生/首尾帧跟随首帧图宽高比",
+  "name": "pixverse-v6-shouweizhen",
+  "params": [
+   {
+    "description": "视频分辨率（清晰度），档位越高画面越清晰、费用越高。",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "360P",
+      "value": "360P"
+     },
+     {
+      "label": "540P",
+      "value": "540P"
+     },
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "生成视频的时长（秒），按秒计费，时长越长费用越高；可选 3/6/9/12/15 秒。",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "上传1~2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "文生视频模式下的画面比例，图生/首尾帧跟随首帧图",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "有声视频",
+   "首尾帧",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "qwen-image": {
+  "display_name": "千问-image-max",
+  "input_hint": "描述你想要生成的图片内容，支持上传1-3张参考图片进行图像编辑",
+  "name": "qwen-image",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容，可包含主体、风格、场景、色彩、光影等细节；描述越具体，生成效果越贴近预期。为必填项。",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1~3张图片作为参考（样式/元素/内容融合）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择生成图片的宽高比（画面形状），系统会根据所选比例自动确定输出分辨率。选择“自动”时由模型自行决定尺寸；上传参考图时会尽量贴合参考图的比例。",
+    "label": "宽高比",
+    "name": "size",
+    "options": [
+     {
+      "label": "正方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "竖版 2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "横版 3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "竖版 3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "横版 4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "竖版 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "横版 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "超宽 21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "是否对提示词进行智能改写优化。开启后系统会自动丰富、补充提示词细节以提升出图效果；关闭则使用你输入的原始提示词。默认开启。",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图像编辑",
+   "多图融合"
+  ],
+  "type": "image"
+ },
+ "sora-2": {
+  "display_name": "Sora-2 官转版",
+  "input_hint": "由于该模型渠道火爆，选择智能调度分组时，大概率会调度到高价格分组，请适度使用\r\n\r\n最好的效果是横版传横图，竖版传竖图，尽量不要乱传",
+  "name": "sora-2",
+  "params": [
+   {
+    "description": "选择视频时长",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "选择画面比例",
+    "label": "画面方向",
+    "name": "orientation",
+    "options": [
+     {
+      "label": "竖屏",
+      "value": "portrait"
+     },
+     {
+      "label": "横屏",
+      "value": "landscape"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "上传1张图片作为视频参考。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "input_reference",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "历史任务画面比例",
+    "label": "画面比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "历史任务画面尺寸",
+    "label": "画面尺寸",
+    "name": "size",
+    "options": [
+     {
+      "label": "横屏 1280x720",
+      "value": "1280x720"
+     },
+     {
+      "label": "竖屏 720x1280",
+      "value": "720x1280"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "历史任务视频时长",
+    "label": "视频时长",
+    "name": "seconds",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "是否优先去水印",
+    "label": "去水印",
+    "name": "watermark",
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "是否隐藏视频不公开",
+    "label": "隐藏视频",
+    "name": "private",
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "稳定"
+  ],
+  "type": "video"
+ },
+ "veo3.1": {
+  "display_name": "veo3.1",
+  "input_hint": "提示词建议：主体+动作+场景+运镜。上传参考图锁定人物与画风；首帧图开启图生视频；首尾帧两张图精准控制起始与结束",
+  "name": "veo3.1",
+  "params": [
+   {
+    "description": "描述你想要生成的视频内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "选择生成速度和质量",
+    "label": "生成模式",
+    "name": "generation_mode",
+    "options": [
+     {
+      "label": "快速",
+      "value": "fast"
+     },
+     {
+      "label": "标准",
+      "value": "null"
+     },
+     {
+      "label": "高质量",
+      "value": "pro"
+     },
+     {
+      "label": "多图参考",
+      "value": "components"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "选择视频的宽高比",
+    "label": "视频比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "竖屏 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "横屏 16:9",
+      "value": "16:9"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "上传参考图片（首帧/首尾帧/元素合一需要）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "veo仅支持英文提示词，开启后自动翻译中文",
+    "label": "提示词优化",
+    "name": "enhance_prompt",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   },
+   {
+    "description": "开启后视频分辨率更高",
+    "label": "视频超分",
+    "name": "enable_upsample",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   },
+   {
+    "description": "视频生成时长",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "8秒",
+      "value": "8"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "视频生成方式",
+    "label": "生成方式",
+    "name": "generation_type",
+    "options": [
+     {
+      "label": "文生视频",
+      "value": "TEXT"
+     },
+     {
+      "label": "参考图生成",
+      "value": "REFERENCE"
+     },
+     {
+      "label": "首尾帧生成",
+      "value": "FIRST&LAST"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   },
+   {
+    "description": "视频清晰度",
+    "label": "清晰度",
+    "name": "quality",
+    "options": [
+     {
+      "label": "1080P高清",
+      "value": "1080p"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "首帧参考图",
+   "首尾帧",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "vidu-image-2": {
+  "display_name": "VIDU Image 2",
+  "input_hint": "用自然语言描述画面；可选上传最多 14 张参考图 URL 用于参考或编辑。",
+  "name": "vidu-image-2",
+  "params": [
+   {
+    "description": "画面描述，不超过2000字",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "可选，最多14张图片URL。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "输出宽高比",
+    "label": "画幅比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "5:4",
+      "value": "5:4"
+     },
+     {
+      "label": "4:5",
+      "value": "4:5"
+     },
+     {
+      "label": "7:3",
+      "value": "7:3"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "1K / 2K / 3K",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "1K",
+      "value": "1K"
+     },
+     {
+      "label": "2K",
+      "value": "2K"
+     },
+     {
+      "label": "3K",
+      "value": "3K"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成质量档位",
+    "label": "质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "低",
+      "value": "low"
+     },
+     {
+      "label": "中",
+      "value": "medium"
+     },
+     {
+      "label": "高",
+      "value": "high"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "历史任务风格",
+    "label": "风格",
+    "name": "style",
+    "options": [
+     {
+      "label": "通用",
+      "value": "general"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "多图参考",
+   "图片编辑",
+   "1K/2K/3K",
+   "Vidu官方"
+  ],
+  "type": "image"
+ },
+ "vidu-jieshuoman": {
+  "display_name": "VIDU-解说漫",
+  "input_hint": "⚠ 重要提醒：本模型按成片秒数计费，乱填也会跑出几分钟视频、白白扣额度，请务必先看玩法说明再写！\n\n👉 不知道怎么写？点击页面左下角「玩法说明」，里面有官方完整剧本示例 + 写作规范，照抄即可。\n\n———— 速查写法 ————\n① 画面、走位、气氛 → 单独一行写叙述（不用引号）\n   例：典当行内景，林尘擦拭柜台，神情淡然。\n② 角色说话 → 写成：角色名：\"台词\"（中文引号）\n   例：林尘：\"三年了，也该结束了。\"\n\n字数 50～1000 字（约 400 字/分钟）；剧名 ≤ 20 字。",
+  "name": "vidu-jieshuoman",
+  "params": [
+   {
+    "description": "不超过20字",
+    "label": "剧集名称",
+    "name": "script_name",
+    "required": true,
+    "type": "input"
+   },
+   {
+    "description": "50-1000字，推荐50-500字；一行可写角色名与台词。",
+    "label": "剧本内容",
+    "name": "script_content",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "可选。JSON数组，每项含 id、type(character/scene/tool)、name、image_uri(https URL)、description、voice_id。角色 voice_id 从音色列表选择。获取接口(/v1/skills/voices?model=vidu-jieshuoman)",
+    "label": "资产JSON",
+    "name": "assets",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "用于预扣费，实际按生成视频时长多退少补。",
+    "label": "预估成片时长(秒)",
+    "name": "duration",
+    "required": true,
+    "type": "number"
+   },
+   {
+    "description": "输出清晰度",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720p",
+      "value": "720p"
+     },
+     {
+      "label": "1080p",
+      "value": "1080p"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "输出比例",
+    "label": "画幅比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "如：2D动画、真人写实；不超过10个字",
+    "label": "画面风格",
+    "name": "style",
+    "required": false,
+    "type": "input"
+   },
+   {
+    "description": "TTS 语言",
+    "label": "语言",
+    "name": "language",
+    "options": [
+     {
+      "label": "中文",
+      "value": "zh"
+     },
+     {
+      "label": "英文",
+      "value": "en"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "1~1.5",
+    "label": "TTS语速",
+    "name": "tts_speed",
+    "required": false,
+    "type": "number"
+   },
+   {
+    "description": "是否生成对口型",
+    "label": "对口型",
+    "name": "enable_lipsync",
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "解说漫剧",
+   "剧本驱动",
+   "多资产参考",
+   "角色独立音色",
+   "TTS+对口型",
+   "中英双语",
+   "720P/1080P",
+   "多画幅",
+   "按秒计费"
+  ],
+  "type": "video"
+ },
+ "vidu-mv": {
+  "display_name": "VIDU-音乐MV",
+  "input_hint": "选择了音频后，可填写提示词指定分镜/风格（最多3000字）。为获得更好效果，建议不要照歌词写分镜，可以参考“玩法说明”提供的示例。",
+  "name": "vidu-mv",
+  "params": [
+   {
+    "description": "模特/风格参考图 1～7 张，支持 png/jpeg/jpg/webp，比例小于 1:4 或 4:1，单张不超过 50MB。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "需要生成 MV 的音频 1 个，支持 mp3/wav/aac/m4a；首尾合成模式 10～180 秒。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "音频文件",
+    "name": "audio_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "输出清晰度（影响秒价）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "540P",
+      "value": "540p"
+     },
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "url，唱歌的人脸，需要正面对镜头，近景。图像文件要求：需包含一张清晰的人物正脸，且为视频中出现的人物；文件≤10MB；长宽比≤2，最大边长≤4096；格式 jpeg、jpg、png、bmp、webp。使用该参数，对口型成功率会大幅度上升。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "对口型人脸参考",
+    "name": "lip_ref_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "对真人正面片段做口型同步；开启后每秒追加 0.0688 元。",
+    "label": "对口型",
+    "name": "lip_sync",
+    "options": [
+     {
+      "label": "不对口型",
+      "value": "false"
+     },
+     {
+      "label": "对口型",
+      "value": "true"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   },
+   {
+    "description": "输出比例",
+    "label": "画幅比例",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "直接输入风格文本，可选择预设或自定义，如弥散风格、二次元风格、写实电影感等。",
+    "label": "风格",
+    "name": "style",
+    "required": false,
+    "type": "input"
+   },
+   {
+    "description": "是否自动生成的同步字幕",
+    "label": "字幕",
+    "name": "add_subtitle",
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "最多 3000 字，建议参考“玩法说明”的模板写分镜而非歌词。",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "前端根据音频时长自动填入，用于预扣费；实际按视频时长多退少补。",
+    "label": "预估成片时长(秒)",
+    "name": "duration",
+    "required": true,
+    "type": "number"
+   }
+  ],
+  "tags": [
+   "音乐MV",
+   "图生视频",
+   "音频驱动",
+   "对口型",
+   "自动字幕",
+   "540P/720P/1080P",
+   "多画幅",
+   "按秒计费"
+  ],
+  "type": "video"
+ },
+ "viduq2-cankaosheng": {
+  "display_name": "Vidu Q2 参考生",
+  "input_hint": "上传1-7张参考图片，描述视频内容，AI将以图片中的主体为参考生成风格一致的视频。\r\n\r\n图片为必传，不传图片会失败。",
+  "name": "viduq2-cankaosheng",
+  "params": [
+   {
+    "description": "上传1-7张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "540P",
+      "value": "540p"
+     },
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒）",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "1080p",
+   "高清",
+   "有声视频"
+  ],
+  "type": "video"
+ },
+ "viduq3": {
+  "display_name": "Vidu Q3",
+  "input_hint": "描述视频内容、动作和场景，可上传首帧或首尾帧图片精准控制视频走向。支持4-16秒有声视频，快速/高质量双模式可选\r\n\r\n文生模式下才支持自选宽高比，首帧和首尾帧宽高比跟随首帧图片",
+  "name": "viduq3",
+  "params": [
+   {
+    "description": "上传1~2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "选择生成画质档位：快速（turbo）出片更快、费用更低；高质量（pro）画面更精细、费用更高。",
+    "label": "画质",
+    "name": "model_variant",
+    "options": [
+     {
+      "label": "快速",
+      "value": "turbo"
+     },
+     {
+      "label": "高质量",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "540P",
+      "value": "540p"
+     },
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒）",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "16秒",
+      "value": "16"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例。仅在文生视频（不上传图片）时生效；上传首尾帧图片后，画面比例会自动跟随首帧图。",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "开启后价格减半，任务将在1-5小时内完成",
+    "label": "错峰模式",
+    "name": "off_peak",
+    "options": [
+     {
+      "label": "错峰模式：关",
+      "value": "false"
+     },
+     {
+      "label": "错峰模式：开",
+      "value": "true"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "图生视频",
+   "首帧参考图",
+   "首尾帧",
+   "有声视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "viduq3-cankaosheng": {
+  "display_name": "Vidu Q3 参考生",
+  "input_hint": "上传1-7张参考图片，描述视频内容，AI将以图片中的主体为参考生成主体一致的有声视频。\n\n图片为必传，不传图片会失败。",
+  "name": "viduq3-cankaosheng",
+  "params": [
+   {
+    "description": "选择参考生模型版本",
+    "label": "模型版本",
+    "name": "model_version",
+    "options": [
+     {
+      "label": "标准版",
+      "value": "viduq3"
+     },
+     {
+      "label": "全能版",
+      "value": "viduq3-mix"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "上传1-7张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     },
+     {
+      "label": "540P",
+      "value": "540p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒）",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "16秒",
+      "value": "16"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "自动",
+      "value": "auto"
+     },
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "是否添加水印",
+    "label": "水印",
+    "name": "watermark",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "开启后价格减半，任务将在1-5小时内完成",
+    "label": "错峰模式",
+    "name": "off_peak",
+    "options": [
+     {
+      "label": "错峰模式：关",
+      "value": "false"
+     },
+     {
+      "label": "错峰模式：开",
+      "value": "true"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "1080p",
+   "多图参考",
+   "有声视频",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "viduq3-drama": {
+  "display_name": "Vidu Q3 Drama",
+  "input_hint": "上传1-7张参考图片，描述剧情画面与台词，AI 将以图中主体为参考生成主体一致的有声影视级剧情视频。\n\n图片为必传，不传图片会失败。",
+  "name": "viduq3-drama",
+  "params": [
+   {
+    "description": "上传1-7张参考图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒）",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "精品剧",
+   "多图参考",
+   "有声视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "viduq3-turbo": {
+  "display_name": "Vidu Q3 Turbo",
+  "input_hint": "上传图片生成有声视频：1 张=首帧图生，2 张=首尾帧过渡。支持 540P/720P/1080P，时长 1-16 秒，音视频同步直出，按秒计费。",
+  "name": "viduq3-turbo",
+  "params": [
+   {
+    "description": "上传1~2张图片，1张=首帧，2张=首尾帧。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "540P",
+      "value": "540p"
+     },
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒），按秒计费",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "1秒",
+      "value": "1"
+     },
+     {
+      "label": "2秒",
+      "value": "2"
+     },
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     },
+     {
+      "label": "16秒",
+      "value": "16"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "是否添加水印",
+    "label": "水印",
+    "name": "watermark",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "开启后价格减半，任务将在1-5小时内完成",
+    "label": "错峰模式",
+    "name": "off_peak",
+    "options": [
+     {
+      "label": "错峰模式：关",
+      "value": "false"
+     },
+     {
+      "label": "错峰模式：开",
+      "value": "true"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首尾帧",
+   "有声视频",
+   "1080p",
+   "高清",
+   "极速"
+  ],
+  "type": "video"
+ },
+ "viduq3-turbo-cankaosheng": {
+  "display_name": "Vidu Q3 Turbo 参考生",
+  "input_hint": "上传 1-7 张参考图片并描述视频内容，AI 以图中主体为参考生成有声视频；不传图片则按文字生成。支持 540P/720P/1080P，时长 1-16 秒，按秒计费。",
+  "name": "viduq3-turbo-cankaosheng",
+  "params": [
+   {
+    "description": "上传1-7张参考图片（不传则走文生视频）。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "540P",
+      "value": "540p"
+     },
+     {
+      "label": "720P",
+      "value": "720p"
+     },
+     {
+      "label": "1080P",
+      "value": "1080p"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒），按秒计费",
+    "label": "时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "5秒",
+      "value": "5"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "7秒",
+      "value": "7"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     },
+     {
+      "label": "11秒",
+      "value": "11"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "13秒",
+      "value": "13"
+     },
+     {
+      "label": "14秒",
+      "value": "14"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     },
+     {
+      "label": "16秒",
+      "value": "16"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "视频画面比例",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "描述你想要生成的视频内容（文本提示词，媒体生成接口要求必填）",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "是否添加水印",
+    "label": "水印",
+    "name": "watermark",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "开启后价格减半，任务将在1-5小时内完成",
+    "label": "错峰模式",
+    "name": "off_peak",
+    "options": [
+     {
+      "label": "错峰模式：关",
+      "value": "false"
+     },
+     {
+      "label": "错峰模式：开",
+      "value": "true"
+     }
+    ],
+    "required": true,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "文生视频",
+   "有声视频",
+   "1080p",
+   "多图参考",
+   "极速"
+  ],
+  "type": "video"
+ },
+ "wan2.2-animate-mix": {
+  "display_name": "万相-视频换人",
+  "input_hint": "无需输入提示词，上传人物图片和参考视频即可将视频中的人物替换为图片中的人物。图片建议人脸清晰、光线均匀、无遮挡",
+  "name": "wan2.2-animate-mix",
+  "params": [
+   {
+    "description": "描述期望生成的画面与动作的文本提示词（媒体生成接口要求必填）",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1张参考图片URL，支持 jpg/jpeg/png。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "image_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "上传1个参考视频URL，支持 mp4/mov。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "video_url",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "生成视频的模式。标准模式（wan-std）性价比高、生成速度更快；专业模式（wan-pro）生成质量更佳、画面更精细。",
+    "label": "生成模式",
+    "name": "mode",
+    "options": [
+     {
+      "label": "标准模式",
+      "value": "wan-std"
+     },
+     {
+      "label": "专业模式",
+      "value": "wan-pro"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "视频换人"
+  ],
+  "type": "video"
+ },
+ "wan2.6-cankaosheng": {
+  "display_name": "万相 2.6 参考生",
+  "input_hint": "描述视频内容，上传参考图片作为角色形象参考（最多5张）",
+  "name": "wan2.6-cankaosheng",
+  "params": [
+   {
+    "description": "描述视频内容，用character1、character2引用参考角色",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片，每张包含一个主体角色，最多5张。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "reference_urls",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "快速模式生成速度更快，高质量模式画面更精细",
+    "label": "生成质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "快速",
+      "value": "fast"
+     },
+     {
+      "label": "高质量",
+      "value": "standard"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频宽高比",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "2秒",
+      "value": "2"
+     },
+     {
+      "label": "4秒",
+      "value": "4"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "8秒",
+      "value": "8"
+     },
+     {
+      "label": "10秒",
+      "value": "10"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "单镜头或多镜头叙事模式",
+    "label": "镜头类型",
+    "name": "shot_type",
+    "options": [
+     {
+      "label": "单镜头",
+      "value": "single"
+     },
+     {
+      "label": "多镜头",
+      "value": "multi"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "参考生视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "wan2.6-image": {
+  "display_name": "万相 2.6 图像",
+  "input_hint": "描述画面中的内容、风格及构图，可上传1-4张参考图进行风格迁移或主体一致性生成",
+  "name": "wan2.6-image",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-4张图片作为参考，可进行风格迁移或主体一致性生成。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "生成图片的尺寸比例",
+    "label": "宽高比",
+    "name": "size",
+    "options": [
+     {
+      "label": "正方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "竖版 2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "横版 3:2",
+      "value": "3:2"
+     },
+     {
+      "label": "竖版 3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "横版 4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "竖版 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "横版 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "超宽 21:9",
+      "value": "21:9"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "智能改写提示词，提升生成效果",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "wan2.6-shouzheng": {
+  "display_name": "万相 2.6 首帧",
+  "input_hint": "描述视频内容和动作，上传图片作为视频首帧，不上传则为文生视频模式\r\n可上传音频文件（WAV/MP3，3-30秒）实现音画同步，不上传则自动生成音效\r\n温馨提示：如有传图，视频随图走，横图为横屏，竖图为竖屏",
+  "name": "wan2.6-shouzheng",
+  "params": [
+   {
+    "description": "描述视频内容和动作，1500字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传图片作为视频首帧，不上传则为文生视频。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "img_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "自定义音频，支持WAV/MP3，时长3-30秒。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "音频文件",
+    "name": "audio_url",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "快速模式生成速度更快，高质量模式画面更精细",
+    "label": "生成质量",
+    "name": "quality",
+    "options": [
+     {
+      "label": "快速",
+      "value": "fast"
+     },
+     {
+      "label": "高质量",
+      "value": "standard"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频宽高比（文生视频模式时使用）",
+    "label": "宽高比",
+    "name": "aspect_ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "单镜头或多镜头叙事模式",
+    "label": "镜头类型",
+    "name": "shot_type",
+    "options": [
+     {
+      "label": "单镜头",
+      "value": "single"
+     },
+     {
+      "label": "多镜头",
+      "value": "multi"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "智能改写提示词，提升生成效果",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "文生视频",
+   "有声视频",
+   "1080p",
+   "首帧参考图",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "wan2.7-cankaosheng": {
+  "display_name": "万相 2.7 参考生",
+  "input_hint": "输入提示词生成视频，或上传参考图片/视频来引导视频生成\r\n\r\n如上传参考视频后，只能选择生成3-9秒的视频",
+  "name": "wan2.7-cankaosheng",
+  "params": [
+   {
+    "description": "描述想要生成的视频内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传参考图片引导视频生成。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "reference_urls",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "上传参考视频引导视频生成。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考视频",
+    "name": "reference_video",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "视频分辨率",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "视频时长（秒）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "智能优化提示词",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   },
+   {
+    "description": "视频宽高比",
+    "label": "宽高比",
+    "name": "ratio",
+    "options": [
+     {
+      "label": "16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "3:4",
+      "value": "3:4"
+     }
+    ],
+    "required": false,
+    "type": "radio"
+   },
+   {
+    "description": "内部生成模式",
+    "label": "生成模式",
+    "name": "_mode",
+    "options": [
+     {
+      "label": "参考生视频",
+      "value": "wan2.7-r2v"
+     }
+    ],
+    "required": false,
+    "type": "select"
+   }
+  ],
+  "tags": [
+   "文生视频",
+   "参考生视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "wan2.7-image": {
+  "display_name": "万相 2.7 图像",
+  "input_hint": "描述画面内容、风格及构图，可上传1-9张参考图进行风格迁移或图像编辑",
+  "name": "wan2.7-image",
+  "params": [
+   {
+    "description": "描述你想要生成的图片内容",
+    "label": "提示词",
+    "name": "prompt",
+    "required": true,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1-9张图片作为参考，可进行风格迁移或图像编辑。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "参考图片",
+    "name": "images",
+    "required": false,
+    "type": "upload"
+   },
+   {
+    "description": "高质量模式生成效果更好，标准模式速度更快",
+    "label": "质量模式",
+    "name": "quality",
+    "options": [
+     {
+      "label": "标准",
+      "value": "standard"
+     },
+     {
+      "label": "高质量",
+      "value": "pro"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成图片的尺寸比例",
+    "label": "宽高比",
+    "name": "size",
+    "options": [
+     {
+      "label": "正方形 1:1",
+      "value": "1:1"
+     },
+     {
+      "label": "竖版 3:4",
+      "value": "3:4"
+     },
+     {
+      "label": "横版 4:3",
+      "value": "4:3"
+     },
+     {
+      "label": "竖版 9:16",
+      "value": "9:16"
+     },
+     {
+      "label": "横版 16:9",
+      "value": "16:9"
+     },
+     {
+      "label": "竖版 2:3",
+      "value": "2:3"
+     },
+     {
+      "label": "横版 3:2",
+      "value": "3:2"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   }
+  ],
+  "tags": [
+   "文生图",
+   "图生图"
+  ],
+  "type": "image"
+ },
+ "wan2.7-shouweizhen": {
+  "display_name": "万相 2.7 首尾帧",
+  "input_hint": "上传1-2张图片，1张为首帧生视频，2张为首尾帧生视频",
+  "name": "wan2.7-shouweizhen",
+  "params": [
+   {
+    "description": "描述视频内容和动作，5000字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传1张图片为首帧生视频，2张图片为首尾帧生视频。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "首尾帧",
+    "name": "images",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "智能改写提示词，提升生成效果",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "图生视频",
+   "首尾帧",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ },
+ "wan2.7-xuxie": {
+  "display_name": "万相 2.7 视频续写",
+  "input_hint": "上传首段视频(MP4/MOV格式，2-10秒，≤100MB)，可选添加尾帧图片引导视频方向，描述续写内容生成视频\r\n\r\n最后选择生成视频的时长必须大于上传视频的时长",
+  "name": "wan2.7-xuxie",
+  "params": [
+   {
+    "description": "描述视频续写内容和动作，5000字符以内",
+    "label": "提示词",
+    "name": "prompt",
+    "required": false,
+    "type": "textarea"
+   },
+   {
+    "description": "上传首段视频，可选添加尾帧图片。（传可公开访问的文件直链 URL；⚠️ 复数名参数（images/videos/clips/files/attachments/reference_urls）请一律传数组，即使只有一个文件也要写成 [\"https://...\"]，直接传字符串可能被部分模型判为参数格式错误；图片/音频类文件也支持 data:<mime>;base64,<数据> 内联传入，单文件解码后默认≤10MB、单次请求所有 base64 合计解码后默认≤30MB、请求体总大小默认≤50MB，视频文件仍需传 URL。⚠️ base64 内联仅 POST /v1/media/generate 支持：OpenAI 兼容端点 /v1/images/generations、/v1/images/edits 的 JSON 传参只接受 http/https 公网直链（edits 可用 multipart 传文件）。平台不提供文件托管，URL 方式请自行上传至 COS/CDN 等对象存储后传入直链）",
+    "label": "视频续写",
+    "name": "clips",
+    "required": true,
+    "type": "upload"
+   },
+   {
+    "description": "视频清晰度（影响价格）",
+    "label": "分辨率",
+    "name": "resolution",
+    "options": [
+     {
+      "label": "720P",
+      "value": "720P"
+     },
+     {
+      "label": "1080P",
+      "value": "1080P"
+     }
+    ],
+    "required": true,
+    "type": "radio"
+   },
+   {
+    "description": "生成视频的秒数（影响价格）",
+    "label": "视频时长",
+    "name": "duration",
+    "options": [
+     {
+      "label": "3秒",
+      "value": "3"
+     },
+     {
+      "label": "6秒",
+      "value": "6"
+     },
+     {
+      "label": "9秒",
+      "value": "9"
+     },
+     {
+      "label": "12秒",
+      "value": "12"
+     },
+     {
+      "label": "15秒",
+      "value": "15"
+     }
+    ],
+    "required": true,
+    "type": "select"
+   },
+   {
+    "description": "智能改写提示词，提升生成效果",
+    "label": "提示词优化",
+    "name": "prompt_extend",
+    "options": [
+     {
+      "label": "开启",
+      "value": "true"
+     },
+     {
+      "label": "关闭",
+      "value": "false"
+     }
+    ],
+    "required": false,
+    "type": "switch"
+   }
+  ],
+  "tags": [
+   "视频续写",
+   "视频转视频",
+   "1080p",
+   "高清"
+  ],
+  "type": "video"
+ }
+}
