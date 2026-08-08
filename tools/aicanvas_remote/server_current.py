@@ -1040,6 +1040,14 @@ COMIC_LOCAL_MODEL_CATALOG = {
             max_reference_images=9,
         ),
         _comic_video_model(
+            "hailuo-h3-quannengcankao",
+            "海螺 H3 全能参考",
+            "api-gateway",
+            "MiniMax 海螺 H3 多模态全能参考模型，支持文本、图片、视频和音频任意组合参考。 适合复杂素材融合、角色风格统一和高质量有声视频生成。",
+            label="多模态参考",
+            max_reference_images=9,
+        ),
+        _comic_video_model(
             "viduq3-turbo",
             "Vidu Q3 Turbo",
             "api-gateway",
@@ -3295,6 +3303,7 @@ API_GATEWAY_VIDEO_MODEL_IDS = {
     "kling-v3-omni-cankao",
     "happyhorse-r2v",
     "kwvideo-v2-quannengcankao",
+    "hailuo-h3-quannengcankao",
     "viduq3-turbo",
     "veo3.1",
     "kwvideo-v2",
@@ -8214,6 +8223,7 @@ AIC_SUBJECT_IMAGE_VIDEO_MODELS = {
     "doubao-seedance-2-0-mini-260615",
     "kwvideo-v2-ref",
     "kwvideo-v2-quannengcankao",
+    "hailuo-h3-quannengcankao",
     "kling-v3-omni-cankao",
     "kling-motion-control-v3",
     "happyhorse-1.1-r2v",
@@ -8231,6 +8241,7 @@ AIC_SUBJECT_VOICE_VIDEO_MODELS = {
     "doubao-seedance-2-0-fast-260128",
     "doubao-seedance-2-0-mini-260615",
     "kwvideo-v2-quannengcankao",
+    "hailuo-h3-quannengcankao",
     "kling-avatar-image2video",
 }
 
@@ -8239,6 +8250,7 @@ AIC_SUBJECT_VOICE_MODEL_LABELS = (
     ("doubao-seedance-2-0-fast-260128", "火山官方 Seedance 2.0 快速"),
     ("doubao-seedance-2-0-mini-260615", "火山官方 Seedance 2.0 Mini"),
     ("kwvideo-v2-quannengcankao", "SD 2.0 全能参考"),
+    ("hailuo-h3-quannengcankao", "海螺 H3 全能参考"),
     ("kling-avatar-image2video", "Kling Digital Human 数字人"),
 )
 
