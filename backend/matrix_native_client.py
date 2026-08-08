@@ -2682,6 +2682,7 @@ _AGENT_VIDEO_REFERENCE_LIMITS = {
     "happyhorse-1.1-r2v": 5,
     "happyhorse-video-edit": 5,
     "hailuo-2.3": 1,
+    "hailuo-h3-quannengcankao": 9,
     "wan2.7-cankaosheng": 4,
     "wan2.7-shouweizhen": 2,
 }
@@ -23580,16 +23581,27 @@ def _build_hybrid_video_edit_request(job, segment, source_video_url):
     ])).strip()
     duration = max(1, min(int(round(float(segment.get("duration") or 8))), 15))
     candidates = _replacement_model_candidates(job)
+    # LK888 契约:所有模型特定参数(含参考图)必须放进 params 才会被上游读到;
+    # 顶层 image_urls 保留只为向后兼容旧调用方/测试。不同模型 upload 字段名不同
+    # (hailuo-h3/kwvideo-v2 是 `image_url` 单数、viduq3 是 `images` 复数),
+    # 都塞进 params 里让上游按 schema 各取所需。refs 为空时不下发,避免让 LK888
+    # 把空数组当成"提供了但为空"的输入触发别的校验。
+    params = {
+        "duration": duration,
+        "resolution": job.get("resolution") or "720p",
+        "aspect_ratio": job.get("aspectRatio") or "9:16",
+    }
+    if refs:
+        params["image_url"] = refs
+        params["images"] = refs
+        params["image_urls"] = refs
+        params["reference_images"] = refs
     return candidates[0], {
         "prompt": prompt[:1800],
         "source_video_url": source_url,
         "image_urls": refs,
         "model_candidates": candidates,
-        "params": {
-            "duration": duration,
-            "resolution": job.get("resolution") or "720p",
-            "aspect_ratio": job.get("aspectRatio") or "9:16",
-        },
+        "params": params,
     }
 
 
@@ -23606,6 +23618,13 @@ def _replacement_remote_video_payload_for_model(payload, model):
     model_name = str(model or "").strip().lower()
     if "happyhorse" in model_name:
         params["resolution"] = _lk888_video_edit_resolution(params.get("resolution") or "720p", model)
+    elif model_name == "hailuo-h3-quannengcankao":
+        # LK888 hailuo-h3 只接受 "768P" 或 "2K";通用默认 "720p"/"1080p" 会 400。
+        current = str(params.get("resolution") or "").strip().lower()
+        if current in ("2k", "1440p", "2160p", "4k", "1080p", "1080P".lower()):
+            params["resolution"] = "2K"
+        else:
+            params["resolution"] = "768P"
     remote["params"] = params
     return remote
 

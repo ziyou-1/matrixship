@@ -3066,6 +3066,85 @@ class VideoReplacementV2Test(unittest.TestCase):
 
         self.assertEqual(candidates[0], "hailuo-h3-quannengcankao")
 
+    def test_hybrid_video_edit_puts_reference_images_into_params_for_lk888(self):
+        # LK888 只读 params 里的字段,顶层 image_urls 被忽略。
+        # 覆盖 image_url(单数,hailuo-h3/kwvideo-v2)、images(复数,viduq3)、
+        # image_urls、reference_images 四种别名。
+        job = {
+            "productImageUrls": ["https://x/product.png"],
+            "modelFaceUrl": "https://x/face-front.png",
+            "sceneImageUrl": "https://x/scene.png",
+        }
+        _model, payload = self.client._build_hybrid_video_edit_request(
+            job, {"duration": 8, "prompt": "keep motion"}, "https://x/source.mp4"
+        )
+        expected_refs = [
+            "https://x/product.png",
+            "https://x/face-front.png",
+            "https://x/scene.png",
+        ]
+        self.assertEqual(payload["params"]["image_url"], expected_refs)
+        self.assertEqual(payload["params"]["images"], expected_refs)
+        self.assertEqual(payload["params"]["image_urls"], expected_refs)
+        self.assertEqual(payload["params"]["reference_images"], expected_refs)
+        self.assertEqual(payload["image_urls"], expected_refs)
+
+    def test_hybrid_video_edit_omits_image_fields_when_no_refs(self):
+        # refs 为空时不下发空数组,避免 LK888 触发"提供了但为空"的分支。
+        job = {}
+        _model, payload = self.client._build_hybrid_video_edit_request(
+            job, {"duration": 8, "prompt": "text to video"}, "https://x/source.mp4"
+        )
+        self.assertNotIn("image_url", payload["params"])
+        self.assertNotIn("images", payload["params"])
+        self.assertNotIn("image_urls", payload["params"])
+        self.assertNotIn("reference_images", payload["params"])
+
+    def test_remote_video_payload_maps_hailuo_h3_resolution_720p_to_768P(self):
+        payload = {
+            "prompt": "x",
+            "source_video_url": "https://x/source.mp4",
+            "image_urls": ["https://x/ref.png"],
+            "params": {
+                "duration": 8,
+                "resolution": "720p",
+                "aspect_ratio": "9:16",
+                "image_url": ["https://x/ref.png"],
+            },
+        }
+        normalized = self.client._replacement_remote_video_payload_for_model(
+            payload, "hailuo-h3-quannengcankao"
+        )
+        self.assertEqual(normalized["params"]["resolution"], "768P")
+        self.assertEqual(normalized["params"]["image_url"], ["https://x/ref.png"])
+        self.assertNotIn("source_video_url", normalized)
+
+    def test_remote_video_payload_maps_hailuo_h3_resolution_1080p_to_2K(self):
+        payload = {
+            "params": {"duration": 6, "resolution": "1080p", "aspect_ratio": "16:9"},
+        }
+        normalized = self.client._replacement_remote_video_payload_for_model(
+            payload, "hailuo-h3-quannengcankao"
+        )
+        self.assertEqual(normalized["params"]["resolution"], "2K")
+
+    def test_remote_video_payload_preserves_hailuo_h3_native_resolutions(self):
+        for input_res in ("768P", "768p", "2K", "2k"):
+            payload = {"params": {"resolution": input_res}}
+            normalized = self.client._replacement_remote_video_payload_for_model(
+                payload, "hailuo-h3-quannengcankao"
+            )
+            self.assertIn(
+                normalized["params"]["resolution"],
+                ("768P", "2K"),
+                msg="input=%s got=%s" % (input_res, normalized["params"]["resolution"]),
+            )
+
+    def test_agent_video_reference_limit_includes_hailuo_h3(self):
+        # Agent 模式下 hailuo-h3 上限 9 张(LK888 spec)。
+        limit = self.client._agent_video_reference_limit("hailuo-h3-quannengcankao")
+        self.assertEqual(limit, 9)
+
     def test_principal_replacement_model_candidates_do_not_fallback_to_reference_video(self):
         candidates = self.client._replacement_model_candidates({
             "principalReplacementMode": "source_video_edit",
