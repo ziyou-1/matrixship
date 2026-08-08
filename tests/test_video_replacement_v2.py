@@ -3145,6 +3145,103 @@ class VideoReplacementV2Test(unittest.TestCase):
         limit = self.client._agent_video_reference_limit("hailuo-h3-quannengcankao")
         self.assertEqual(limit, 9)
 
+    def test_hybrid_video_edit_carries_audio_reference_from_segment(self):
+        # _prepare_replacement_audio_reference 会往 segment 写 audioReferenceUrl,
+        # build 阶段只搬进 payload,不做网络调用。
+        job = {
+            "productImageUrls": ["https://x/product.png"],
+        }
+        segment = {
+            "duration": 8,
+            "prompt": "voice match",
+            "audioReferenceUrl": "https://x/tts.mp3",
+        }
+        _model, payload = self.client._build_hybrid_video_edit_request(
+            job, segment, "https://x/source.mp4"
+        )
+        self.assertEqual(payload["audio_reference_url"], "https://x/tts.mp3")
+
+    def test_remote_payload_maps_audio_reference_to_hailuo_h3_params_audio_url(self):
+        payload = {
+            "audio_reference_url": "https://x/tts.mp3",
+            "params": {"duration": 8, "resolution": "720p", "aspect_ratio": "9:16"},
+        }
+        remote = self.client._replacement_remote_video_payload_for_model(
+            payload, "hailuo-h3-quannengcankao"
+        )
+        self.assertEqual(remote["params"]["audio_url"], ["https://x/tts.mp3"])
+        # audio_reference_url 是内部载具,不能透传到 LK888
+        self.assertNotIn("audio_reference_url", remote)
+
+    def test_remote_payload_strips_audio_reference_for_non_audio_ref_model(self):
+        # viduq3-turbo-cankaosheng 的 schema 没有 audio_url 参数,不能透传
+        # audio_reference_url,也不能塞 params.audio_url。
+        payload = {
+            "audio_reference_url": "https://x/tts.mp3",
+            "params": {"duration": 8, "resolution": "720p", "aspect_ratio": "9:16"},
+        }
+        remote = self.client._replacement_remote_video_payload_for_model(
+            payload, "viduq3-turbo-cankaosheng"
+        )
+        self.assertNotIn("audio_reference_url", remote)
+        self.assertNotIn("audio_url", remote["params"])
+
+    def test_prepare_audio_reference_reuses_cached_tts_and_populates_segment(self):
+        job = {"model": "hailuo-h3-quannengcankao", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 1, "duration": 8, "script": "hello", "ttsUrl": "https://x/prev-tts.mp3"}
+        # 已有 ttsUrl 时不能再打 lk888_tts_voice,否则会重复扣费。
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            url = self.client._prepare_replacement_audio_reference(job, segment)
+        tts_mock.assert_not_called()
+        self.assertEqual(url, "https://x/prev-tts.mp3")
+        self.assertEqual(segment["audioReferenceUrl"], "https://x/prev-tts.mp3")
+
+    def test_prepare_audio_reference_generates_tts_when_missing(self):
+        job = {"model": "hailuo-h3-quannengcankao", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 2, "duration": 8, "script": "line two"}
+        with mock.patch.object(
+            self.client, "lk888_tts_voice", return_value="https://x/fresh-tts.mp3"
+        ) as tts_mock:
+            url = self.client._prepare_replacement_audio_reference(job, segment)
+        tts_mock.assert_called_once()
+        self.assertEqual(url, "https://x/fresh-tts.mp3")
+        self.assertEqual(segment["audioReferenceUrl"], "https://x/fresh-tts.mp3")
+        self.assertEqual(segment["ttsUrl"], "https://x/fresh-tts.mp3")
+
+    def test_prepare_audio_reference_skips_when_primary_model_does_not_support_audio(self):
+        # 主候选是 viduq3-turbo-cankaosheng,不该预生成 TTS。
+        job = {
+            "model": "viduq3-turbo-cankaosheng",
+            "audioMode": "tts",
+            "voiceId": "Zephyr",
+        }
+        segment = {"index": 3, "duration": 8, "script": "should skip"}
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            url = self.client._prepare_replacement_audio_reference(job, segment)
+        tts_mock.assert_not_called()
+        self.assertEqual(url, "")
+        self.assertNotIn("audioReferenceUrl", segment)
+
+    def test_prepare_audio_reference_skips_when_audio_mode_is_auto(self):
+        # auto 模式(用视频自带音频),不应预生成。
+        job = {"model": "hailuo-h3-quannengcankao", "audioMode": "auto"}
+        segment = {"index": 4, "duration": 8, "script": "text"}
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            url = self.client._prepare_replacement_audio_reference(job, segment)
+        tts_mock.assert_not_called()
+        self.assertEqual(url, "")
+
+    def test_prepare_audio_reference_degrades_when_tts_fails(self):
+        # TTS 失败不能阻塞视频生成,应静默降级。
+        job = {"model": "hailuo-h3-quannengcankao", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 5, "duration": 8, "script": "tts will fail"}
+        with mock.patch.object(
+            self.client, "lk888_tts_voice", side_effect=RuntimeError("upstream down")
+        ):
+            url = self.client._prepare_replacement_audio_reference(job, segment)
+        self.assertEqual(url, "")
+        self.assertNotIn("audioReferenceUrl", segment)
+
     def test_principal_replacement_model_candidates_do_not_fallback_to_reference_video(self):
         candidates = self.client._replacement_model_candidates({
             "principalReplacementMode": "source_video_edit",

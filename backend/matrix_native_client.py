@@ -23596,10 +23596,15 @@ def _build_hybrid_video_edit_request(job, segment, source_video_url):
         params["images"] = refs
         params["image_urls"] = refs
         params["reference_images"] = refs
+    # audioReferenceUrl 由 _prepare_replacement_audio_reference 预生成(TTS/上传裁切),
+    # 只在候选模型支持 audio_url upload 参数时才 pre-gen。这里只搬进 payload,
+    # 具体塞哪个 params 字段名由 _replacement_remote_video_payload_for_model 按模型决定。
+    audio_ref = str(segment.get("audioReferenceUrl") or "").strip()
     return candidates[0], {
         "prompt": prompt[:1800],
         "source_video_url": source_url,
         "image_urls": refs,
+        "audio_reference_url": audio_ref,
         "model_candidates": candidates,
         "params": params,
     }
@@ -23609,10 +23614,21 @@ def _replacement_remote_video_payload(payload):
     payload = dict(payload or {})
     payload.pop("source_video_url", None)
     payload.pop("model_candidates", None)
+    # audio_reference_url 只是 build 阶段的载具,发往 LK888 时按模型改名(hailuo-h3 -> params.audio_url);
+    # 不支持 audio 参考的模型不能把它带在顶层,否则 LK888 会报 unknown param。
+    payload.pop("audio_reference_url", None)
     return payload
 
 
+# 支持 params.audio_url 参考音频的 LK888 模型集合。加新模型请同步 grep 一遍
+# _prepare_replacement_audio_reference 的 gate,两处必须一致。
+_LK888_REPLACEMENT_AUDIO_REF_MODELS = frozenset((
+    "hailuo-h3-quannengcankao",
+))
+
+
 def _replacement_remote_video_payload_for_model(payload, model):
+    audio_ref = str((payload or {}).get("audio_reference_url") or "").strip()
     remote = _replacement_remote_video_payload(payload)
     params = dict(remote.get("params") or {})
     model_name = str(model or "").strip().lower()
@@ -23625,6 +23641,10 @@ def _replacement_remote_video_payload_for_model(payload, model):
             params["resolution"] = "2K"
         else:
             params["resolution"] = "768P"
+    if audio_ref and model_name in _LK888_REPLACEMENT_AUDIO_REF_MODELS:
+        # LK888 hailuo-h3 spec:audio_url 字段名单数、值是数组,「最多 3 段总 ≤15 秒」。
+        # 目前只塞 1 段(单个片段的 TTS/上传音频裁切),后续要多段合成时改这里。
+        params["audio_url"] = [audio_ref]
     remote["params"] = params
     return remote
 
@@ -24832,6 +24852,42 @@ def _replacement_segment_audio_url_for_lipsync(job, segment):
     return sound_url
 
 
+def _prepare_replacement_audio_reference(job, segment):
+    """当主候选模型支持参考音色(hailuo-h3),提前生成 TTS 或取上传音频,
+    结果写入 segment["audioReferenceUrl"] 供 _build_hybrid_video_edit_request 读取。
+
+    只在 audioMode 是 tts/uploaded 且主候选就是 hailuo-h3 时触发。
+    如果 TTS 生成失败,吞掉异常继续跑视频生成(降级为不带音色参考,不是硬失败),
+    以免"想要更好的音色一致性"反而把整段生成搞挂。
+    """
+    job = job or {}
+    segment = segment or {}
+    audio_mode = _replacement_audio_mode(job)
+    if audio_mode not in ("tts", "uploaded"):
+        return ""
+    try:
+        candidates = _replacement_model_candidates(job)
+    except Exception:
+        return ""
+    if not candidates:
+        return ""
+    primary = str(candidates[0] or "").strip().lower()
+    if primary not in _LK888_REPLACEMENT_AUDIO_REF_MODELS:
+        return ""
+    existing = str(segment.get("audioReferenceUrl") or "").strip()
+    if _is_remote_fetchable_media_url(existing):
+        return existing
+    try:
+        url = _replacement_segment_audio_url_for_lipsync(job, segment)
+    except Exception as exc:
+        log("replacement audio ref pre-gen failed, continuing without: %s" % exc)
+        return ""
+    if not _is_remote_fetchable_media_url(url):
+        return ""
+    segment["audioReferenceUrl"] = url
+    return url
+
+
 def _replacement_video_lipsync_model(job=None):
     value = str((job or {}).get("videoLipSyncModel") or "").strip()
     if value:
@@ -25815,6 +25871,9 @@ def _run_hybrid_non_talking_segment(job, segment):
             except Exception:
                 pass
         _prepare_replacement_product_anchor(job, segment, out_dir)
+        # 主候选是 hailuo-h3 且是 AI 配音/上传配音模式时,预生成音频作为 audio_url 参考,
+        # 让模型按目标音色/节奏生成视频。降级失败不阻塞后续视频生成。
+        _prepare_replacement_audio_reference(job, segment)
         model, payload = _build_hybrid_video_edit_request(job, segment, source_url)
         candidates = list(payload.get("model_candidates") or [model])
         edited_url = ""
