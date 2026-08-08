@@ -1,3 +1,14 @@
+﻿﻿## 2026-08-08 同款替换 / 图文同款换位台账布局
+- 定位方式说明：`docs/IMPLEMENTATION.md` 存在广播式重复（同一 `#L` 引用最多重复 67 次，`matrix_native_client.py#L4733-L4804` 等），行号引用整体不可信，故本条只用符号名定位，不写行号。
+- `backend/matrix_native_client.py` `THEMES`：dark / light 各新增换位台账状态色 `stKeep`/`stSwap`/`stOwe`/`stDone`/`stFail`，以及禁用态与勾选框 token `disBg`/`disBorder`/`checkBg`/`checkBorder`/`checkDisBg`/`checkDisBorder`。亮色下状态色统一压深以保证白卡上的对比度。
+- `backend/matrix_native_client.py` `build_qss()`：新增统一字阶与分区样式（`#eyebrow` 10.5/800、`#zoneTitle` 13.5/750、`#fieldValue` 12.5/600、`#meta` 11/500、`#slotIndex` 等宽数字），新增 `#zone`/`#readyBar`/`#hline`/`#quiet` 与 `QProgressBar` 样式；`QPushButton:disabled`、`QLineEdit:disabled` 系列与 `QCheckBox::indicator` 改为读取上述 token；补充 `QScrollBar:horizontal`。
+- `backend/matrix_native_client.py` 新增共用构件：`_state_color()`/`_style_state_pill()`/`state_pill()`、`zone_card()`、`field_label()`/`field_grid()`/`button_cell()`、`SwapRail`（横向连接线，QPainter）、`SwapSlotRow`（竖向状态脊线）、`ReadyBar`（行动条 + 还差什么）。
+- `backend/matrix_native_client.py` `XhsNoteReplacementPage.__init__`：重排为 原片 / 你的信息 / 换位台账 / 行动条 / 生成结果 五个分区；两条缩略图带共用列距并通过 `_on_swap_scrolled()` 联动滚动，中间插入 `SwapRail`；新增 `_sync_swap_state()` 汇总缺图与必填项，并在 `_render_replacement_slots()`、`_fill_replacement_paths()`、`_start_from_collection()` 调用。
+- `backend/matrix_native_client.py` `VideoReplacementPage.__init__`：重排为 原片 / 替换素材 / 声音与模型 / 行动条 / 生成 / 审核 / 核对 七个分区；人物、产品、场景各为一条 `SwapSlotRow`；新增 `_sync_swap_ledger()`，并在 `pick_products()`/`pick_face()`/`pick_scene()`/`pick_replacement_audio()`/`_sync_person_controls()`/`load_source()`、方案就绪与虚拟模特就绪分支调用。
+- 未改动任何构件的构造语句文本（`self.b_face`、`self.face_authorized`、`self.person_full_body`、`self.b_virtual`、`self.b_retry_failed`、`self.no_person_mode` 等），仅改变其所属布局，以满足既有的源码子串断言。未新增任何非空 tooltip，说明文字一律改为页面内可见的 hint / meta 行。
+- 遗留问题（本次未处理，需单独决定）：本次改动使 `matrix_native_client.py` 净增约 504 行，`docs/IMPLEMENTATION.md` 中指向该文件的 `#L` 引用共 1017 处（去重后 808 处），其中 533 处因本次改动整体下移，另有 144 处在本次改动前即已失准。考虑到该文档存在 67 倍广播式重复、且主目录同一文件另有大量未提交改动，未对这些行号做批量重写。
+- 验证与影响：全量 `unittest` 1367 项无新增失败（2 项 error 为环境缺失 `playwright` 与 `backend/.env.dev`，已在干净树复现）；`py_compile` 通过；暗色 / 亮色双主题离屏截图核对。纯本地客户端展示层，不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧界面。
+
 ﻿## 2026-08-07 下载失败的成品可恢复
 - `backend/matrix_native_client.py`(`_PRODGEN_RUNTIME_KEYS`):新增 `pendingDownloadRecovery`。`regen` 是黑名单复制,不加会把上一条的结果 URL 带进新条目。
 - `backend/matrix_native_client.py`(`_prodgen_entry_by_id` / `_prodgen_download_recovery` / `_prodgen_download_error_text`):按 id 取条目、判定是否可恢复(必须有 `resultUrl`)、把网络错误翻成不含 host 与 SSL 栈的中文文案(403 引导「重新生成」而非「恢复下载」)。

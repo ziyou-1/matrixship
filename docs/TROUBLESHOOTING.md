@@ -1,3 +1,13 @@
+﻿﻿## 2026-08-08 亮色主题下主色按钮、勾选框、禁用按钮看不见
+- 现象：切换到亮色主题后，`#primary` 主色按钮（如「生成同款预览」「执行替换生成」）显示为白底白字几乎不可见；`QCheckBox` 勾选框在白卡上完全看不到方框，其中包括「我确认已获得该人物素材授权」这类必须勾选的授权确认项；禁用态按钮为白字压浅灰，读不出按钮文案。
+- 根因一（主色按钮）：页面容器调用了无类型选择器的 `setStyleSheet("background:transparent")`。Qt 中在父控件上设置的无类型选择器会沿继承作用到全部子控件，从而把子级 `#primary` 按钮的主色背景一并刷成透明；暗色主题下白字压深色卡片仍可辨认，因此该问题长期只在亮色主题下暴露。
+- 根因二（勾选框）：`QCheckBox::indicator` 的描边与底色在 QSS 中硬编码为 `rgba(255,255,255,*)`，亮色主题的卡片本身是白色，白描边压白卡等于没有边框。
+- 根因三（禁用态）：亮色主题 `primaryDisBg`/`primaryDisText` 为浅灰底 + 纯白字；`QPushButton:disabled` 同样硬编码 `rgba(255,255,255,*)`。
+- 修复：页面容器改用 QSS 既有的 `QWidget#page` 规则代替 `setStyleSheet`；`QCheckBox::indicator`、`QPushButton:disabled`、`QLineEdit:disabled` 系列改为读取 `THEMES` 中新增的 `checkBg`/`checkBorder`/`checkDisBg`/`checkDisBorder`/`disBg`/`disBorder` token；亮色 `primaryDisText` 由纯白改为可读的中性色。详见 `backend/matrix_native_client.py` 的 `THEMES` 与 `build_qss()`。
+- 排查：在容器控件上写样式表时，一律使用带类型或带 objectName 的选择器（如 `QScrollArea{...}`、`QWidget#page`），不要写裸 `background:transparent`；新增控件后务必在亮色和暗色两个主题下各截一次图，只看暗色会漏掉这一整类问题。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"` 1367 项无新增失败；`py_compile backend\matrix_native_client.py`；暗色 / 亮色双主题离屏截图核对按钮与勾选框可见性。
+- 回滚：恢复 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
 ﻿## 2026-08-06 矩阵侧扣费十倍超收、且漫剧消费账单看不到
 - 现象：漫剧后台的消费账单里看不到任何来自矩阵侧的消费，用户余额却在下降。核对时会发现余额比 `computing_power_records` / `model_usage_logs` 的最后一条记录少一截（排查当天账号 44 少了 77.23），像是"丢钱"。同时同一个模型经矩阵侧调用扣的算力约为漫剧侧的十倍。
 - 根因一（十倍超收）：`backend/central_server.py` 的 `MAINDB_YUAN_TO_POWER` 取 10，注释依据是"与漫剧 recharge_packages 一致：50元=500算力"。但线上 `recharge_packages` 实际是 `50元档=50算力、100元档=105、500元档=550、1000元档=1150`，**本来就是 1 元 ≈ 1 算力**。用户按 1:1 买进、矩阵侧按 10 倍扣。`tests/test_billing_unified.py` 里的用例还把这个倍率断言成了正确行为，因此长期没被发现。

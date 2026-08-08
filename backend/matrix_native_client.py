@@ -4641,12 +4641,17 @@ THEMES = {
         "navCheckedText": "#ffffff", "navCheckBg1": "rgba(99,102,241,0.30)", "navCheckBg2": "rgba(99,102,241,0.05)",
         "ghostBg": "rgba(255,255,255,0.03)", "ghostBorder": "#2b3040", "ghostText": "#dfe3ec", "ghostHoverBg": "rgba(99,102,241,0.10)",
         "primaryDisBg": "#3a3f52", "primaryDisText": "#98a0b0",
+        "disBg": "rgba(255,255,255,0.025)", "disBorder": "rgba(255,255,255,0.07)",
+        "checkBg": "rgba(255,255,255,0.12)", "checkBorder": "rgba(255,255,255,0.62)",
+        "checkDisBg": "rgba(255,255,255,0.04)", "checkDisBorder": "rgba(255,255,255,0.18)",
         "inputBg": "#0c0f17", "inputBorder": "#262c3b", "inputFocusBg": "#0e1220", "comboView": "#12151f",
         "tableBg": "#0b0e16", "tableBorder": "#222a3a", "tableGrid": "#191e2a", "selBg": "rgba(99,102,241,0.22)", "selText": "#ffffff",
         "headerBg": "#141824", "headerText": "#8b93a3", "headerBorder": "#232b3c",
         "scroll": "#2a3040", "scrollHover": "#3a4358", "menuBg": "#141824", "menuText": "#e8eaf0", "menuBorder": "rgba(255,255,255,0.10)",
         "iconBg": "rgba(255,255,255,0.05)", "iconText": "#8b93a3", "iconBorder": "rgba(255,255,255,0.09)",
         "accent": _ACCENT_HEX, "accent2": _ACCENT2_HEX,
+        # 同款替换/图文同款的"换位台账"状态色:保留原片(中性) / 已替换(主色) / 待补(琥珀) / 完成 / 失败
+        "stKeep": "#7c869c", "stSwap": _ACCENT_HEX, "stOwe": "#e0a32e", "stDone": "#34d399", "stFail": "#ef4444",
     },
     "light": {
         "rootBg1": "#f5f7fb", "rootBg2": "#eef1f7", "sideBg1": "#ffffff", "sideBg2": "#f6f8fc", "sideBorder": "#e4e8f0",
@@ -4657,13 +4662,20 @@ THEMES = {
         "navText": "#4b5568", "navHoverBg": "#eef1f8", "navHoverText": "#111726",
         "navCheckedText": "#4338ca", "navCheckBg1": "rgba(99,102,241,0.16)", "navCheckBg2": "rgba(99,102,241,0.02)",
         "ghostBg": "#eef2f8", "ghostBorder": "#ccd4e2", "ghostText": "#3a4356", "ghostHoverBg": "rgba(99,102,241,0.12)",
-        "primaryDisBg": "#c7cdd8", "primaryDisText": "#ffffff",
+        # 亮色下白字压在浅灰上几乎读不出来,禁用态仍然要看得清写的是什么
+        "primaryDisBg": "#dde1e9", "primaryDisText": "#78839a",
+        "disBg": "#f1f3f7", "disBorder": "#e2e6ee",
+        # 亮色下白描边压在白卡上等于没有;授权确认这种勾选框必须看得见
+        "checkBg": "#ffffff", "checkBorder": "#a9b3c4",
+        "checkDisBg": "#f1f3f7", "checkDisBorder": "#d5dbe5",
         "inputBg": "#ffffff", "inputBorder": "#d0d7e2", "inputFocusBg": "#f6f8ff", "comboView": "#ffffff",
         "tableBg": "#ffffff", "tableBorder": "#e6eaf1", "tableGrid": "#eef1f6", "selBg": "rgba(99,102,241,0.14)", "selText": "#28303f",
         "headerBg": "#f5f7fb", "headerText": "#6b7488", "headerBorder": "#e6eaf1",
         "scroll": "#cbd3e0", "scrollHover": "#b0bacb", "menuBg": "#ffffff", "menuText": "#28303f", "menuBorder": "#e6eaf1",
         "iconBg": "#f0f3f9", "iconText": "#6b7488", "iconBorder": "#e4e8f0",
         "accent": _ACCENT_HEX, "accent2": _ACCENT2_HEX,
+        # 亮色下同一组状态色需要压深,保证在白卡上仍有足够对比
+        "stKeep": "#78839a", "stSwap": "#4f46e5", "stOwe": "#b07d12", "stDone": "#0f9d6e", "stFail": "#dc2626",
     },
 }
 CURRENT_THEME = "dark"
@@ -4698,7 +4710,7 @@ QFrame#hero { border-radius:18px; border:1px solid %(hero)s; }
 QFrame#accentBar { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 %(accent)s, stop:1 %(accent2)s); border-radius:2px; }
 QPushButton { background:%(ghostBg)s; border:1px solid %(ghostBorder)s; color:%(ghostText)s; border-radius:10px; padding:9px 16px; min-height:18px; min-width:76px; font-weight:650; }
 QPushButton:hover { border-color:%(accent)s; background:%(ghostHoverBg)s; color:%(title)s; }
-QPushButton:disabled { background:rgba(255,255,255,0.025); border-color:rgba(255,255,255,0.07); color:%(muted)s; }
+QPushButton:disabled { background:%(disBg)s; border-color:%(disBorder)s; color:%(muted)s; }
 QPushButton#iconbtn { padding:0; min-width:26px; max-width:26px; min-height:26px; max-height:26px; border-radius:7px; }
 QPushButton#nav { background:transparent; color:%(navText)s; text-align:left; padding:10px 14px; border-radius:10px; font-size:13px; font-weight:600; }
 QPushButton#nav:hover { background:%(navHoverBg)s; color:%(navHoverText)s; }
@@ -4714,12 +4726,12 @@ QToolButton#replacementSlot { background:%(ghostBg)s; border:1px dashed %(ghostB
 QToolButton#replacementSlot:hover, QToolButton#replacementSlot:focus { border-color:%(accent)s; background:%(ghostHoverBg)s; color:%(title)s; }
 QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit { background:%(inputBg)s; border:1px solid %(inputBorder)s; border-radius:10px; padding:10px; color:%(text)s; selection-background-color:%(accent)s; selection-color:#ffffff; }
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border:1px solid %(accent)s; background:%(inputFocusBg)s; }
-QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QTextEdit:disabled { color:%(sub)s; background:rgba(255,255,255,0.025); border-color:rgba(255,255,255,0.08); }
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QTextEdit:disabled { color:%(sub)s; background:%(disBg)s; border-color:%(disBorder)s; }
 QCheckBox { color:%(text)s; background:transparent; spacing:9px; font-size:12.5px; font-weight:600; }
-QCheckBox::indicator { width:18px; height:18px; border-radius:5px; border:1.5px solid rgba(255,255,255,0.62); background:rgba(255,255,255,0.12); }
+QCheckBox::indicator { width:18px; height:18px; border-radius:5px; border:1.5px solid %(checkBorder)s; background:%(checkBg)s; }
 QCheckBox::indicator:hover { border-color:%(accent)s; background:rgba(99,102,241,0.18); }
 QCheckBox::indicator:checked { border:1.5px solid %(accent)s; background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 %(accent)s,stop:1 %(accent2)s); image:url('%(checkIcon)s'); }
-QCheckBox::indicator:disabled { border-color:rgba(255,255,255,0.18); background:rgba(255,255,255,0.04); }
+QCheckBox::indicator:disabled { border-color:%(checkDisBorder)s; background:%(checkDisBg)s; }
 QComboBox::drop-down { border:0; width:22px; }
 QComboBox QAbstractItemView { background:%(comboView)s; border:1px solid %(inputBorder)s; selection-background-color:%(accent)s; selection-color:#ffffff; color:%(text)s; outline:0; }
 QTableWidget { background:%(tableBg)s; border:1px solid %(tableBorder)s; border-radius:12px; gridline-color:%(tableGrid)s; color:%(text)s; }
@@ -4729,13 +4741,36 @@ QHeaderView::section { background:%(headerBg)s; color:%(headerText)s; border:0; 
 QScrollBar:vertical { background:transparent; width:10px; margin:2px; }
 QScrollBar::handle:vertical { background:%(scroll)s; border-radius:5px; min-height:32px; }
 QScrollBar::handle:vertical:hover { background:%(scrollHover)s; }
-QScrollBar::add-line, QScrollBar::sub-line { height:0; }
+QScrollBar:horizontal { background:transparent; height:10px; margin:2px; }
+QScrollBar::handle:horizontal { background:%(scroll)s; border-radius:5px; min-width:32px; }
+QScrollBar::handle:horizontal:hover { background:%(scrollHover)s; }
+QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }
+QScrollBar::add-line, QScrollBar::sub-line { height:0; width:0; }
 QPushButton#primary::menu-indicator { subcontrol-position: right center; subcontrol-origin: padding; right:10px; width:12px; }
 QPushButton#iconbtn { background:%(iconBg)s; color:%(iconText)s; border:1px solid %(iconBorder)s; border-radius:7px; font-size:12px; font-weight:700; padding:0; min-width:26px; max-width:26px; min-height:26px; max-height:26px; }
 QPushButton#iconbtn:hover { background:rgba(239,68,68,0.20); color:#ffffff; border-color:rgba(239,68,68,0.55); }
 QMenu { background:%(menuBg)s; color:%(menuText)s; border:1px solid %(menuBorder)s; border-radius:10px; padding:6px; }
 QMenu::item { padding:9px 18px; border-radius:7px; margin:1px 2px; }
 QMenu::item:selected { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(99,102,241,0.30), stop:1 rgba(139,92,246,0.30)); color:#ffffff; }
+
+/* ---- 同款替换 / 图文同款:换位台账排版层 ---- */
+/* 统一字阶:眉标 10.5/800 · 分区标题 13.5/750 · 正文 12.5/600 · 元信息 11/500 */
+QLabel#eyebrow { color:%(group)s; font-size:10.5px; font-weight:800; letter-spacing:1.5px; }
+QLabel#zoneTitle { color:%(title)s; font-size:13.5px; font-weight:750; }
+QLabel#zoneHint { color:%(sub)s; font-size:11.5px; font-weight:500; }
+QLabel#fieldLabel { color:%(sub)s; font-size:12px; font-weight:650; }
+QLabel#fieldValue { color:%(text)s; font-size:12.5px; font-weight:600; }
+QLabel#meta { color:%(muted)s; font-size:11px; font-weight:500; }
+QLabel#slotIndex { color:%(muted)s; font-family:'Consolas','Cascadia Mono',monospace; font-size:11px; font-weight:700; letter-spacing:0.5px; }
+QFrame#zone { background:%(cardBg)s; border:1px solid %(cardBorder)s; border-radius:16px; }
+QFrame#zoneFlat { background:transparent; border:0; }
+QFrame#hline { background:%(cardBorder)s; border:0; max-height:1px; min-height:1px; }
+QFrame#readyBar { background:%(cardBg)s; border:1px solid %(cardBorder)s; border-radius:14px; }
+QProgressBar { background:%(inputBg)s; border:1px solid %(inputBorder)s; border-radius:8px; height:16px; text-align:center; color:%(sub)s; font-size:11px; font-weight:700; }
+QProgressBar::chunk { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 %(accent)s, stop:1 %(accent2)s); border-radius:7px; }
+QPushButton#quiet { background:transparent; border:1px solid %(ghostBorder)s; color:%(sub)s; border-radius:9px; padding:7px 13px; min-width:0; font-size:12px; font-weight:650; }
+QPushButton#quiet:hover { border-color:%(accent)s; color:%(title)s; background:%(ghostHoverBg)s; }
+QPushButton#quiet:disabled { border-color:%(cardBorder)s; color:%(muted)s; background:transparent; }
 """ % t)
 
 
@@ -5039,6 +5074,279 @@ def _rgba(hexc, a):
     hexc = str(hexc).lstrip("#")
     r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
     return "rgba(%d,%d,%d,%.3f)" % (r, g, b, a)
+
+
+# ---------- 换位台账(同款替换 / 图文同款共用) ----------
+# 这两个页面做的是同一件事:把原片拆成槽位,再把你的素材塞进槽位。
+# 状态由"连接线"本身表达,而不是散落在别处的文字标签:
+#   keep 保留原片 = 中性虚线(什么都没传,原片直接透传)
+#   swap 已替换   = 主色实线箭头(你换掉的东西)
+#   owe  待补     = 琥珀箭头指向空槽(必须补齐才能生成)
+_SWAP_STATE_KEYS = {"keep": "stKeep", "swap": "stSwap", "owe": "stOwe", "done": "stDone", "fail": "stFail"}
+_SWAP_STATE_LABELS = {"keep": "保留原片", "swap": "已替换", "owe": "待补", "done": "已完成", "fail": "失败"}
+
+
+def _state_color(state):
+    return TK.get(_SWAP_STATE_KEYS.get(str(state or "keep"), "stKeep")) or TK["sub"]
+
+
+def _style_state_pill(label, state, text=None):
+    color = _state_color(state)
+    label.setText(str(text if text is not None else _SWAP_STATE_LABELS.get(state, state)))
+    label.setStyleSheet(
+        "background:%s;border:1px solid %s;border-radius:9px;color:%s;"
+        "font-size:10.5px;font-weight:800;padding:2px 9px;"
+        % (_rgba(color, 0.13), _rgba(color, 0.42), color)
+    )
+
+
+def state_pill(state, text=None):
+    """状态胶囊:保留原片 / 已替换 / 待补。"""
+    label = QtWidgets.QLabel()
+    label.setAlignment(QtCore.Qt.AlignCenter)
+    # 固定高度,否则在高一点的行里 QLabel 会被拉成一个竖条
+    label.setFixedHeight(21)
+    label.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+    _style_state_pill(label, state, text)
+    return label
+
+
+# 所有分区共用一条标签沟槽宽度,避免每个卡片各自算宽、输入框左边缘参差
+_FIELD_LABEL_W = 104
+
+
+def field_label(text):
+    label = QtWidgets.QLabel(str(text))
+    label.setObjectName("fieldLabel")
+    return label
+
+
+def field_grid(columns=1):
+    """字段网格:标签列宽固定,输入列吃掉剩余宽度。"""
+    grid = QtWidgets.QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(12)
+    grid.setVerticalSpacing(9)
+    for index in range(max(1, int(columns))):
+        grid.setColumnMinimumWidth(index * 2, _FIELD_LABEL_W)
+        grid.setColumnStretch(index * 2, 0)
+        grid.setColumnStretch(index * 2 + 1, 1)
+    return grid
+
+
+def button_cell(*buttons):
+    """把按钮放进网格时用它包一层,否则按钮会被拉成整行宽。"""
+    # 注意:这里不要 setStyleSheet("background:transparent")。
+    # 无类型选择器会顺着继承压到子控件上,把 #primary 按钮的主色底也刷成透明
+    # (亮色主题下就变成白底白字直接看不见)。QWidget 默认本来就不画背景。
+    host = QtWidgets.QWidget()
+    row = QtWidgets.QHBoxLayout(host)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    for button in buttons:
+        row.addWidget(button)
+    row.addStretch(1)
+    return host
+
+
+def zone_card(eyebrow, title, hint=None, actions=None):
+    """分区卡片:眉标写的是流程里的哪一段(原片 / 替换素材 / 声音…),不是装饰。
+    返回 (frame, body) —— 内容加到 body。"""
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("zone")
+    outer = QtWidgets.QVBoxLayout(frame)
+    outer.setContentsMargins(18, 14, 18, 16)
+    outer.setSpacing(12)
+    head = QtWidgets.QHBoxLayout()
+    head.setSpacing(10)
+    left = QtWidgets.QVBoxLayout()
+    left.setSpacing(3)
+    if eyebrow:
+        eb = QtWidgets.QLabel(str(eyebrow))
+        eb.setObjectName("eyebrow")
+        left.addWidget(eb)
+    line = QtWidgets.QHBoxLayout()
+    line.setSpacing(10)
+    tt = QtWidgets.QLabel(str(title))
+    tt.setObjectName("zoneTitle")
+    line.addWidget(tt)
+    if hint:
+        ht = QtWidgets.QLabel(str(hint))
+        ht.setObjectName("zoneHint")
+        line.addWidget(ht, 1)
+    else:
+        line.addStretch(1)
+    left.addLayout(line)
+    head.addLayout(left, 1)
+    for action in (actions or []):
+        head.addWidget(action)
+    outer.addLayout(head)
+    rule = QtWidgets.QFrame()
+    rule.setObjectName("hline")
+    outer.addWidget(rule)
+    body = QtWidgets.QVBoxLayout()
+    body.setSpacing(10)
+    outer.addLayout(body)
+    return frame, body
+
+
+class SwapRail(QtWidgets.QWidget):
+    """图文同款:横向换位连接线,画在"原笔记图片"条和"替换图片"条之间。
+    每一列一根线,列距与两条缩略图带完全一致,所以第 N 张原图正对第 N 个替换槽,
+    不用再靠人眼数位置。"""
+
+    def __init__(self, cell=132, gap=10, height=30):
+        super().__init__()
+        self._cell = int(cell)
+        self._pitch = int(cell) + int(gap)
+        self._states = []
+        self._offset = 0
+        self.setFixedHeight(int(height))
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+
+    def set_states(self, states):
+        states = list(states or [])
+        if states != self._states:
+            self._states = states
+            self.update()
+
+    def set_offset(self, offset):
+        offset = int(offset or 0)
+        if offset != self._offset:
+            self._offset = offset
+            self.update()
+
+    def paintEvent(self, event):
+        del event
+        if not self._states:
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        top = 3.0
+        bottom = float(self.height()) - 3.0
+        for index, state in enumerate(self._states):
+            cx = self._cell / 2.0 + index * self._pitch - self._offset
+            if cx < -self._cell or cx > self.width() + self._cell:
+                continue
+            base = QtGui.QColor(_state_color(state))
+            pen = QtGui.QPen(base)
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            if state == "keep":
+                # 保留原片:细虚线、压暗 —— 不做任何事,不该抢视线
+                faded = QtGui.QColor(base)
+                faded.setAlpha(140)
+                pen.setColor(faded)
+                pen.setWidthF(1.4)
+                pen.setStyle(QtCore.Qt.CustomDashLine)
+                pen.setDashPattern([2.0, 3.0])
+                painter.setPen(pen)
+                painter.drawLine(QtCore.QPointF(cx, top), QtCore.QPointF(cx, bottom))
+                continue
+            pen.setWidthF(2.0)
+            painter.setPen(pen)
+            painter.drawLine(QtCore.QPointF(cx, top), QtCore.QPointF(cx, bottom - 6.0))
+            head = QtGui.QPainterPath()
+            head.moveTo(cx, bottom)
+            head.lineTo(cx - 4.5, bottom - 6.5)
+            head.lineTo(cx + 4.5, bottom - 6.5)
+            head.closeSubpath()
+            painter.fillPath(head, QtGui.QBrush(base))
+        painter.end()
+
+
+class SwapSlotRow(QtWidgets.QFrame):
+    """同款替换:一条"原片槽位 → 你的素材"台账行。
+    左侧竖脊线就是横向连接线转 90 度 —— 同一个记号,两个方向。"""
+
+    def __init__(self, title, note=""):
+        super().__init__()
+        self.setObjectName("zoneFlat")
+        self._state = "keep"
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(14, 9, 2, 9)
+        row.setSpacing(14)
+        left = QtWidgets.QVBoxLayout()
+        left.setSpacing(4)
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setSpacing(8)
+        caption = QtWidgets.QLabel(str(title))
+        caption.setObjectName("fieldValue")
+        self.pill = state_pill("keep")
+        title_row.addWidget(caption)
+        title_row.addWidget(self.pill)
+        title_row.addStretch(1)
+        left.addLayout(title_row)
+        self.note = QtWidgets.QLabel(str(note))
+        self.note.setObjectName("meta")
+        self.note.setWordWrap(True)
+        left.addWidget(self.note)
+        left.addStretch(1)
+        row.addLayout(left, 3)
+        self.body = QtWidgets.QVBoxLayout()
+        self.body.setSpacing(7)
+        row.addLayout(self.body, 4)
+
+    def set_state(self, state, note=None, pill_text=None):
+        self._state = str(state or "keep")
+        _style_state_pill(self.pill, self._state, pill_text)
+        if note is not None:
+            self.note.setText(str(note))
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        color = QtGui.QColor(_state_color(self._state))
+        if self._state == "keep":
+            color.setAlpha(120)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(0.0, 8.0, 3.0, max(0.0, self.height() - 16.0)), 1.5, 1.5)
+        painter.fillPath(path, QtGui.QBrush(color))
+        painter.end()
+
+
+class ReadyBar(QtWidgets.QFrame):
+    """行动条:主行动 + 一行"还差什么"。
+    把"能不能生成"从点完才知道,提前到点之前就知道。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("readyBar")
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(16, 11, 14, 11)
+        row.setSpacing(11)
+        self.dot = QtWidgets.QLabel()
+        self.dot.setFixedSize(9, 9)
+        row.addWidget(self.dot, 0, QtCore.Qt.AlignTop)
+        lines = QtWidgets.QVBoxLayout()
+        lines.setSpacing(3)
+        self.hint = QtWidgets.QLabel("")
+        self.hint.setObjectName("fieldValue")
+        self.hint.setWordWrap(True)
+        lines.addWidget(self.hint)
+        self.details = QtWidgets.QVBoxLayout()
+        self.details.setSpacing(2)
+        lines.addLayout(self.details)
+        row.addLayout(lines, 1)
+        self.actions = QtWidgets.QHBoxLayout()
+        self.actions.setSpacing(8)
+        row.addLayout(self.actions)
+        self.set_state("owe", "")
+        # 点位对齐:圆点跟第一行文字齐,不跟整块居中
+        self.dot.setContentsMargins(0, 5, 0, 0)
+
+    def add(self, *widgets):
+        for widget in widgets:
+            self.actions.addWidget(widget)
+
+    def add_detail(self, widget):
+        """把服务端返回的状态文字收进行动条,不让它裸露在页面上。"""
+        self.details.addWidget(widget)
+
+    def set_state(self, state, text):
+        self.dot.setStyleSheet("background:%s;border-radius:4px;" % _state_color(state))
+        self.hint.setText(str(text or ""))
 
 
 class HoverCard(QtWidgets.QFrame):
@@ -12804,12 +13112,24 @@ class XhsNoteReplacementPage(BasePage):
         self.v.addWidget(make_header("图文同款", "小红书图文结构复刻 · 先预览替换方案，再保存到素材发布和资产库"))
         self.v.addWidget(prereq_banner("图文同款 V1 只生成草稿，不自动发布；缺图必须手动选择替换图片后才能生成预览和保存草稿。"))
 
-        source = QtWidgets.QFrame()
-        source.setObjectName("card")
-        sl = QtWidgets.QGridLayout(source)
-        sl.setContentsMargins(16, 14, 16, 14)
-        sl.setHorizontalSpacing(12)
-        sl.setVerticalSpacing(10)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        page = QtWidgets.QWidget()
+        # 用 objectName 走 QSS 里已有的 QWidget#page 规则;直接 setStyleSheet
+        # 无类型选择器会继承到子控件,把主色按钮刷成透明
+        page.setObjectName("page")
+        col = QtWidgets.QVBoxLayout(page)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(14)
+        scroll.setWidget(page)
+        self.v.addWidget(scroll, 1)
+
+        # ---- 原片:只读来源,默认让位给下面要动手的部分 ----
+        source, sb = zone_card("原片", "来源笔记", "从内容采集下载后自动带入，可改")
+        sl = field_grid(columns=2)
         self.material_id = QtWidgets.QLineEdit()
         self.material_id.hide()
         self.source_path = QtWidgets.QLineEdit()
@@ -12821,44 +13141,26 @@ class XhsNoteReplacementPage(BasePage):
         self.source_title.setPlaceholderText("可选：原笔记标题")
         self.source_body = QtWidgets.QPlainTextEdit()
         self.source_body.setPlaceholderText("可选：原笔记正文")
-        self.source_body.setMaximumHeight(82)
+        self.source_body.setFixedHeight(58)
         self.source_tags = QtWidgets.QLineEdit()
         self.source_tags.setPlaceholderText("可选：原标签，用空格或逗号分隔")
-        sl.addWidget(QtWidgets.QLabel("来源素材"), 0, 0)
-        sl.addWidget(self.source_path, 0, 1)
-        sl.addWidget(QtWidgets.QLabel("笔记链接"), 1, 0)
-        sl.addWidget(self.source_url, 1, 1)
-        sl.addWidget(QtWidgets.QLabel("原始标题"), 2, 0)
-        sl.addWidget(self.source_title, 2, 1)
-        sl.addWidget(QtWidgets.QLabel("原始正文"), 3, 0)
-        sl.addWidget(self.source_body, 3, 1)
-        sl.addWidget(QtWidgets.QLabel("原始标签"), 4, 0)
-        sl.addWidget(self.source_tags, 4, 1)
-        sl.addWidget(QtWidgets.QLabel("原笔记图片"), 5, 0)
-        self.source_image_count = QtWidgets.QLabel("0 张")
-        self.source_image_count.setObjectName("sub")
-        sl.addWidget(self.source_image_count, 5, 1)
-        self.source_image_scroll = QtWidgets.QScrollArea()
-        self.source_image_scroll.setWidgetResizable(True)
-        self.source_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.source_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self.source_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.source_image_scroll.setFixedHeight(192)
-        self.source_image_host = QtWidgets.QWidget()
-        self.source_image_layout = QtWidgets.QHBoxLayout(self.source_image_host)
-        self.source_image_layout.setContentsMargins(0, 0, 0, 0)
-        self.source_image_layout.setSpacing(10)
-        self.source_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.source_image_scroll.setWidget(self.source_image_host)
-        sl.addWidget(self.source_image_scroll, 6, 0, 1, 2)
-        self.v.addWidget(source)
+        # 只读参考信息排成两列,不让它在页面顶部占掉真正要动手的位置
+        for row, column, caption, widget in (
+            (0, 0, "来源素材", self.source_path),
+            (0, 1, "笔记链接", self.source_url),
+            (1, 0, "原始标题", self.source_title),
+            (1, 1, "原始标签", self.source_tags),
+        ):
+            sl.addWidget(field_label(caption), row, column * 2, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+            sl.addWidget(widget, row, column * 2 + 1)
+        sl.addWidget(field_label("原始正文"), 2, 0, QtCore.Qt.AlignTop | QtCore.Qt.AlignRight)
+        sl.addWidget(self.source_body, 2, 1, 1, 3)
+        sb.addLayout(sl)
+        col.addWidget(source)
 
-        business = QtWidgets.QFrame()
-        business.setObjectName("card")
-        bl = QtWidgets.QGridLayout(business)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.setHorizontalSpacing(12)
-        bl.setVerticalSpacing(10)
+        # ---- 你的信息 ----
+        business, bb = zone_card("你的信息", "业务信息", "标题、所在地、目标客户填完才能生成")
+        bl = field_grid()
         self.biz_name = QtWidgets.QLineEdit()
         self.biz_name.setPlaceholderText("生成后笔记标题")
         self.biz_region = QtWidgets.QLineEdit()
@@ -12867,85 +13169,164 @@ class XhsNoteReplacementPage(BasePage):
         self.biz_audience.setPlaceholderText("目标客户，例如：新手宝妈 / 本地门店老板")
         self.biz_selling = QtWidgets.QPlainTextEdit()
         self.biz_selling.setPlaceholderText("卖点，一行一个")
-        self.biz_selling.setMaximumHeight(88)
-        bl.addWidget(QtWidgets.QLabel("标题（必填）"), 0, 0)
-        bl.addWidget(self.biz_name, 0, 1)
-        bl.addWidget(QtWidgets.QLabel("所在地（必填）"), 1, 0)
-        bl.addWidget(self.biz_region, 1, 1)
-        bl.addWidget(QtWidgets.QLabel("目标客户（必填）"), 2, 0)
-        bl.addWidget(self.biz_audience, 2, 1)
-        bl.addWidget(QtWidgets.QLabel("卖点（可编辑）"), 3, 0)
-        bl.addWidget(self.biz_selling, 3, 1)
-        self.v.addWidget(business)
+        self.biz_selling.setFixedHeight(76)
+        for row, (caption, widget) in enumerate((
+            ("标题（必填）", self.biz_name),
+            ("所在地（必填）", self.biz_region),
+            ("目标客户（必填）", self.biz_audience),
+            ("卖点（可编辑）", self.biz_selling),
+        )):
+            align = QtCore.Qt.AlignTop if widget is self.biz_selling else QtCore.Qt.AlignVCenter
+            bl.addWidget(field_label(caption), row, 0, align | QtCore.Qt.AlignRight)
+            bl.addWidget(widget, row, 1)
+        bb.addLayout(bl)
+        for widget in (self.biz_name, self.biz_region, self.biz_audience):
+            widget.textChanged.connect(self._sync_swap_state)
+        col.addWidget(business)
 
-        replacement = QtWidgets.QFrame()
-        replacement.setObjectName("card")
-        rl = QtWidgets.QVBoxLayout(replacement)
-        rl.setContentsMargins(16, 14, 16, 14)
-        rhead = QtWidgets.QHBoxLayout()
-        rtitle = QtWidgets.QLabel("替换图片")
-        rtitle.setObjectName("sub")
-        rhead.addWidget(rtitle)
-        rhead.addStretch()
-        rl.addLayout(rhead)
+        # ---- 换位台账:上=原图,下=你的替换图,中间的连接线就是状态 ----
+        replacement, rb = zone_card(
+            "换位台账", "图片换位", "上下同一列就是同一个位置：第 N 张原图正对第 N 个替换槽")
+        caption_row = QtWidgets.QHBoxLayout()
+        caption_row.setSpacing(8)
+        origin_caption = QtWidgets.QLabel("原笔记图片")
+        origin_caption.setObjectName("fieldLabel")
+        self.source_image_count = QtWidgets.QLabel("0 张")
+        self.source_image_count.setObjectName("meta")
+        self.swap_progress = QtWidgets.QLabel("尚未读取图文结构")
+        self.swap_progress.setObjectName("meta")
+        caption_row.addWidget(origin_caption)
+        caption_row.addWidget(self.source_image_count)
+        caption_row.addStretch(1)
+        caption_row.addWidget(self.swap_progress)
+        rb.addLayout(caption_row)
+
+        self.source_image_scroll = QtWidgets.QScrollArea()
+        self.source_image_scroll.setWidgetResizable(True)
+        self.source_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.source_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.source_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.source_image_scroll.setFixedHeight(186)
+        self.source_image_host = QtWidgets.QWidget()
+        self.source_image_layout = QtWidgets.QHBoxLayout(self.source_image_host)
+        self.source_image_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_image_layout.setSpacing(10)
+        self.source_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.source_image_scroll.setWidget(self.source_image_host)
+        rb.addWidget(self.source_image_scroll)
+
+        self.swap_rail = SwapRail(cell=132, gap=10, height=30)
+        rb.addWidget(self.swap_rail)
+
         self.replacement_image_scroll = QtWidgets.QScrollArea()
         self.replacement_image_scroll.setWidgetResizable(True)
         self.replacement_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.replacement_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.replacement_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.replacement_image_scroll.setFixedHeight(192)
+        self.replacement_image_scroll.setFixedHeight(186)
         self.replacement_image_host = QtWidgets.QWidget()
         self.replacement_image_layout = QtWidgets.QHBoxLayout(self.replacement_image_host)
         self.replacement_image_layout.setContentsMargins(0, 0, 0, 0)
         self.replacement_image_layout.setSpacing(10)
         self.replacement_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.replacement_image_scroll.setWidget(self.replacement_image_host)
-        rl.addWidget(self.replacement_image_scroll)
-        self.v.addWidget(replacement)
+        rb.addWidget(self.replacement_image_scroll)
 
-        controls = QtWidgets.QHBoxLayout()
+        # 两条缩略图带共用一个滚动位置,否则一滚动上下就对不上了
+        self.source_image_scroll.horizontalScrollBar().valueChanged.connect(self._on_swap_scrolled)
+        self.replacement_image_scroll.horizontalScrollBar().valueChanged.connect(self._on_swap_scrolled)
+
+        self.template_summary = QtWidgets.QLabel("尚未读取图文结构")
+        self.template_summary.setObjectName("meta")
+        self.template_summary.setWordWrap(True)
+        rb.addWidget(self.template_summary)
+        col.addWidget(replacement)
+
+        # ---- 行动条:点之前就知道还差什么 ----
+        self.ready = ReadyBar()
         self.b_preview = QtWidgets.QPushButton("生成同款预览")
         self.b_preview.setObjectName("primary")
         self.b_preview.clicked.connect(self.generate_preview)
-        self.b_save = QtWidgets.QPushButton("保存草稿")
-        self.b_save.setObjectName("primary")
-        self.b_save.clicked.connect(self.save_draft)
-        controls.addWidget(self.b_preview)
-        controls.addWidget(self.b_save)
-        controls.addStretch()
-        self.v.addLayout(controls)
-
+        self.ready.add(self.b_preview)
         self.status = QtWidgets.QLabel("未开始")
-        self.status.setObjectName("sub")
+        self.status.setObjectName("meta")
         self.status.setWordWrap(True)
-        self.v.addWidget(self.status)
-        self.template_summary = QtWidgets.QLabel("尚未读取图文结构")
-        self.template_summary.setObjectName("sub")
-        self.template_summary.setWordWrap(True)
-        self.v.addWidget(self.template_summary)
+        self.ready.add_detail(self.status)
+        col.addWidget(self.ready)
 
+        # ---- 生成结果:文案在这里改,也在这里存 ----
         self.copy_selector = QtWidgets.QComboBox()
         self.copy_selector.setEnabled(False)
+        self.copy_selector.setPlaceholderText("尚无方案")
+        self.copy_selector.setMinimumWidth(128)
         self.copy_selector.currentIndexChanged.connect(self._render_selected_copy)
-        self.v.addWidget(self.copy_selector)
+        copy_zone, cb = zone_card(
+            "生成结果", "文案方案", "改完再保存，保存的是你当前看到的这一版", actions=[self.copy_selector])
 
         self.copy_title = QtWidgets.QLineEdit()
         self.copy_title.setPlaceholderText("当前方案标题，可编辑")
         self.copy_title.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_title)
-
         self.copy_view = QtWidgets.QPlainTextEdit()
         self.copy_view.setReadOnly(False)
         self.copy_view.setPlaceholderText("当前方案正文，可编辑。")
         self.copy_view.setMinimumHeight(180)
         self.copy_view.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_view, 1)
-
         self.copy_tags = QtWidgets.QLineEdit()
         self.copy_tags.setPlaceholderText("当前方案标签，可编辑，例如：#本地探店 #避坑")
         self.copy_tags.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_tags)
+        for caption, widget in (("标题", self.copy_title), ("正文", self.copy_view), ("标签", self.copy_tags)):
+            label = QtWidgets.QLabel(caption)
+            label.setObjectName("fieldLabel")
+            cb.addWidget(label)
+            cb.addWidget(widget)
+
+        save_row = QtWidgets.QHBoxLayout()
+        save_row.addStretch(1)
+        self.b_save = QtWidgets.QPushButton("保存草稿")
+        self.b_save.setObjectName("primary")
+        self.b_save.clicked.connect(self.save_draft)
+        save_row.addWidget(self.b_save)
+        cb.addLayout(save_row)
+        col.addWidget(copy_zone)
+        col.addStretch(1)
+
         BRIDGE.payload.connect(self._on)
+        self._sync_swap_state()
+
+    def _on_swap_scrolled(self, value):
+        """两条缩略图带联动滚动,并把偏移交给中间的连接线。"""
+        value = int(value or 0)
+        for bar in (self.source_image_scroll.horizontalScrollBar(),
+                    self.replacement_image_scroll.horizontalScrollBar()):
+            if bar.value() != value:
+                bar.blockSignals(True)
+                bar.setValue(value)
+                bar.blockSignals(False)
+        self.swap_rail.set_offset(value)
+
+    def _sync_swap_state(self, *_args):
+        """把"还差什么"算出来:缺图 + 缺必填字段,连接线和行动条读同一份状态。"""
+        slots = list(self._replacement_slots or [])
+        states = ["swap" if str(slot.get("filePath") or "").strip() else "owe" for slot in slots]
+        self.swap_rail.set_states(states)
+        filled = sum(1 for state in states if state == "swap")
+        if slots:
+            self.swap_progress.setText("已替换 %d / %d" % (filled, len(slots)))
+        else:
+            self.swap_progress.setText("尚未读取图文结构")
+
+        missing_fields = self._missing_required_fields()
+        missing_images = len(slots) - filled
+        if not slots:
+            self.ready.set_state("keep", "先从内容采集下载一条笔记，读到图文结构后才能开始换图。")
+        elif missing_images and missing_fields:
+            self.ready.set_state("owe", "还差 %d 张替换图，以及%s。" % (missing_images, "、".join(missing_fields)))
+        elif missing_images:
+            self.ready.set_state("owe", "还差 %d 张替换图，点上面的空槽选图。" % missing_images)
+        elif missing_fields:
+            self.ready.set_state("owe", "图片齐了，还差%s。" % "、".join(missing_fields))
+        else:
+            self.ready.set_state("done", "%d 张图片已全部替换，必填项齐了，可以生成预览。" % len(slots))
 
     def _set_source_thumbnail(self, button, pixmap):
         if not button or pixmap is None or pixmap.isNull():
@@ -13186,6 +13567,7 @@ class XhsNoteReplacementPage(BasePage):
             self._replacement_slots.append(item)
             self.replacement_image_layout.addWidget(button)
             self._update_replacement_button(item)
+        self._sync_swap_state()
 
     def _fill_replacement_paths(self, paths, start_slot=1):
         clean_paths = [str(path or "").strip().strip('"') for path in (paths or []) if str(path or "").strip()]
@@ -13198,6 +13580,7 @@ class XhsNoteReplacementPage(BasePage):
                 break
             self._replacement_slots[target_index]["filePath"] = path
             self._update_replacement_button(self._replacement_slots[target_index])
+        self._sync_swap_state()
 
     def pick_replacement_images(self, start_slot=1):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -13383,6 +13766,7 @@ class XhsNoteReplacementPage(BasePage):
         self.biz_selling.clear()
         self.template_summary.setText("尚未读取图文结构")
         _clear_layout(self.replacement_image_layout)
+        self._sync_swap_state()
         self.copy_selector.clear()
         self.copy_selector.setEnabled(False)
         self.copy_title.clear()
@@ -15488,51 +15872,104 @@ class VideoReplacementPage(BasePage):
         self._comic_frame_downloads = {}
         self._comic_video_cells = []
 
-        src_row = QtWidgets.QHBoxLayout()
-        self.source_lab = QtWidgets.QLabel("等待从『分解视频』进入。")
-        self.source_lab.setObjectName("sub")
-        self.source_lab.setWordWrap(True)
-        src_row.addWidget(self.source_lab, 1)
-        self.b_open_output = QtWidgets.QPushButton("打开成片")
-        self.b_open_output.setObjectName("ghost")
-        self.b_open_output.clicked.connect(self.open_output)
-        self.b_open_output.setEnabled(False)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        page = QtWidgets.QWidget()
+        # 用 objectName 走 QSS 里已有的 QWidget#page 规则;直接 setStyleSheet
+        # 无类型选择器会继承到子控件,把主色按钮刷成透明
+        page.setObjectName("page")
+        col = QtWidgets.QVBoxLayout(page)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(14)
+        scroll.setWidget(page)
+        self.v.addWidget(scroll, 1)
+
+        # ---- 原片 ----
         self.b_retry_transcript = QtWidgets.QPushButton("重试口播")
-        self.b_retry_transcript.setObjectName("ghost")
+        self.b_retry_transcript.setObjectName("quiet")
         self.b_retry_transcript.clicked.connect(self.retry_source_transcription)
         self.b_retry_transcript.setEnabled(False)
-        src_row.addWidget(self.b_open_output)
-        src_row.addWidget(self.b_retry_transcript)
-        self.v.addLayout(src_row)
+        src_zone, src_body = zone_card(
+            "原片", "来源视频", "从『分解视频』进入后自动带入", actions=[self.b_retry_transcript])
+        self.source_lab = QtWidgets.QLabel("等待从『分解视频』进入。")
+        self.source_lab.setObjectName("meta")
+        self.source_lab.setWordWrap(True)
+        src_body.addWidget(self.source_lab)
+        col.addWidget(src_zone)
 
-        refs = QtWidgets.QFrame()
-        refs.setObjectName("card")
-        refs_l = QtWidgets.QGridLayout(refs)
-        refs_l.setContentsMargins(16, 14, 16, 14)
-        refs_l.setHorizontalSpacing(12)
-        refs_l.setVerticalSpacing(10)
-        self.b_products = QtWidgets.QPushButton("上传产品图")
-        self.b_products.setObjectName("ghost")
-        self.b_products.clicked.connect(self.pick_products)
-        self.product_lab = QtWidgets.QLabel("未选择产品图（可选；上传后强制替换原片产品，未上传则保留原产品）")
-        self.product_lab.setObjectName("sub")
-        self.product_lab.setWordWrap(True)
+        # ---- 换位台账:一个槽位一行,状态写在行上,不用去别处找 ----
+        # 纯产品视频是整条任务的模式开关(它会整个关掉人物槽位),
+        # 所以放在分区标题栏,而不是塞在人物那一行里当成人物的一个属性
+        self.no_person_mode = QtWidgets.QCheckBox("纯产品视频（无人物）")
+        self.no_person_mode.setObjectName("sub")
+        self.no_person_mode.setToolTip("")
+        self.no_person_mode.toggled.connect(self._sync_person_controls)
+        refs, refs_l = zone_card(
+            "替换素材", "槽位换位", "上传就强制替换该槽位；不传就保留原片这一项",
+            actions=[self.no_person_mode])
+
+        self.row_person = SwapSlotRow("人物", "原片主角 → 你的人物")
         self.b_face = QtWidgets.QPushButton("上传主角正脸全身照")
         self.b_face.setObjectName("ghost")
         self.b_face.clicked.connect(self.pick_face)
+        self.b_virtual = QtWidgets.QPushButton("生成虚拟模特")
+        self.b_virtual.setObjectName("ghost")
+        self.b_virtual.clicked.connect(self.generate_virtual_model)
+        person_buttons = QtWidgets.QHBoxLayout()
+        person_buttons.setSpacing(8)
+        person_buttons.addWidget(self.b_face)
+        person_buttons.addWidget(self.b_virtual)
+        person_buttons.addStretch(1)
+        self.row_person.body.addLayout(person_buttons)
         self.face_authorized = QtWidgets.QCheckBox("我确认已获得该人物素材授权")
         self.face_authorized.setObjectName("sub")
         self.person_full_body = QtWidgets.QCheckBox("该人物图为清晰正脸全身照（已确认）")
         self.person_full_body.setObjectName("sub")
+        self.model_lab = QtWidgets.QLabel("未选择人物；请上传 1 张清晰正脸全身照。")
+        self.model_lab.setObjectName("meta")
+        self.model_lab.setWordWrap(True)
+        for widget in (self.face_authorized, self.person_full_body, self.model_lab):
+            self.row_person.body.addWidget(widget)
+        for box in (self.face_authorized, self.person_full_body):
+            box.toggled.connect(self._sync_swap_ledger)
+        refs_l.addWidget(self.row_person)
+
+        self.row_product = SwapSlotRow("产品", "原片产品 → 你的产品")
+        self.b_products = QtWidgets.QPushButton("上传产品图")
+        self.b_products.setObjectName("ghost")
+        self.b_products.clicked.connect(self.pick_products)
+        self.product_lab = QtWidgets.QLabel("未选择产品图（可选；上传后强制替换原片产品，未上传则保留原产品）")
+        self.product_lab.setObjectName("meta")
+        self.product_lab.setWordWrap(True)
+        product_buttons = QtWidgets.QHBoxLayout()
+        product_buttons.setSpacing(8)
+        product_buttons.addWidget(self.b_products)
+        product_buttons.addStretch(1)
+        self.row_product.body.addLayout(product_buttons)
+        self.row_product.body.addWidget(self.product_lab)
+        refs_l.addWidget(self.row_product)
+
+        self.row_scene = SwapSlotRow("场景", "原片场景 → 你的场景")
         self.b_scene = QtWidgets.QPushButton("上传场景图")
         self.b_scene.setObjectName("ghost")
         self.b_scene.clicked.connect(self.pick_scene)
         self.scene_prompt = QtWidgets.QLineEdit()
         self.scene_prompt.setPlaceholderText("可选场景描述；上传场景图后强制替换原片场景，未上传则保留原场景")
-        self.no_person_mode = QtWidgets.QCheckBox("纯产品视频（无人物）")
-        self.no_person_mode.setObjectName("sub")
-        self.no_person_mode.setToolTip("")
-        self.no_person_mode.toggled.connect(self._sync_person_controls)
+        scene_buttons = QtWidgets.QHBoxLayout()
+        scene_buttons.setSpacing(8)
+        scene_buttons.addWidget(self.b_scene)
+        scene_buttons.addStretch(1)
+        self.row_scene.body.addLayout(scene_buttons)
+        self.row_scene.body.addWidget(self.scene_prompt)
+        refs_l.addWidget(self.row_scene)
+        col.addWidget(refs)
+
+        # ---- 声音与模型 ----
+        audio_zone, audio_body = zone_card("声音与模型", "声音来源与生成模型")
+        grid = field_grid()
         self.audio_mode = QtWidgets.QComboBox()
         self.audio_mode.setToolTip("")
         self.audio_mode.addItem("自动", "auto")
@@ -15547,38 +15984,26 @@ class VideoReplacementPage(BasePage):
         self.b_replacement_audio.setObjectName("ghost")
         self.b_replacement_audio.clicked.connect(self.pick_replacement_audio)
         self.audio_lab = QtWidgets.QLabel("声音：自动使用生成视频自带声音")
-        self.audio_lab.setObjectName("sub")
+        self.audio_lab.setObjectName("meta")
         self.audio_lab.setWordWrap(True)
         self.replacement_model = QtWidgets.QComboBox()
         self.replacement_model.setToolTip("")
         self.replacement_model.currentIndexChanged.connect(self._on_replacement_model_changed)
-        self.b_virtual = QtWidgets.QPushButton("生成虚拟模特")
-        self.b_virtual.setObjectName("ghost")
-        self.b_virtual.clicked.connect(self.generate_virtual_model)
-        self.model_lab = QtWidgets.QLabel("未选择人物；请上传 1 张清晰正脸全身照。")
-        self.model_lab.setObjectName("sub")
-        self.model_lab.setWordWrap(True)
-        refs_l.addWidget(self.b_products, 0, 0)
-        refs_l.addWidget(self.product_lab, 0, 1)
-        refs_l.addWidget(self.b_face, 1, 0)
-        refs_l.addWidget(self.face_authorized, 1, 1)
-        refs_l.addWidget(self.person_full_body, 2, 1)
-        refs_l.addWidget(self.b_scene, 3, 0)
-        refs_l.addWidget(self.scene_prompt, 3, 1)
-        refs_l.addWidget(self.no_person_mode, 4, 1)
-        refs_l.addWidget(QtWidgets.QLabel("同款替换模型"), 5, 0)
-        refs_l.addWidget(self.replacement_model, 5, 1)
-        refs_l.addWidget(QtWidgets.QLabel("声音来源"), 6, 0)
-        refs_l.addWidget(self.audio_mode, 6, 1)
-        refs_l.addWidget(QtWidgets.QLabel("AI 音色"), 7, 0)
-        refs_l.addWidget(self.replacement_voice, 7, 1)
-        refs_l.addWidget(self.b_replacement_audio, 8, 0)
-        refs_l.addWidget(self.audio_lab, 8, 1)
-        refs_l.addWidget(self.b_virtual, 9, 0)
-        refs_l.addWidget(self.model_lab, 9, 1)
-        self.v.addWidget(refs)
+        for row, (caption, widget) in enumerate((
+            ("声音来源", self.audio_mode),
+            ("AI 音色", self.replacement_voice),
+            ("完整配音", button_cell(self.b_replacement_audio)),
+            ("同款替换模型", self.replacement_model),
+        )):
+            grid.addWidget(field_label(caption), row, 0, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+            grid.addWidget(widget, row, 1)
+        audio_body.addLayout(grid)
+        audio_body.addWidget(self.audio_lab)
+        self.audio_mode.currentIndexChanged.connect(self._sync_swap_ledger)
+        col.addWidget(audio_zone)
 
-        ctl = QtWidgets.QHBoxLayout()
+        # ---- 行动条:只留推进流程的两步,其余按钮归到它们操作的东西旁边 ----
+        self.ready = ReadyBar()
         self.b_plan = QtWidgets.QPushButton("生成替换方案")
         self.b_plan.setObjectName("ghost")
         self.b_plan.clicked.connect(self.generate_plan)
@@ -15586,48 +16011,42 @@ class VideoReplacementPage(BasePage):
         self.b_start.setObjectName("primary")
         self.b_start.clicked.connect(self.start_generation)
         self.b_start.setEnabled(False)
-        self.b_review = QtWidgets.QPushButton("确认片段并合成")
-        self.b_review.setObjectName("primary")
-        self.b_review.clicked.connect(self.confirm_and_concat)
-        self.b_review.setEnabled(False)
-        self.b_retry_failed = QtWidgets.QPushButton("重试失败片段")
-        self.b_retry_failed.setObjectName("ghost")
-        self.b_retry_failed.clicked.connect(self.retry_failed_segments)
-        self.b_retry_failed.setEnabled(False)
-        self.b_regen_segment = QtWidgets.QPushButton("重生选中片段")
-        self.b_regen_segment.setObjectName("ghost")
-        self.b_regen_segment.clicked.connect(self.regenerate_selected_segment)
-        self.b_regen_segment.setEnabled(False)
+        self.ready.add(self.b_plan, self.b_start)
+        col.addWidget(self.ready)
+
+        # ---- 进度 ----
         self.b_cancel = QtWidgets.QPushButton("取消任务")
-        self.b_cancel.setObjectName("ghost")
+        self.b_cancel.setObjectName("quiet")
         self.b_cancel.clicked.connect(self.cancel_generation)
         self.b_cancel.setEnabled(False)
-        self.b_pending = QtWidgets.QPushButton("加入待发布队列")
-        self.b_pending.setObjectName("ghost")
-        self.b_pending.clicked.connect(self.add_output_to_pending)
-        self.b_pending.setEnabled(False)
-        ctl.addWidget(self.b_plan)
-        ctl.addWidget(self.b_start)
-        ctl.addWidget(self.b_review)
-        ctl.addWidget(self.b_retry_failed)
-        ctl.addWidget(self.b_regen_segment)
-        ctl.addWidget(self.b_cancel)
-        ctl.addWidget(self.b_pending)
-        ctl.addStretch()
-        self.v.addLayout(ctl)
-
+        progress_zone, progress_body = zone_card("生成", "任务进度", actions=[self.b_cancel])
         self.status = QtWidgets.QLabel("未开始")
-        self.status.setObjectName("sub")
-        self.v.addWidget(self.status)
+        self.status.setObjectName("fieldValue")
+        self.status.setWordWrap(True)
+        progress_body.addWidget(self.status)
         self.progress_detail = QtWidgets.QLabel("用时: - · 预计剩余: -")
-        self.progress_detail.setObjectName("sub")
-        self.v.addWidget(self.progress_detail)
+        self.progress_detail.setObjectName("slotIndex")
+        progress_body.addWidget(self.progress_detail)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(True)
         self.progress.setFormat("准备中…")
         self.progress.setVisible(False)
-        self.v.addWidget(self.progress)
+        progress_body.addWidget(self.progress)
+        col.addWidget(progress_zone)
+
+        # ---- 片段审核:重生/重试/合成都贴着片段表放 ----
+        self.b_regen_segment = QtWidgets.QPushButton("重生选中片段")
+        self.b_regen_segment.setObjectName("quiet")
+        self.b_regen_segment.clicked.connect(self.regenerate_selected_segment)
+        self.b_regen_segment.setEnabled(False)
+        self.b_retry_failed = QtWidgets.QPushButton("重试失败片段")
+        self.b_retry_failed.setObjectName("quiet")
+        self.b_retry_failed.clicked.connect(self.retry_failed_segments)
+        self.b_retry_failed.setEnabled(False)
+        table_zone, table_body = zone_card(
+            "审核", "片段", "逐段确认后再合成成片",
+            actions=[self.b_regen_segment, self.b_retry_failed])
         self.table = QtWidgets.QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(["片段", "时间", "口播稿", "状态", "审核帧", "视频文件", "耗时/预计", "错误", "操作"])
         self.table.setWordWrap(True)
@@ -15653,16 +16072,93 @@ class VideoReplacementPage(BasePage):
         self.table.setColumnWidth(7, 150)
         self.table.setColumnWidth(8, 120)
         self.table.setMinimumHeight(420)
-        self.v.addWidget(self.table)
+        table_body.addWidget(self.table)
+
+        output_row = QtWidgets.QHBoxLayout()
+        output_row.setSpacing(8)
+        self.b_open_output = QtWidgets.QPushButton("打开成片")
+        self.b_open_output.setObjectName("quiet")
+        self.b_open_output.clicked.connect(self.open_output)
+        self.b_open_output.setEnabled(False)
+        self.b_pending = QtWidgets.QPushButton("加入待发布队列")
+        self.b_pending.setObjectName("ghost")
+        self.b_pending.clicked.connect(self.add_output_to_pending)
+        self.b_pending.setEnabled(False)
+        self.b_review = QtWidgets.QPushButton("确认片段并合成")
+        self.b_review.setObjectName("primary")
+        self.b_review.clicked.connect(self.confirm_and_concat)
+        self.b_review.setEnabled(False)
+        output_row.addStretch(1)
+        output_row.addWidget(self.b_open_output)
+        output_row.addWidget(self.b_pending)
+        output_row.addWidget(self.b_review)
+        table_body.addLayout(output_row)
+        col.addWidget(table_zone)
+
+        prompt_zone, prompt_body = zone_card("核对", "当前片段提示词", "只读，用来核对这一段到底按什么在生成")
         self.prompt_view = QtWidgets.QPlainTextEdit()
         self.prompt_view.setReadOnly(True)
         self.prompt_view.setPlaceholderText("生成时会显示当前片段提示词。")
-        self.v.addWidget(self.prompt_view, 1)
+        self.prompt_view.setMinimumHeight(150)
+        prompt_body.addWidget(self.prompt_view)
+        col.addWidget(prompt_zone)
+        col.addStretch(1)
+
         BRIDGE.payload.connect(self._on)
         self._sync_replacement_model_ui()
         self._refresh_replacement_models()
         self._sync_person_controls(False)
         self._sync_audio_controls()
+        self._sync_swap_ledger()
+
+    def _sync_swap_ledger(self, *_args):
+        """把每个槽位的真实状态写到台账行上,并算出"现在还差什么"。
+        判断口径与 start_generation 的拦截条件一致,避免这里说可以、点下去被拦。"""
+        if not (hasattr(self, "row_person") and hasattr(self, "ready")):
+            return
+        no_person = bool(self.no_person_mode.isChecked())
+        has_face = bool(self._face_paths or self._face_url or self._virtual_url)
+        blockers = []
+
+        if no_person:
+            self.row_person.set_state("keep", "纯产品视频：不换人物，也不做换脸。", pill_text="不换人")
+        elif has_face:
+            unconfirmed = []
+            if not self.person_full_body.isChecked():
+                unconfirmed.append("正脸全身照确认")
+            if not self.face_authorized.isChecked():
+                unconfirmed.append("授权确认")
+            if unconfirmed:
+                self.row_person.set_state("owe", "还要勾选：%s。" % "、".join(unconfirmed))
+                blockers.append("、".join(unconfirmed))
+            else:
+                self.row_person.set_state("swap", "原片主角 → 你上传的人物。")
+        else:
+            self.row_person.set_state("owe", "必须上传 1 张清晰正脸全身照，或改勾『纯产品视频』。")
+            blockers.append("主角正脸全身照")
+
+        if self._product_paths or self._product_urls:
+            self.row_product.set_state("swap", "原片产品 → 你上传的 %d 张产品图。" % max(
+                len(self._product_paths), len(self._product_urls)))
+        else:
+            self.row_product.set_state("keep", "未上传：保留原片产品不动。")
+
+        if self._scene_path or self._scene_url:
+            self.row_scene.set_state("swap", "原片场景 → 你上传的场景图。")
+        else:
+            self.row_scene.set_state("keep", "未上传：保留原片场景不动。")
+
+        if self._selected_audio_mode() == "uploaded" and not self._replacement_audio_path:
+            blockers.append("完整配音音频")
+
+        if not (self._source or {}).get("sourceVideoPath"):
+            self.ready.set_state("keep", "先从『分解视频』把一条原片送进来。")
+        elif blockers:
+            self.ready.set_state("owe", "还差：%s。" % "；".join(blockers))
+        elif not (self._job or {}).get("segments"):
+            self.ready.set_state("swap", "素材齐了，先生成替换方案，确认片段后再执行生成。")
+        else:
+            self.ready.set_state("done", "方案已就绪，可以执行替换生成。")
 
     def _sync_person_controls(self, checked):
         enabled = not bool(checked)
@@ -15677,6 +16173,7 @@ class VideoReplacementPage(BasePage):
             self.model_lab.setText("纯产品视频模式：无需上传人脸，不执行换脸。")
         elif not (self._face_paths or self._virtual_url):
             self.model_lab.setText("未选择人物；请上传 1 张清晰正脸全身照。")
+        self._sync_swap_ledger()
 
     def _selected_audio_mode(self):
         widget = getattr(self, "audio_mode", None)
@@ -15904,6 +16401,7 @@ class VideoReplacementPage(BasePage):
             self.refresh_segments()
             self.b_start.setEnabled(True)
             self._set_generation_feedback(False)
+            self._sync_swap_ledger()
         elif tag == "video_replace_comic_frame_done" and d.get("jobId") == self._job.get("id"):
             self._busy = False
             self._job.update(d.get("job") or {})
@@ -15920,6 +16418,7 @@ class VideoReplacementPage(BasePage):
                 self._face_url = ""
                 self.model_lab.setText("已生成虚拟模特形象")
                 self.status.setText("虚拟模特已就绪")
+                self._sync_swap_ledger()
             else:
                 self.status.setText("虚拟模特生成失败：" + _localize_replacement_display_text(d.get("error") or "")[:120])
         elif tag == "video_replace_progress" and d.get("jobId") == self._job.get("id"):
@@ -15994,6 +16493,7 @@ class VideoReplacementPage(BasePage):
         self.b_review.setEnabled(False)
         self._set_generation_feedback(False)
         self._sync_audio_controls()
+        self._sync_swap_ledger()
 
     def retry_source_transcription(self):
         if self._busy:
@@ -16077,6 +16577,7 @@ class VideoReplacementPage(BasePage):
             self._product_paths = list(paths[:3])
             self._product_urls = []
             self.product_lab.setText("已选择: " + "、".join(os.path.basename(p) for p in self._product_paths))
+            self._sync_swap_ledger()
 
     def pick_face(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -16092,6 +16593,7 @@ class VideoReplacementPage(BasePage):
             self._virtual_url = ""
             self.person_full_body.setChecked(False)
             self.model_lab.setText("已选择主角正脸全身照：%s" % os.path.basename(self._face_paths[0]))
+            self._sync_swap_ledger()
 
     def pick_scene(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -16100,6 +16602,7 @@ class VideoReplacementPage(BasePage):
             self._scene_path = path
             self._scene_url = ""
             self.b_scene.setText("场景: " + os.path.basename(path))
+            self._sync_swap_ledger()
 
     def pick_replacement_audio(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -16109,6 +16612,7 @@ class VideoReplacementPage(BasePage):
         self._replacement_audio_path = path
         self._replacement_audio_url = ""
         self._sync_audio_controls()
+        self._sync_swap_ledger()
         self.status.setText("正在上传完整配音音频…")
         self.b_replacement_audio.setEnabled(False)
 
