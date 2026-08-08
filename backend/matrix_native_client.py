@@ -3653,6 +3653,7 @@ _COMIC_PROJECT_VIDEO_FALLBACKS = (
 _LK888_PRINCIPAL_VIDEO_MODEL = "happyhorse-video-edit"
 _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
     "kwvideo-v2-quannengcankao",
+    "hailuo-h3-quannengcankao",
     "viduq3-turbo-cankaosheng",
     "viduq3-cankaosheng",
     "viduq2-cankaosheng",
@@ -3662,6 +3663,7 @@ _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
 ))
 _LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS = (
     "kwvideo-v2-quannengcankao",
+    "hailuo-h3-quannengcankao",
 )
 _LK888_REPLACEMENT_MODEL_FALLBACKS = (
     "viduq3-turbo-cankaosheng",
@@ -3675,6 +3677,7 @@ _LK888_REPLACEMENT_MODEL_LABELS = {
     "doubao-seedance-2-0-260128": "Seedance 2.0 Standard（漫剧首尾帧）",
     "happyhorse-video-edit": "HappyHorse Video Edit",
     "kwvideo-v2-quannengcankao": "SD 2.0 全能参考",
+    "hailuo-h3-quannengcankao": "海螺 H3 全能参考",
     "viduq3-turbo-cankaosheng": "Vidu Q3 Turbo 参考生视频",
     "wan2.7-cankaosheng": "万相 2.7 参考生视频",
     "viduq3-cankaosheng": "Vidu Q3 参考生视频",
