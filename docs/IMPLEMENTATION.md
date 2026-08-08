@@ -1,4 +1,11 @@
-﻿﻿## 2026-08-08 小红书安全间隔按动作类型分别计冷却
+﻿﻿## 2026-08-08 内容采集页恢复图文同款按钮
+- `backend/matrix_native_client.py` `ContentPage.__init__`：在"下载"和"分解"之间重新创建 `self.b_note_replace = QtWidgets.QPushButton("图文同款")` 并 `addWidget`；恢复 `note_replace()` 方法（校验小红书链接→下载→emit `c_note_replace`）。
+- `_set_xhs_retry_busy` 和 `c_note_replace` 结果处理器改为对 `b_note_replace` 做 `setEnabled`（此前删按钮后只操作 `b_dl`）。孤儿处理器 `c_note_replace`（解析图片素材→跳转"🧩 图文同款"页）本来就在，现在重新接上按钮。
+- 背景：`5e3c052`（2026-08-03）有意删除该按钮，但小红书大部分是图文笔记，"分解"只处理视频，图文笔记因此在内容采集页无出口，点分解报"未找到可分析的视频文件"。按用户要求恢复。
+- `tests/test_xhs_note_replacement.py`：`test_content_page_hides_note_replacement_button`→`test_content_page_shows_note_replacement_button`；`test_native_collection_hides_note_replace_button_but_keeps_handoff_handler`→`test_native_collection_has_note_replace_button_and_handoff_handler`。
+- 验证与影响：`tests.test_xhs_note_replacement` 62/62，相邻套件 177/177，`py_compile` 通过。仅本地客户端 UI，不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书安全间隔按动作类型分别计冷却
 - `backend/api_server.py` `_xhs_safety_usage()` 新增 `lastActionAtBy` dict；`xhs_safety_record()` 除了写全局 `lastActionAt`（保留给展示/兼容），额外写 `lastActionAtBy[action]=ts`。
 - `_xhs_safety_snapshot()` 新增 `action` 形参：传入时用 `lastActionAtBy[action]` 算 `cooldownLeft`，为空时回退全局 `lastActionAt`（兼容旧调用）。`xhs_safety_preflight()` 和 `xhs_safety_record()` 的 snapshot 调用都带上 `action`。
 - 根因：旧实现全账号共享一个 `lastActionAt`，`search` 的 `xhs_safety_record("search")` 写的时间戳会让 `download` 的 `xhs_collection_account_gate("download")→xhs_safety_preflight("download")` 在 `minInterval` 默认 45s 内命中 `cooldownLeft>0` → `xhs_safety_interval`。

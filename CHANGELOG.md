@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-08 内容采集页恢复"图文同款"按钮
+### Fixed
+- 内容采集页重新加入"图文同款"按钮（在"下载"和"分解"之间），并恢复 `note_replace()` 方法。小红书笔记大部分是图文，此前只剩"分解"（视频专用），对图文笔记点分解会因找不到视频文件报"分解失败:未找到可分析的视频文件"。
+- 该入口在 2026-08-03 的 `5e3c052` 被删除（只留下孤儿处理器 `c_note_replace`），是有意隐藏，但导致图文笔记在内容采集页无可用出口。现按用户要求恢复。
+- "图文同款"按钮下载笔记后经现有 `c_note_replace` 处理器解析图片素材并跳转"🧩 图文同款"页；"分解"按钮仍只处理视频，两个入口并存。
+
+### Verification And Operations
+- RED/GREEN：`tests.test_xhs_note_replacement` 的 `test_content_page_shows_note_replacement_button`（按钮存在）和 `test_native_collection_has_note_replace_button_and_handoff_handler`（源码含按钮+方法+处理器），由原来锁定"隐藏"的两条测试反转而来。全套 62/62 通过；相邻套件合计 177/177；`py_compile` 通过。
+- 仅本地客户端 UI 变更；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复隐藏行为。
+
 ## 2026-08-08 小红书搜索后立即下载被 xhs_safety_interval 误拦
 ### Fixed
 - 小红书安全间隔冷却改为**按动作类型分别计算**：`search` / `download` / `comment` / `publish` 各自独立 `lastActionAt`。此前全账号共享一个时间戳，一次搜索会让紧随其后的下载/分解在 `minInterval`（默认 45s）内被 `xhs_safety_interval` 拦，而“搜索→点结果→下载”正是内容采集的自然顺序流。
