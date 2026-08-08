@@ -78,5 +78,11 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%LOCAL_API_PORT% .*LI
     taskkill /F /PID %%P >nul 2>nul
   )
 )
+rem 只按端口杀不够：抢不到 9081 的那个客户端进程会活下来，它内嵌的
+rem local-browser worker 继续轮询中心服并把任务打到别人的 9081 引擎上，
+rem 于是同一批任务被执行两遍（浏览器反复弹窗）。按命令行清掉全部残留客户端。
+rem 进程名必须是 python/pythonw：否则执行这行的 powershell.exe 会因为自己的
+rem 命令行里带着关键字而自杀。$PID 排除同理，双保险。
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*matrix_native_client.py*' } | ForEach-Object { Write-Host ('Stopping stale client PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 1 /nobreak >nul
 exit /b 0
