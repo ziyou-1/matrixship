@@ -4548,6 +4548,12 @@ def _draw_icon(kind, size=22, color="#ffffff"):
         p.setPen(pen2)
         line(0.5, 0.24, 0.5, 0.76)
         line(0.24, 0.5, 0.76, 0.5)
+    elif kind == "close":  # 叉号(清空失败记录)
+        pen2 = QtGui.QPen(c, max(2.0, s * 0.12))
+        pen2.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen2)
+        line(0.28, 0.28, 0.72, 0.72)
+        line(0.72, 0.28, 0.28, 0.72)
     elif kind == "edit":  # 铅笔(重新编辑)
         p.setBrush(c)
         p.setPen(QtCore.Qt.NoPen)
@@ -19743,6 +19749,35 @@ def remove_prodgen(pid):
     save_prodgen()
 
 
+PRODGEN_FAILED_STATUSES = ("失败", "已中断")
+
+
+def prodgen_failed_entries():
+    """失败 + 上次退出时被中断的生成记录(Agent.模式『清空失败对话』的目标)。"""
+    return [e for e in PRODGEN
+            if isinstance(e, dict) and str(e.get("status") or "") in PRODGEN_FAILED_STATUSES]
+
+
+def prodgen_clearable_entries():
+    """可清空的生成记录:生成中的保留,避免删掉已扣费、马上要回结果的任务。"""
+    return [e for e in PRODGEN
+            if isinstance(e, dict) and str(e.get("status") or "") != "生成中"]
+
+
+def remove_prodgen_many(pids):
+    """批量删除生成记录,只落一次盘。返回实际删除条数。"""
+    global PRODGEN
+    drop = set(str(p) for p in (pids or []) if p)
+    if not drop:
+        return 0
+    before = len(PRODGEN)
+    PRODGEN = [x for x in PRODGEN if str((x or {}).get("id") or "") not in drop]
+    removed = before - len(PRODGEN)
+    if removed:
+        save_prodgen()
+    return removed
+
+
 def _file_to_data_url(path):
     import base64 as _b64
     with open(path, "rb") as f:
@@ -26600,8 +26635,7 @@ class ProductGenPage(BasePage):
         cv.setSpacing(12)
         # (已按用户要求删掉模型/风格头像圆一行)
         # 行1:提示语
-        self.hint = QtWidgets.QLabel("描述画面中的物体、风格及文字排版,注重指令精准与细节还原。"
-                                     "图片模式第1张为待修改图；视频模式上传图片全部作为参考图。")
+        self.hint = QtWidgets.QLabel("描述画面中的物体、风格及文字排版,注重指令精准与细节还原。")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color:#6b7488;font-size:11.5px;background:transparent;border:0;")
         cv.addWidget(self.hint)
@@ -26648,7 +26682,12 @@ class ProductGenPage(BasePage):
         self.optimize_btn.setToolTip("")
         ctl.addWidget(self.optimize_btn)
         ctl.addWidget(_round_icon_btn("grid", 40, "#8b93a3", cb=self.pick_from_assets, tip="从资产库选参考图"))
-        ctl.addWidget(_round_icon_btn("trash", 40, "#8b93a3", cb=lambda: self.inp.clear(), tip="清空输入"))
+        self.clear_failed_btn = _round_icon_btn("close", 40, "#8b93a3", cb=self.clear_failed,
+                                                tip="清空失败对话")
+        ctl.addWidget(self.clear_failed_btn)
+        self.clear_all_btn = _round_icon_btn("trash", 40, "#8b93a3", cb=self.clear_all,
+                                             tip="清空所有对话")
+        ctl.addWidget(self.clear_all_btn)
         ctl.addWidget(_round_icon_btn("plus", 40, "#8b93a3", cb=self.pick_ref, tip="上传图片"))
         self.ref_video_btn = _round_icon_btn(
             "video", 40, "#8b93a3", cb=self.pick_reference_video,
@@ -26683,11 +26722,7 @@ class ProductGenPage(BasePage):
             if w:
                 w.setParent(None)
         self._cards = {}
-        if not PRODGEN:
-            hint = QtWidgets.QLabel("还没有生成记录。选择『商品图/视频』,可上传参考图,输入描述后点发送即可开始。")
-            hint.setStyleSheet("color:#6b7488;font-size:13px;background:transparent;")
-            hint.setWordWrap(True)
-            self.msgs.insertWidget(0, hint)
+        self._sync_empty_hint()
         for e in PRODGEN:
             self._add_card(e)
         self._scroll_bottom()
@@ -26803,6 +26838,19 @@ class ProductGenPage(BasePage):
         self._cards[entry.get("id")] = card
         self.msgs.insertWidget(self.msgs.count() - 1, card)
         return card
+
+    def _sync_empty_hint(self):
+        """没有生成记录时补回空态提示，有记录时移除(清空对话后也要还原空态)。"""
+        first = self.msgs.itemAt(0)
+        widget = first.widget() if first else None
+        has_hint = isinstance(widget, QtWidgets.QLabel)
+        if PRODGEN and has_hint:
+            widget.setParent(None)
+        elif not PRODGEN and not has_hint:
+            hint = QtWidgets.QLabel("还没有生成记录。选择『商品图/视频』,可上传参考图,输入描述后点发送即可开始。")
+            hint.setStyleSheet("color:#6b7488;font-size:13px;background:transparent;")
+            hint.setWordWrap(True)
+            self.msgs.insertWidget(0, hint)
 
     def _scroll_bottom(self):
         QtCore.QTimer.singleShot(60, lambda: self.scroll.verticalScrollBar().setValue(
@@ -26953,14 +27001,8 @@ class ProductGenPage(BasePage):
         limit = _prodgen_entry_ref_limit({"mode": self._mode, "model": self._current_model()})
         if len(self._refs) < limit:
             self.ref_strip.addWidget(self._make_ref_add_cell(), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        if self._refs:
-            if self._mode == "video" and _agent_video_is_first_last_frame_model(self._current_model()):
-                hint_text = "首尾帧模型：只使用首帧和尾帧两张图。"
-            else:
-                hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"
-                             if self._mode == "video"
-                             else "图片模式：第1张为待修改图，第2张起为参考图。")
-            hint = QtWidgets.QLabel(hint_text)
+        if self._refs and self._mode == "video" and _agent_video_is_first_last_frame_model(self._current_model()):
+            hint = QtWidgets.QLabel("首尾帧模型：只使用首帧和尾帧两张图。")
             hint.setStyleSheet("color:#6b7488;font-size:11px;background:transparent;border:0;")
             self.ref_strip.addWidget(hint, 0, QtCore.Qt.AlignVCenter)
         self.ref_strip.addStretch()
@@ -27079,10 +27121,7 @@ class ProductGenPage(BasePage):
             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         add_prodgen(entry)
-        # 移除空态提示(若在)
-        first = self.msgs.itemAt(0)
-        if first and first.widget() and isinstance(first.widget(), QtWidgets.QLabel):
-            first.widget().setParent(None)
+        self._sync_empty_hint()  # 移除空态提示(若在)
         self._add_card(entry)
         self._scroll_bottom()
         self.inp.clear()
@@ -27264,6 +27303,54 @@ class ProductGenPage(BasePage):
         card = self._cards.pop(pid, None)
         if card:
             card.setParent(None)
+        self._sync_empty_hint()
+
+    def _drop_entries(self, entries):
+        """把若干条生成记录连同卡片一起移除,返回实际删除条数。"""
+        pids = [e.get("id") for e in entries if isinstance(e, dict) and e.get("id")]
+        for pid in pids:
+            card = self._cards.pop(pid, None)
+            if card:
+                card.setParent(None)
+        removed = remove_prodgen_many(pids)
+        self._sync_empty_hint()
+        return removed
+
+    def _set_meta_text(self, text):
+        if getattr(self, "model_meta", None) is not None:
+            self.model_meta.setText(text)
+
+    def clear_failed(self):
+        """✕:只清失败/已中断的对话,成功的结果保留。"""
+        failed = prodgen_failed_entries()
+        if not failed:
+            QtWidgets.QMessageBox.information(self, "清空失败对话", "当前没有失败或已中断的生成记录。")
+            return
+        if QtWidgets.QMessageBox.question(
+                self,
+                "清空失败对话",
+                "确定删除 %d 条失败/已中断的生成记录吗？删除后不可恢复。" % len(failed),
+        ) != QtWidgets.QMessageBox.Yes:
+            return
+        self._set_meta_text("已清空 %d 条失败对话。" % self._drop_entries(failed))
+
+    def clear_all(self):
+        """垃圾桶:清空整条生成流,生成中的记录保留到出结果。"""
+        removable = prodgen_clearable_entries()
+        busy = len(PRODGEN) - len(removable)
+        if not removable:
+            QtWidgets.QMessageBox.information(
+                self, "清空所有对话",
+                "生成中的记录不会被清空，等生成结束后再试。" if busy else "当前没有生成记录。")
+            return
+        tip = "确定清空全部 %d 条生成记录吗？删除后不可恢复。" % len(removable)
+        if busy:
+            tip += "\n(%d 条正在生成中，会保留到生成结束。)" % busy
+        if QtWidgets.QMessageBox.question(self, "清空所有对话", tip) != QtWidgets.QMessageBox.Yes:
+            return
+        removed = self._drop_entries(removable)
+        self._set_meta_text("已清空 %d 条对话。" % removed
+                            + ("生成中的 %d 条已保留。" % busy if busy else ""))
 
     def save_to_assets(self, entry):
         files = [f for f in (entry.get("files") or []) if os.path.isfile(f)]

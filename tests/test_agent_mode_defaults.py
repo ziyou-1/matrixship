@@ -345,8 +345,10 @@ class AgentModeDefaultsTest(unittest.TestCase):
         module = load_client_module("matrix_native_client_agent_video_ref_labels_test")
         self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 0), "参考图1")
         self.assertEqual(module._prodgen_ref_label_for("video", "vidu2.0", 1), "参考图2")
-        self.assertIn('hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"', rebuild_block)
-        self.assertIn('else "图片模式：第1张为待修改图，第2张起为参考图。")', rebuild_block)
+        # 参考图槽下方不再展示图片/视频模式的待修改图说明，生成规则以 lk888 为准。
+        self.assertNotIn("视频模式：上传图片全部作为参考图，不会当作待修改图。", rebuild_block)
+        self.assertNotIn("图片模式：第1张为待修改图，第2张起为参考图。", rebuild_block)
+        self.assertIn('QtWidgets.QLabel("首尾帧模型：只使用首帧和尾帧两张图。")', rebuild_block)
         self.assertIn("self._style_ref_slot()", mode_block)
         self.assertIn('if e.get("mode") == "video":', card_block)
         self.assertIn('ref_label = _prodgen_ref_label_for(e.get("mode"), e.get("model"), i)', card_block)
@@ -383,6 +385,65 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn("第1张为待修改图", src)
         self.assertIn("第2张起为参考图", src)
         self.assertIn("\"refs\"", src[src.index("def regen(self, entry):"):src.index("def remove(self, entry):")])
+
+    def test_agent_composer_clear_buttons_are_wired_to_real_handlers(self):
+        src = CLIENT.read_text(encoding="utf-8")
+        page_start = src.index("class ProductGenPage")
+        page_end = src.index("class AssetPickerDialog", page_start)
+        page_block = src[page_start:page_end]
+
+        self.assertIn('elif kind == "close":', src)  # ✕ 图标
+        self.assertIn(
+            'self.clear_failed_btn = _round_icon_btn("close", 40, "#8b93a3", cb=self.clear_failed,',
+            page_block)
+        self.assertIn(
+            'self.clear_all_btn = _round_icon_btn("trash", 40, "#8b93a3", cb=self.clear_all,',
+            page_block)
+        self.assertIn("def clear_failed(self):", page_block)
+        self.assertIn("def clear_all(self):", page_block)
+        # 旧的垃圾桶只清输入框，点了看不出反应，已经不再保留。
+        self.assertNotIn('cb=lambda: self.inp.clear(), tip="清空输入"', page_block)
+
+    def test_agent_clear_failed_keeps_finished_and_running_entries(self):
+        module = load_client_module("matrix_native_client_agent_clear_failed_test")
+        prodgen = [
+            {"id": "pg-1", "status": "完成"},
+            {"id": "pg-2", "status": "失败"},
+            {"id": "pg-3", "status": "已中断"},
+            {"id": "pg-4", "status": "生成中"},
+        ]
+        with mock.patch.object(module, "PRODGEN", list(prodgen)), \
+                mock.patch.object(module, "save_prodgen") as save:
+            self.assertEqual(["pg-2", "pg-3"],
+                             [e["id"] for e in module.prodgen_failed_entries()])
+            removed = module.remove_prodgen_many(["pg-2", "pg-3"])
+            self.assertEqual(2, removed)
+            self.assertEqual(["pg-1", "pg-4"], [e["id"] for e in module.PRODGEN])
+            self.assertEqual(1, save.call_count)
+
+    def test_agent_clear_all_skips_entries_still_generating(self):
+        module = load_client_module("matrix_native_client_agent_clear_all_test")
+        prodgen = [
+            {"id": "pg-1", "status": "完成"},
+            {"id": "pg-2", "status": "失败"},
+            {"id": "pg-3", "status": "生成中"},
+        ]
+        with mock.patch.object(module, "PRODGEN", list(prodgen)), \
+                mock.patch.object(module, "save_prodgen") as save:
+            clearable = module.prodgen_clearable_entries()
+            self.assertEqual(["pg-1", "pg-2"], [e["id"] for e in clearable])
+            module.remove_prodgen_many([e["id"] for e in clearable])
+            self.assertEqual(["pg-3"], [e["id"] for e in module.PRODGEN])
+            self.assertEqual(1, save.call_count)
+
+    def test_agent_remove_prodgen_many_without_ids_does_not_touch_disk(self):
+        module = load_client_module("matrix_native_client_agent_clear_noop_test")
+        with mock.patch.object(module, "PRODGEN", [{"id": "pg-1", "status": "完成"}]), \
+                mock.patch.object(module, "save_prodgen") as save:
+            self.assertEqual(0, module.remove_prodgen_many([]))
+            self.assertEqual(0, module.remove_prodgen_many(["pg-missing"]))
+            self.assertEqual(["pg-1"], [e["id"] for e in module.PRODGEN])
+            save.assert_not_called()
 
     def test_agent_completed_video_can_be_added_to_douyin_pending_publish_once(self):
         module = load_client_module("matrix_native_client_agent_pending_publish_test")
