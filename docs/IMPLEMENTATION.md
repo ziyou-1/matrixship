@@ -1,4 +1,12 @@
-﻿﻿## 2026-08-08 小红书登录成功写入就绪 marker
+﻿﻿## 2026-08-08 小红书安全间隔按动作类型分别计冷却
+- `backend/api_server.py` `_xhs_safety_usage()` 新增 `lastActionAtBy` dict；`xhs_safety_record()` 除了写全局 `lastActionAt`（保留给展示/兼容），额外写 `lastActionAtBy[action]=ts`。
+- `_xhs_safety_snapshot()` 新增 `action` 形参：传入时用 `lastActionAtBy[action]` 算 `cooldownLeft`，为空时回退全局 `lastActionAt`（兼容旧调用）。`xhs_safety_preflight()` 和 `xhs_safety_record()` 的 snapshot 调用都带上 `action`。
+- 根因：旧实现全账号共享一个 `lastActionAt`，`search` 的 `xhs_safety_record("search")` 写的时间戳会让 `download` 的 `xhs_collection_account_gate("download")→xhs_safety_preflight("download")` 在 `minInterval` 默认 45s 内命中 `cooldownLeft>0` → `xhs_safety_interval`。
+- `tests/test_xhs_safety_mode.py`：新增 `test_search_does_not_block_immediate_download`、`test_min_interval_still_throttles_repeated_download`，替换固化错误行为的 `test_min_interval_blocks_xhs_download_endpoint`。
+- 边界：平台风险暂停 `xhs_safety_paused` 仍为全局；douyin 评论冷却是独立函数（`minIntervalCooldownLeft`），不受影响。旧状态文件无 `lastActionAtBy` 时读取补空 dict。
+- 验证与影响：`tests.test_xhs_safety_mode` 7/7，相邻套件除 1 条环境性 `playwright` 缺失外全过，`py_compile` 通过。不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书登录成功写入就绪 marker
 - `backend/api_server.py` `run_xhs_login()` 登录成功分支新增 `_save_json(DATA_DIR/xhs_auth_state.json, {loggedIn, cookieCount, profileDir, savedAt})`，与云登录路径 `_read_login_state()` 写 marker 的行为对齐。
 - 根因：`platform_adapters.xhs_login()` 的登录判定接受强 cookie `XHS_STRONG_LOGIN_COOKIES` 或 DOM 登录态；而就绪判定 `xhs_profile_ready()` 无 marker 时只调 `_xhs_profile_has_login_cookie()` 找强 cookie。DOM/主站 `web_session` 登录成功但缺强 cookie 时两者分歧，`current_accounts()` 不返回 xhs 行，卡片显示 0 个授权账号。
 - `tests/test_xhs_account_online_status.py`：mock `xhs_login` 返回 `logged_in=True` 但 profile 无强 cookie、无 marker，先断言就绪为假/账号 0（复现），修复后断言就绪为真/账号 1。测点选在 `run_xhs_login` 接缝，不需要 playwright。

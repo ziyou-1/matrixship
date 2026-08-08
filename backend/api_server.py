@@ -5062,17 +5062,26 @@ def _xhs_safety_usage(state, account_id, now=None):
         usage.setdefault(action + "Count", 0)
     usage.setdefault("lastActionAt", 0)
     usage.setdefault("lastAction", "")
+    if not isinstance(usage.get("lastActionAtBy"), dict):
+        usage["lastActionAtBy"] = {}
     usage.setdefault("paused", False)
     usage.setdefault("pausedReason", "")
     return usage
 
 
-def _xhs_safety_snapshot(account_id, usage=None, cfg=None, now=None):
+def _xhs_safety_snapshot(account_id, usage=None, cfg=None, now=None, action=""):
     cfg = cfg or load_risk_config()
     if usage is None:
         state = load_xhs_safety_state()
         usage = _xhs_safety_usage(state, account_id, now=now)
-    last = float(usage.get("lastActionAt") or 0)
+    # 间隔冷却按动作类型分别计算:search/download/comment/publish 各自独立,
+    # 一次搜索不再阻塞紧随其后的下载。action 为空时回退到全局最近动作(兼容旧调用)。
+    action = str(action or "").strip()
+    by = usage.get("lastActionAtBy") if isinstance(usage.get("lastActionAtBy"), dict) else {}
+    if action:
+        last = float(by.get(action) or 0)
+    else:
+        last = float(usage.get("lastActionAt") or 0)
     interval = int(cfg.get("minInterval") or 0)
     cooldown_left = max(0, int(interval - (float(time.time() if now is None else now) - last))) if last and interval else 0
     return {
@@ -5103,7 +5112,7 @@ def xhs_safety_preflight(action, account_id="xhs-self", now=None, dry_run=False)
     cfg = load_risk_config()
     state = load_xhs_safety_state()
     usage = _xhs_safety_usage(state, account_id, now=now)
-    snapshot = _xhs_safety_snapshot(account_id, usage=usage, cfg=cfg, now=now)
+    snapshot = _xhs_safety_snapshot(account_id, usage=usage, cfg=cfg, now=now, action=action)
     if usage.get("paused"):
         return {"ok": False, "blocked": True, "error": "xhs_safety_paused", "safety": snapshot}
     if action == "publish" and int(usage.get("publishCount") or 0) >= int(cfg.get("dailyPublish") or 0):
@@ -5205,6 +5214,12 @@ def xhs_safety_record(action, account_id, result, now=None, dry_run=False):
     ts = time.time() if now is None else float(now)
     usage["lastActionAt"] = ts
     usage["lastAction"] = action
+    if action:
+        by = usage.get("lastActionAtBy")
+        if not isinstance(by, dict):
+            by = {}
+        by[action] = ts
+        usage["lastActionAtBy"] = by
     success = bool(isinstance(result, dict) and (result.get("ok") or result.get("published") or result.get("clicked")))
     if success and action in XHS_SAFETY_ACTIONS:
         key = action + "Count"
@@ -5221,7 +5236,7 @@ def xhs_safety_record(action, account_id, result, now=None, dry_run=False):
         usage["pausedReason"] = reason.strip()
         usage["pausedAt"] = ts
     save_xhs_safety_state(state)
-    return {"ok": True, "safety": _xhs_safety_snapshot(account_id, usage=usage, now=now)}
+    return {"ok": True, "safety": _xhs_safety_snapshot(account_id, usage=usage, now=now, action=action)}
 
 
 def run_publish(material, account_id, dry_run, title_override=None, platform=None):

@@ -1,4 +1,13 @@
-﻿﻿## 2026-08-08 小红书登录提示“账号已入矩阵”但卡片显示 0 个授权账号
+﻿﻿## 2026-08-08 小红书搜索后点下载/分解报 `xhs_safety_interval`
+- 现象：内容采集选小红书，搜索出结果后，点“下载”或“分解”，状态栏立刻报 `分解失败:下载未完成 xhs_safety_interval`（或 `下载失败:xhs_safety_interval`）。
+- 根因：小红书安全间隔冷却（`minInterval` 默认 45s）此前全账号共享一个 `lastActionAt`。搜索会写这个时间戳，紧随其后的下载在 45s 内被判定“间隔未到”而拦截。“搜索→点结果→下载”是自然顺序流，所以第一次点下载几乎必被拦。
+- 修复：冷却改为按动作类型分别计算，`search`/`download`/`comment`/`publish` 各自独立，搜索不再阻塞下载；同类型动作之间仍保留 45s 限速。
+- 排查：如果仍被拦，看返回的 `safety.cooldownLeft` 是不是针对 `download` 本身（说明刚下载过，属正常限速，等 `cooldownLeft` 秒即可）；确认跑的是本仓库最新代码（旧执行器无此修复，见端口冲突/老客户端条目）。想临时关掉全部限速可设 `XHS_SAFETY_MODE=0`（会削弱防风控，仅本地测试用）。
+- 边界：平台风险暂停 `xhs_safety_paused` 仍是全局的（一次风控信号暂停所有动作），与本间隔逻辑无关。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_safety_mode -v`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_safety_mode.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 小红书登录提示“账号已入矩阵”但卡片显示 0 个授权账号
 - 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、提示“登录成功，账号已入矩阵”，但小红书卡片仍是“0 个授权账号 / 暂无授权账号”。抖音正常。
 - 根因：账号矩阵登录走 `/api/xhs/login` → `run_xhs_login()` → `platform_adapters.xhs_login()`。登录判定接受 DOM 登录态或主站 `web_session`，但登录成功后**没有写 `xhs_auth_state.json`**。账号列表就绪判定 `xhs_profile_ready()` 无 marker 时只认强 cookie（`id_token`/`customerClientId`/`galaxy_creator_session_id`/`access-token-creator`）。主站/DOM 登录成功但 profile 缺这些强 cookie 时，`current_accounts()` 返回 0 个小红书账号。
 - 修复：`run_xhs_login()` 登录成功后写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径一致，让“登录成功”即“就绪”。

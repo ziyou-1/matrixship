@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-08 小红书搜索后立即下载被 xhs_safety_interval 误拦
+### Fixed
+- 小红书安全间隔冷却改为**按动作类型分别计算**：`search` / `download` / `comment` / `publish` 各自独立 `lastActionAt`。此前全账号共享一个时间戳，一次搜索会让紧随其后的下载/分解在 `minInterval`（默认 45s）内被 `xhs_safety_interval` 拦，而“搜索→点结果→下载”正是内容采集的自然顺序流。
+- 同类型动作之间仍保留 `minInterval` 限速（连续两次下载仍会被拦），防风控意图不变；只是不再跨动作类型互相阻塞。
+- 平台风险暂停 `xhs_safety_paused` 仍是全局的（一次风控信号暂停所有动作），未改动。
+
+### Verification And Operations
+- RED/GREEN：`tests.test_xhs_safety_mode.test_search_does_not_block_immediate_download`（搜索后下载放行）、`test_min_interval_still_throttles_repeated_download`（连续下载仍限速）。原 `test_min_interval_blocks_xhs_download_endpoint` 固化了“搜索拦下载”的错误行为，已替换。相邻套件 `tests.test_douyin_comment_cooldown` 的间隔逻辑是另一套函数（`minIntervalCooldownLeft`），未受影响；该文件仅有的 1 条 `playwright` 报错是环境未装 playwright 所致，基线同样存在，与本次无关。`py_compile` 通过。
+- 状态文件向后兼容：旧 `xhs_safety_state.json` 无 `lastActionAtBy` 字段，读取时补空 dict；升级后首次下载不再被历史 `search` 时间戳阻塞。
+- 只改本地执行器安全间隔逻辑和测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。回滚 `backend/api_server.py`、`tests/test_xhs_safety_mode.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-08 小红书账号矩阵登录成功却显示 0 个授权账号
 ### Fixed
 - `run_xhs_login()`（账号矩阵 `/api/xhs/login` 的执行体）登录成功后现在写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径 `_read_login_state()` 对齐。此前该路径只组 job、不写 marker。

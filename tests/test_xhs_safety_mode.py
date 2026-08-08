@@ -87,7 +87,12 @@ class XhsSafetyModeTest(unittest.TestCase):
         self.assertEqual(payload["error"], "xhs_daily_comment_limit")
         publish_comment.assert_not_called()
 
-    def test_min_interval_blocks_xhs_download_endpoint(self):
+    def test_search_does_not_block_immediate_download(self):
+        """搜索的间隔冷却不应阻塞紧随其后的下载。
+
+        内容采集页 search -> 点结果 -> download 是自然顺序流;冷却按动作类型
+        分别计算,search 的时间戳只影响下一次 search,不影响 download。
+        """
         self.api.xhs_safety_record("search", "xhs-self", {"ok": True}, now=time.time())
         handler = self.make_handler("/api/xhs/download", {
             "url": "https://www.xiaohongshu.com/explore/note-a",
@@ -97,13 +102,24 @@ class XhsSafetyModeTest(unittest.TestCase):
 
         with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
                 mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
-                mock.patch.object(self.api, "xhs_download_note") as download, \
+                mock.patch.object(self.api, "xhs_download_note", return_value={"ok": True, "savePath": "x"}) as download, \
                 mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
             status, payload = handler.do_POST()
 
-        self.assertEqual(status, 429)
-        self.assertEqual(payload["error"], "xhs_safety_interval")
-        download.assert_not_called()
+        self.assertNotEqual(payload.get("error"), "xhs_safety_interval",
+                            "搜索的冷却不应拦下载")
+        download.assert_called_once()
+
+    def test_min_interval_still_throttles_repeated_download(self):
+        """同类型动作之间仍受 minInterval 限速:连续两次下载被拦。"""
+        self.api.xhs_safety_record("download", "xhs-self", {"ok": True}, now=1000)
+
+        blocked = self.api.xhs_safety_preflight("download", "xhs-self", now=1003)
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["error"], "xhs_safety_interval")
+
+        allowed = self.api.xhs_safety_preflight("download", "xhs-self", now=1000 + 46)
+        self.assertTrue(allowed["ok"])
 
     def test_account_collection_requires_saved_xhs_profile(self):
         with mock.patch.object(self.api, "xhs_profile_ready", return_value=False):
