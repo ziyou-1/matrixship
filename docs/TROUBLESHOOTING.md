@@ -1180,7 +1180,7 @@
 - 根因：同款替换默认按约 8 秒分段生成；旧逻辑把每段 TTS 音频按对应视频片段时长合成，音频长于视频时会按视频时长收尾，导致尾部被截断。
 - 修复：`backend/matrix_native_client.py#L6031-L6079` 新增生成前口播时长估算；`backend/matrix_native_client.py#L7072-L7075` 在开始生成前阻断明显超长片段；`backend/matrix_native_client.py#L11651-L11678` 在 TTS 下载后用真实音频时长兜底，超长时返回 `replacement_tts_audio_too_long`，不再进入截断式合成。
 - 排查：查看任务 JSON 的 `audioMode`、片段 `duration/script/ttsDurationSec/ttsTimingStatus/ttsTimingError`。如果 `audioMode=auto`，使用的是生成视频自带声音，不走这套 TTS 校验；旧 `audioMode=source` 会兼容映射为 `auto`。如果 `audioMode=uploaded`，整条音轨仍按最终成片时长校验。
-- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `4.2` 字/秒，值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
+- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `5.5` 字/秒（2026-08-07 前为 `4.2`），值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
 - 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_duration_preflight_flags_segment_script_that_will_be_cut tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_audio_mode_rejects_real_audio_longer_than_segment_before_mux tests.test_video_replacement_v2.VideoReplacementV2Test.test_start_generation_blocks_tts_script_that_exceeds_segment_duration -v`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本文档即可；不涉及中心服、数据库或 `migration.sql`。回滚后 AI 配音超长仍可能被片段时长截断。
 
@@ -2982,3 +2982,13 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：当前阶段下载按钮必须为禁用状态，页面源码不应包含 `/MatrixShipAgent-Setup.exe`。运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest -v` 验证。
 - 验证：本地访问 `http://127.0.0.1:9080/download` 应返回 HTML，包含“云灵星图 AI 爆款复刻平台 Windows 客户端下载”和“Windows 客户端即将开放下载”，且不包含安装包直链。
 - 回滚：删除 `/download` 路由和页面渲染函数；不需要改动安装包直链接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+
+## 2026-08-07 漫剧项目模式片段时长虚高、单条成本偏贵
+- 现象：同款替换选择漫剧项目模式后，一句约 11 秒的口播被排成 15 秒视频，整条片子时长和费用明显高于预期。
+- 根因一：口播时长估算默认按 `4.2` 字/秒，比真实中文广告口播语速（约 5.5~6.5 字/秒）慢约 25%，59 字的台词被估成 14.89 秒。
+- 根因二：`_comic_video_duration_slot()` 只有 `4/8/12/15` 四个粗档位，估算值一旦越过 12 就直接跳到 15，无法申请中间秒数。
+- 修复：估算默认语速改为 `5.5` 字/秒；漫剧档位默认改为 `4..15` 每个整数秒并预留 `0.5` 秒余量；排期阶段先跑一遍 TTS 用 `_probe_media_duration()` 探测真实音频时长，测到就用真实值定视频秒数，测不到自动回落到字数估算。
+- 排查：查看任务 JSON 的片段字段 `speechDurationSource`（`measured` 表示用了真实 TTS 时长，`estimated` 表示回落到估算）、`speechDurationSec`、`speechEstimatedSec`、`videoDurationSec`。若出现 `speechOverflowSec`，说明该段真实口播已超过最大 15 秒档位，需要缩短口播稿。
+- 注意：探测用的是本地 `lk888_tts_voice()`，漫剧服务端生成成品时用的是自己的 TTS 引擎，两者语速可能有差异，因此仍保留 `0.5` 秒余量。
+- 回滚：`VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15` 恢复旧档位，`VIDEO_REPLACE_TTS_CHARS_PER_SEC=4.2` 恢复旧估算语速，`VIDEO_REPLACE_COMIC_MEASURE_TTS=0` 关闭真实时长探测；三个开关互相独立，不需要改代码。
+- 未验证项：漫剧服务端（120.26.194.174）对任意整数秒 `video_duration` 的支持尚未实测，首次启用请先跑单段冒烟；`_comic_project_create_payload()` 的 `duration_per_shot` 取的是全片最大段时长，服务端在 `video_duration_control=auto` 下是否会用它覆盖每段 `video_duration` 也需要另行确认。

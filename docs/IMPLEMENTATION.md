@@ -2625,3 +2625,13 @@
 - `backend/central_server.py#L15658-L15659`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
 - `tests/test_web_surface_removed.py#L45-L90`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
 - 验证与影响：`tests.test_web_surface_removed.WebSurfaceRemovedTest` 先红后绿；本次无 OpenAPI JSON Schema、数据库、Docker、环境变量或 `migration.sql` 影响。中心服重启后生效，回滚上述文件和文档即可移除页面。
+## 2026-08-07 漫剧项目模式片段时长按真实口播排期
+- `backend/matrix_native_client.py#L11156-L11175`：`_estimate_replacement_tts_duration_sec()` 默认语速常量 `_REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC` 由 `4.2` 改为 `5.5` 字/秒，`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 覆盖行为和 `2.5..8.0` 夹取不变。
+- `backend/matrix_native_client.py#L11178-L11241`：新增 `_comic_duration_headroom_sec()`、`_comic_duration_slots()` 和 `_comic_segment_video_duration()`；漫剧档位默认为 `4..15` 每个整数秒，`_comic_video_duration_slot()` 增加 `headroom_sec` 参数，已排期的 `videoDurationSec` 走 `headroom_sec=0.0` 保证重复调用幂等。
+- `backend/matrix_native_client.py#L11289-L11356`：新增 `_comic_measure_script_duration()` 和 `_comic_apply_measured_speech_durations()`，排期阶段用 `lk888_tts_voice()` + `_probe_media_duration()` 探测真实口播秒数，默认 4 路并发，失败或被禁用时回落估算并写入 `speechDurationSource`。
+- `backend/matrix_native_client.py#L11359-L11403`：`_comic_plan_script_segments()` 新增 `job` 参数，先按估算切分口播稿，再用测得时长重算 `videoDurationSec` 和时间轴，并保留 `speechEstimatedSec`、`speechOverflowSec` 供排查。
+- `backend/matrix_native_client.py#L13129`、`#L13295`：`_comic_project_create_payload()` 和 `_comic_storyboard_video_payload()` 改用 `_comic_segment_video_duration()`，不再对已排期时长重复叠加余量。
+- `backend/replacement_pipeline.py#L98-L99`：`HybridReplacementPipeline.build_plan()` 把 `job` 透传给 `_comic_plan_script_segments()`，使真实时长探测能拿到 `voiceId` 和取消检查。
+- `tests/test_video_replacement.py#L1965-L2052`：覆盖整秒档位与余量、环境变量回退粗档位、已排期时长幂等、真实 TTS 时长排期、TTS 失败回落估算、无 job 时不触发探测、默认语速 `5.5` 字/秒。
+- 验证：`tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service` 共 395 条通过；全量 1374 条中仅 `tests.test_ui_feature_visibility`（缺 `backend/.env.dev`）和 playwright 相关用例失败，改动前即存在。
+- 回滚：三个环境变量 `VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15`、`VIDEO_REPLACE_TTS_CHARS_PER_SEC=4.2`、`VIDEO_REPLACE_COMIC_MEASURE_TTS=0` 可分别关闭三项改动；或回滚 `backend/matrix_native_client.py`、`backend/replacement_pipeline.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/TROUBLESHOOTING.md` 和本文档。不涉及中心服、数据库、OpenAPI、Docker 或 `migration.sql`。
