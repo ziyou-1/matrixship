@@ -4174,7 +4174,11 @@ def _assert_apimart_api_key(key):
 
 def _apimart_json_request(base, key, path, payload=None, timeout=60):
     key = _assert_apimart_api_key(key)
-    url = base.rstrip("/") + path
+    # LK888_BASE_URL 环境变量在生产/开发之间不统一(有的带 /v1 尾巴,有的不带),
+    # 硬拼 base + "/v1/..." 会在带尾巴的部署上变成 /v1/v1/... 打到 404,
+    # 导致 schema 拉不到、payload 用通用字段兜底、上游报"至少上传1张参考图"。
+    # 走 _join_versioned_api_path 后两种 base 都能正确落地。
+    url = _join_versioned_api_path(base, path)
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=body, headers=headers, method="POST" if payload is not None else "GET")
@@ -4553,7 +4557,11 @@ def _is_apimart_gateway_base(base_url):
 
 def _apimart_json_request(base, key, path, payload=None, timeout=60):
     key = _assert_apimart_api_key(key)
-    url = base.rstrip("/") + path
+    # LK888_BASE_URL 环境变量在生产/开发之间不统一(有的带 /v1 尾巴,有的不带),
+    # 硬拼 base + "/v1/..." 会在带尾巴的部署上变成 /v1/v1/... 打到 404,
+    # 导致 schema 拉不到、payload 用通用字段兜底、上游报"至少上传1张参考图"。
+    # 走 _join_versioned_api_path 后两种 base 都能正确落地。
+    url = _join_versioned_api_path(base, path)
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=body, headers=headers, method="POST" if payload is not None else "GET")

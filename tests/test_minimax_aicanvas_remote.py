@@ -385,5 +385,87 @@ class AiCanvasComicToolDownloadEntryTest(unittest.TestCase):
         self.assertEqual(handler.wfile.getvalue(), b"installer")
 
 
+class LK888VersionedPathJoinTest(unittest.TestCase):
+    """Regression for /v1/v1/... double-versioning that caused hailuo H3
+    schema fetch to 404, which cascaded into 'please upload at least 1
+    reference image' errors even when references were uploaded.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def test_join_dedupes_v1_when_base_already_ends_with_v1(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v1",
+            "/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_join_preserves_v1_when_base_has_no_version(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai",
+            "/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_join_dedupes_v2_the_same_way(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v2",
+            "/v2/query/video_generation/abc",
+        )
+        self.assertEqual(joined, "https://api.lk888.ai/v2/query/video_generation/abc")
+
+    def test_join_leaves_non_versioned_paths_alone(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v1",
+            "/skills/models/hailuo-h3-quannengcankao",
+        )
+        # No de-dup when path lacks its own version prefix — pure concatenation.
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_apimart_json_request_uses_joined_url_not_raw_concat(self):
+        """When base=.../v1 and path=/v1/..., the request URL must NOT have /v1/v1/."""
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"models": []}'
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            return FakeResponse()
+
+        with patch.object(self.remote.urllib.request, "urlopen", fake_urlopen):
+            self.remote._apimart_json_request(
+                "https://api.lk888.ai/v1",
+                "sk-thisisalongenoughapikeyfortest",
+                "/v1/skills/models?type=video",
+                None,
+                30,
+            )
+        self.assertEqual(
+            captured["url"],
+            "https://api.lk888.ai/v1/skills/models?type=video",
+        )
+        # Explicit anti-regression: NO /v1/v1/ substring anywhere.
+        self.assertNotIn("/v1/v1/", captured["url"])
+
+
 if __name__ == "__main__":
     unittest.main()
