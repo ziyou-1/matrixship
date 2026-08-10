@@ -15623,6 +15623,31 @@ def _comic_recover_completed_media(job, segment, adapter):
     return True
 
 
+def _comic_storyboard_tts_url_for_submit(job, segment):
+    """本地客户端提交 comic_project 视频任务前,若 audioMode=tts/uploaded,
+    预生成音频并返回可下载 URL,让远端 _comic_storyboard_tts_url_from_task
+    能取到、做 TTS mux。返回 "" 时远端 fix A(preserve_paid_video)会 degrade
+    到 provider 音轨,视频不会丢,只是不换 TTS。
+
+    _replacement_segment_audio_url_for_lipsync 是共用 seam,自带 ttsUrl 缓存,
+    重试/切换 fallback 都复用,不会重复扣费。异常吞掉不阻塞视频生成。
+    """
+    if not isinstance(job, dict) or not isinstance(segment, dict):
+        return ""
+    audio_mode = _replacement_audio_mode(job)
+    if audio_mode not in ("tts", "uploaded"):
+        return ""
+    try:
+        url = _replacement_segment_audio_url_for_lipsync(job, segment)
+    except Exception as exc:
+        log("comic storyboard TTS pre-gen failed, submitting without: %s" % str(exc)[:120])
+        return ""
+    url = str(url or "").strip()
+    if not _is_remote_fetchable_media_url(url):
+        return ""
+    return url
+
+
 class ComicProjectAdapter:
     def __init__(self, central_base=None, comic_base=None, request_fn=None, now_fn=None):
         self.central_base = (central_base or CENTRAL).rstrip("/")
@@ -15837,6 +15862,14 @@ class ComicProjectAdapter:
 
     def submit_storyboard_video(self, storyboard_id, job, segment):
         payload = _comic_storyboard_video_payload(job, segment)
+        # 提前生成 TTS/取上传音频,把 URL 挂进 payload,让远端
+        # _comic_storyboard_tts_url_from_task 能读到并 mux。这是"AI 音色配音"真正
+        # 生效的路径;没做的话远端 fix A 会 degrade 保留 provider 音轨(视频不丢
+        # 但音色不换)。TTS 结果缓存到 segment["ttsUrl"],重试/fallback 复用。
+        audio_url = _comic_storyboard_tts_url_for_submit(job, segment)
+        if audio_url:
+            payload["storyboard_tts_url"] = audio_url
+            payload["storyboardTtsUrl"] = audio_url
         return self.comic_json(
             "POST",
             "/api/v1/comic-drama/storyboards/%d/generate-video" % int(storyboard_id),

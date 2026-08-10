@@ -3242,6 +3242,114 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(url, "")
         self.assertNotIn("audioReferenceUrl", segment)
 
+    # --- comic_project path: pre-generate TTS so remote can mux ---
+
+    def test_comic_storyboard_tts_url_pregenerates_and_returns_url_for_tts_mode(self):
+        job = {"replacementMode": "comic_project", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 1, "duration": 8, "script": "hello world"}
+        with mock.patch.object(
+            self.client, "lk888_tts_voice", return_value="https://cdn.example.com/tts.mp3"
+        ) as tts_mock:
+            url = self.client._comic_storyboard_tts_url_for_submit(job, segment)
+        tts_mock.assert_called_once()
+        self.assertEqual(url, "https://cdn.example.com/tts.mp3")
+        self.assertEqual(segment["ttsUrl"], "https://cdn.example.com/tts.mp3")
+
+    def test_comic_storyboard_tts_url_reuses_cached_tts_no_double_charge(self):
+        job = {"replacementMode": "comic_project", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 1, "duration": 8, "script": "cached", "ttsUrl": "https://cdn.example.com/cached.mp3"}
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            url = self.client._comic_storyboard_tts_url_for_submit(job, segment)
+        tts_mock.assert_not_called()
+        self.assertEqual(url, "https://cdn.example.com/cached.mp3")
+
+    def test_comic_storyboard_tts_url_returns_empty_for_auto_mode(self):
+        job = {"replacementMode": "comic_project", "audioMode": "auto"}
+        segment = {"index": 1, "duration": 8, "script": "auto path"}
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            url = self.client._comic_storyboard_tts_url_for_submit(job, segment)
+        tts_mock.assert_not_called()
+        self.assertEqual(url, "")
+
+    def test_comic_storyboard_tts_url_degrades_when_tts_generation_fails(self):
+        # Consistent with remote fix A: TTS fail must not block video submit.
+        job = {"replacementMode": "comic_project", "audioMode": "tts", "voiceId": "Zephyr"}
+        segment = {"index": 1, "duration": 8, "script": "will fail"}
+        with mock.patch.object(
+            self.client, "lk888_tts_voice", side_effect=RuntimeError("upstream 502")
+        ):
+            url = self.client._comic_storyboard_tts_url_for_submit(job, segment)
+        self.assertEqual(url, "")
+
+    def test_submit_storyboard_video_attaches_storyboard_tts_url_when_tts_mode(self):
+        # Full seam test: adapter.submit_storyboard_video must put the pre-gen
+        # URL under storyboard_tts_url so remote _comic_storyboard_tts_url_from_task picks it up.
+        adapter = self.client.ComicProjectAdapter(
+            central_base="https://c.example",
+            comic_base="https://m.example",
+        )
+        captured = {}
+
+        def fake_comic_json(method, path, payload, timeout):
+            captured["method"] = method
+            captured["path"] = path
+            captured["payload"] = payload
+            return {"data": {"task_id": "ai-fake-1"}}
+
+        job = {
+            "replacementMode": "comic_project",
+            "audioMode": "tts",
+            "voiceId": "Zephyr",
+            "aspectRatio": "9:16",
+            "model": "hailuo-h3-quannengcankao",
+            "comicVideoModel": "hailuo-h3-quannengcankao",
+        }
+        segment = {
+            "index": 1,
+            "duration": 8,
+            "script": "line one",
+            "startFrameUrl": "https://x/start.png",
+            "endFrameUrl": "https://x/end.png",
+        }
+
+        with mock.patch.object(adapter, "comic_json", side_effect=fake_comic_json), \
+                mock.patch.object(self.client, "lk888_tts_voice", return_value="https://cdn.example.com/one.mp3"):
+            adapter.submit_storyboard_video(701, job, segment)
+
+        self.assertEqual(captured["method"], "POST")
+        self.assertIn("/api/v1/comic-drama/storyboards/701/generate-video", captured["path"])
+        # Both snake and camel aliases so future remote lookups by either key work.
+        self.assertEqual(captured["payload"].get("storyboard_tts_url"), "https://cdn.example.com/one.mp3")
+        self.assertEqual(captured["payload"].get("storyboardTtsUrl"), "https://cdn.example.com/one.mp3")
+        self.assertEqual(captured["payload"].get("audio_mode"), "tts")
+
+    def test_submit_storyboard_video_no_tts_url_when_audio_mode_auto(self):
+        adapter = self.client.ComicProjectAdapter(
+            central_base="https://c.example",
+            comic_base="https://m.example",
+        )
+        captured = {}
+
+        def fake_comic_json(method, path, payload, timeout):
+            captured["payload"] = payload
+            return {"data": {"task_id": "ai-fake-2"}}
+
+        job = {"replacementMode": "comic_project", "audioMode": "auto"}
+        segment = {
+            "index": 1,
+            "duration": 8,
+            "script": "auto path",
+            "startFrameUrl": "https://x/s.png",
+        }
+
+        with mock.patch.object(adapter, "comic_json", side_effect=fake_comic_json), \
+                mock.patch.object(self.client, "lk888_tts_voice") as tts_mock:
+            adapter.submit_storyboard_video(702, job, segment)
+
+        tts_mock.assert_not_called()
+        self.assertNotIn("storyboard_tts_url", captured["payload"])
+        self.assertNotIn("storyboardTtsUrl", captured["payload"])
+
     def test_principal_replacement_model_candidates_do_not_fallback_to_reference_video(self):
         candidates = self.client._replacement_model_candidates({
             "principalReplacementMode": "source_video_edit",
