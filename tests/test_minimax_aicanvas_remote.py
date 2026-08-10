@@ -467,5 +467,109 @@ class LK888VersionedPathJoinTest(unittest.TestCase):
         self.assertNotIn("/v1/v1/", captured["url"])
 
 
+class ComicFallbackTtsDegradeTest(unittest.TestCase):
+    """Regression for trap D failure #12 variant: a post-video TTS-mix step
+    used to hard-fail with comic_storyboard_tts_missing and discard an
+    already-paid provider video. Fix degrades to skipped_missing_tts and
+    keeps provider_result_url as the surfaced result_url.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def _matrix_replacement_completed_task(self, audio_mode):
+        # source_mode on the task itself satisfies _is_matrix_video_replacement_project(task);
+        # no LOCAL_COMIC_PROJECTS entry required.
+        task = {
+            "id": "ai-99999999",
+            "remote_task_id": "99999999",
+            "task_type": "generate_video",
+            "target_type": "storyboard",
+            "target_id": 999001,
+            "project_id": 0,
+            "status": "completed",
+            "state": "completed",
+            "progress_percent": 100,
+            "provider": "ai",
+            "provider_result_url": "https://lk888.example/paid-video.mp4",
+            "result_url": "https://lk888.example/paid-video.mp4",
+            "source_mode": "matrix_video_replacement",
+            "audio_mode": audio_mode,
+            "fallback_applied": True,
+        }
+        return task
+
+    def test_missing_tts_no_longer_raises_and_preserves_provider_video(self):
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertIs(returned, task)
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+        self.assertEqual(
+            returned["provider_result_url"], "https://lk888.example/paid-video.mp4"
+        )
+        self.assertEqual(returned["audio_mix_status"], "skipped_missing_tts")
+        self.assertEqual(returned["audioMixStatus"], "skipped_missing_tts")
+        self.assertEqual(returned["audio_source"], "provider_generated")
+        self.assertEqual(returned["audio_mix_error"], "comic_storyboard_tts_missing")
+        # Explicit anti-regression: status stays "completed", never gets flipped
+        # to "failed" by the outer caller because we didn't raise.
+        self.assertEqual(returned["status"], "completed")
+
+    def test_missing_tts_with_empty_audio_mode_also_degrades(self):
+        # audio_mode not set at all used to fall through to the raise branch too.
+        task = self._matrix_replacement_completed_task(audio_mode="")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(returned["audio_mix_status"], "skipped_missing_tts")
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+
+    def test_auto_audio_mode_still_short_circuits_without_touching_tts(self):
+        # Regression guard: the pre-existing auto branch must not regress.
+        task = self._matrix_replacement_completed_task(audio_mode="auto")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(returned["audio_mix_status"], "not_requested")
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+
+    def test_tts_url_present_still_triggers_real_mux(self):
+        # When a TTS URL IS attached, we must still call the mux — the degrade
+        # path must not swallow it silently.
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        task["storyboard_tts_url"] = "https://lk888.example/tts.mp3"
+
+        mux_calls = []
+
+        def fake_mux(video_url, tts_url, project_id, storyboard_id):
+            mux_calls.append((video_url, tts_url, project_id, storyboard_id))
+            return {
+                "url": "https://lk888.example/muxed.mp4",
+                "video_duration_seconds": 8,
+                "audio_duration_seconds": 8,
+                "final_duration_seconds": 8,
+            }
+
+        with patch.object(self.remote, "_save_local_comic_state"), patch.object(
+            self.remote, "_comic_remux_video_with_storyboard_tts", fake_mux
+        ):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(len(mux_calls), 1)
+        self.assertEqual(returned["audio_mix_status"], "completed")
+        self.assertEqual(returned["result_url"], "https://lk888.example/muxed.mp4")
+        self.assertEqual(returned["audio_source"], "storyboard_tts")
+
+    def test_missing_provider_url_still_hard_fails(self):
+        # If the provider video really is missing, we still can't fabricate one.
+        # Hard fail is correct here (no paid content to lose).
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        task["provider_result_url"] = ""
+        task["result_url"] = ""
+        with patch.object(self.remote, "_save_local_comic_state"):
+            with self.assertRaises(RuntimeError) as cm:
+                self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertIn("comic_fallback_video_url_missing", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

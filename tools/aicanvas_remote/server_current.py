@@ -13425,7 +13425,33 @@ def _finalize_ai_comic_fallback_video_audio(task):
         return task
     tts_url = _comic_storyboard_tts_url_from_task(task)
     if not tts_url:
-        raise RuntimeError("comic_storyboard_tts_missing")
+        # trap D failure #12 variant: don't hard-fail on a post-video step and
+        # discard an already-paid segment. The provider already produced a
+        # billable video; keep it, use its own audio track, and surface the
+        # missing-TTS condition via audio_mix_status so the caller/UI can offer
+        # a retry or manual mux instead of losing money and content.
+        task["provider_result_url"] = provider_result_url
+        task["providerResultUrl"] = provider_result_url
+        task["result_url"] = provider_result_url
+        task["audio_source"] = "provider_generated"
+        task["audioSource"] = "provider_generated"
+        task["audio_mix_status"] = "skipped_missing_tts"
+        task["audioMixStatus"] = "skipped_missing_tts"
+        task["audio_mix_error"] = "comic_storyboard_tts_missing"
+        task["audioMixError"] = "comic_storyboard_tts_missing"
+        _json_log(
+            "comic_storyboard_fallback_tts_skipped",
+            project_id=task.get("project_id"),
+            storyboard_id=task.get("target_id"),
+            task_id=task.get("id"),
+            actual_model=task.get("actual_model") or task.get("model"),
+            audio_mode=audio_mode or "unspecified",
+            audio_source="provider_generated",
+            audio_mix_status="skipped_missing_tts",
+            reason="comic_storyboard_tts_missing",
+        )
+        _save_local_comic_state()
+        return task
     task["provider_result_url"] = provider_result_url
     task["providerResultUrl"] = provider_result_url
     task["audio_mix_status"] = "processing"
