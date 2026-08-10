@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-10 管理员用户管理列出漫剧主库真实用户
+### Fixed
+- 修复平台管理员在账号中心「用户管理(管理员)」只看到一个 `admin`(运维兜底账号 `user-owner`)、42 个真实用户全部看不到的问题。根因:`GET /api/admin/users` 只读中心服本地 JSON `STATE["users"]`,在 `MAINDB_ENABLED=1` 下真实用户都在漫剧主库 `ai_education.users`,该接口从不查主库,且 `maindb.py` 当时连列出用户的函数都没有。
+
+### Changed
+- `backend/maindb.py` 新增 `list_users(limit, offset, q)`,按 手机/邮箱/用户名/数字id 模糊搜索列出主库用户。
+- `backend/central_server.py` 抽出 `admin_list_users(q, limit, offset)`:`maindb_on()` 时列出主库真实用户(经 `shape_mdb_user`→`public_user`,不泄露 `password_hash`,`is_admin/is_staff`→`isPlatformAdmin`),并保留本地非主库账号(运维 `user-owner`)可见;主库未开启时保持旧的本地 JSON 行为。`/api/admin/users` 支持可选查询参数 `q`/`limit`/`offset`,响应结构 `{ok, users}` 不变,向后兼容旧客户端。充值链路无需改动:`topup_user()` 已在 `maindb_on()` 且 int id 时走 `maindb.topup`。
+
+### Verification And Operations
+- 新增 `tests/test_admin_users_maindb.py`(3/3 通过):主库开启列出真实用户、`q` 搜索过滤、主库关闭回退本地 JSON;`py_compile` 通过。
+- 需重建中心服镜像并重启容器(代码打进镜像,非挂载)。不涉及客户端、数据库、`migration.sql` 或密钥。回滚:切回上一个 release 目录并用旧镜像 tag 重启即可。
+
 ## 2026-08-05 中心素材库同步失败不再判定下载失败
 ### Fixed
 - 本地浏览器链路的下载结果不再因中心素材库同步失败而被改写成 `ok=false`。视频在用户机器上下载完成后，中心服（容器）本就无法访问用户内网文件，同步失败属于常态；旧行为让客户端显示"下载失败"，并在分解入口报"分解失败:下载未完成 library_import_failed"，实际视频已完整落盘。

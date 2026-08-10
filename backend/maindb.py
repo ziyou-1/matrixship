@@ -114,6 +114,33 @@ def find_login_user(identifier):
     return None
 
 
+def list_users(limit=1000, offset=0, q=""):
+    """列出漫剧主库用户(平台管理员用户管理)。q 可按 手机/邮箱/用户名/数字id 模糊匹配。
+    返回 users 行 list(dict)(字段同 _USER_COLS);未配置或异常返回 []。"""
+    try:
+        lim = max(1, min(int(limit or 1000), 2000))
+    except (TypeError, ValueError):
+        lim = 1000
+    try:
+        off = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        off = 0
+    kw = str(q or "").strip()
+    base = "SELECT " + _USER_COLS + " FROM users"
+    try:
+        if kw:
+            like = "%" + kw + "%"
+            where = " WHERE phone LIKE %s OR email LIKE %s OR username LIKE %s"
+            args = [like, like, like]
+            if kw.isdigit():
+                where += " OR id=%s"
+                args.append(int(kw))
+            return _q(base + where + " ORDER BY id DESC LIMIT %s OFFSET %s", tuple(args) + (lim, off))
+        return _q(base + " ORDER BY id DESC LIMIT %s OFFSET %s", (lim, off))
+    except Exception:
+        return []
+
+
 class PasswordBackendError(RuntimeError):
     """bcrypt/passlib 后端本身失效,而不是密码不匹配。
 

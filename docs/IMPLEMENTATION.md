@@ -1,4 +1,11 @@
-﻿## 2026-08-05 密码后端故障不再伪装成凭据错误
+﻿## 2026-08-10 管理员用户管理列出漫剧主库真实用户
+- `backend/maindb.py#L117-L140`：新增 `list_users(limit, offset, q)`，参数化 `SELECT _USER_COLS FROM users [WHERE 模糊搜索] ORDER BY id DESC LIMIT/OFFSET`；`q` 为纯数字时并入 `id` 精确匹配；异常返回 `[]`。
+- `backend/central_server.py#L3327-L3359`：抽出 `admin_list_users(q, limit, offset)`。`maindb_on()` 时经 `maindb.list_users`→`shape_mdb_user`→`public_user` 列出主库真实用户（剔除 `password*`，`is_admin/is_staff`→`isPlatformAdmin`，balance 取 `computing_power`），并保留本地非 int-id 账号（运维 `user-owner`）；否则回退旧的本地 JSON 行为。
+- `backend/central_server.py#L16050-L16063`：`GET /api/admin/users` 读取可选 `q`/`limit`/`offset` 查询参数，返回 `admin_list_users(...)`；响应 `{ok, users}` 结构不变，向后兼容旧客户端。
+- `tests/test_admin_users_maindb.py`：3 用例（主库开启列出真实用户 / `q` 搜索过滤 / 主库关闭回退本地 JSON）。
+- 注：本次在 `central_server.py` L3327、L16050 两处插入代码，其下方既有行号引用整体下移（约 +33 / +39），为避免误伤未逐条重算历史引用（见 guard failure #14）；`maindb.py` 旧 `PasswordBackendError` 引用相应由 L117 顺延至约 L144。
+
+## 2026-08-05 密码后端故障不再伪装成凭据错误
 - `backend/maindb.py#L117-L143`：新增 `PasswordBackendError`；`verify_password()` 和 `hash_password()` 遇到 passlib/bcrypt 异常时抛出该异常，不再返回 `False`。异常消息只带异常类名，不回显 passlib 原始消息（可能含哈希片段）。缺少 `password_hash` 仍按普通不匹配返回 `False`。
 - `backend/central_server.py#L67-L71`：主库模块未导入时提供同名占位异常类，调用方 `except` 不会退化成裸 `Exception`。
 - `backend/central_server.py#L3243-L3261`：`password_backend_failure()` 生成 `errorId`，写结构化日志 `auth_password_backend_failed`（只含异常类名与 `identifierHash`），返回 503 载荷 `password_backend_unavailable`。

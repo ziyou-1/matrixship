@@ -3324,6 +3324,37 @@ def find_login_user(identifier):
     return None
 
 
+def admin_list_users(q="", limit=1000, offset=0):
+    """平台管理员『用户管理』列表。
+
+    账号唯一源是漫剧主库 ai_education.users:maindb 开启时列出真实用户;
+    此前接口只回中心服本地 JSON STATE["users"](那里只有运维兜底账号 user-owner),
+    所以管理员在账号中心看不到任何普通用户。maindb 未开启时保持旧的本地 JSON 行为。
+    本地非主库账号(如运维 user-owner)始终保留,避免管理员丢失运维入口。
+    """
+    if maindb_on():
+        try:
+            rows = maindb.list_users(limit=limit, offset=offset, q=q)
+        except Exception:
+            rows = []
+        users = []
+        for r in rows:
+            shaped = public_user(shape_mdb_user(r, "session"))
+            if shaped:
+                users.append(shaped)  # shape_mdb_user 已按 computing_power 填 balance
+        with LOCK:
+            local_extra = [public_user(x) for x in (STATE.get("users") or [])
+                           if not isinstance(x.get("id"), int)]
+        for x in local_extra:
+            x["balance"] = get_balance(x.get("id"))
+        return local_extra + users
+    with LOCK:
+        users = [public_user(x) for x in (STATE.get("users") or [])]
+    for x in users:
+        x["balance"] = get_balance(x.get("id"))
+    return users
+
+
 def is_phone_login_identifier(identifier):
     identifier = str(identifier or "").strip()
     return identifier.isdigit() and len(identifier) == 11
@@ -16019,11 +16050,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/admin/users":
             if not require_platform_admin(self):
                 return
-            with LOCK:
-                users = [public_user(x) for x in (STATE.get("users") or [])]
-            for x in users:
-                x["balance"] = get_balance(x.get("id"))
-            return json_response(self, {"ok": True, "users": users})
+            qs = parse_qs(parsed.query)
+            q = (qs.get("q") or [""])[0].strip()
+            try:
+                limit = int((qs.get("limit") or ["1000"])[0])
+            except (TypeError, ValueError):
+                limit = 1000
+            try:
+                offset = int((qs.get("offset") or ["0"])[0])
+            except (TypeError, ValueError):
+                offset = 0
+            return json_response(self, {"ok": True, "users": admin_list_users(q, limit, offset)})
         if path == "/api/admin/redeem-codes":
             if not require_platform_admin(self):
                 return
