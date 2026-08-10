@@ -102,7 +102,6 @@ ACCENT = "#6366f1"
 XHS_PLATFORM_LABEL = "小" + "红书"
 XHS_PLATFORM_CODE = "x" + "hs"
 SAME_STYLE_REPLACEMENT_NAV = "🧬 同款替换"
-SAME_STYLE_REPLACEMENT_TOOLTIP = "功能完善中，敬请期待"
 LEGAL_TERMS_VERSION = os.getenv("LEGAL_TERMS_VERSION", "1.0") or "1.0"
 LEGAL_PRIVACY_VERSION = os.getenv("LEGAL_PRIVACY_VERSION", "1.0") or "1.0"
 LEGAL_EFFECTIVE_DATE = os.getenv("LEGAL_EFFECTIVE_DATE", "2026-07-15") or "2026-07-15"
@@ -33517,12 +33516,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._page_widgets.append(page)
                 self._page_hosts.append(host)
                 b = NavButton(name)
-                if name == SAME_STYLE_REPLACEMENT_NAV:
-                    attach_hover_info(
-                        b,
-                        "同款替换",
-                        SAME_STYLE_REPLACEMENT_TOOLTIP,
-                    )
                 b.clicked.connect(lambda _=False, i=idx: self._nav(i))
                 nvl.addWidget(b)
                 self.nav_btns.append(b)
