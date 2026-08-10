@@ -1,5 +1,25 @@
 ﻿# Changelog
 
+## 2026-08-10 Agent.模式各模型上传框与真实参数一一对应
+### Added
+- Agent.模式（`ProductGenPage`）新增**参考音频上传**按钮（volume 图标），与已有的参考视频按钮对称：仅当所选视频模型真实支持音频输入（`audio_limit>0`）时才显示；`referenceAudio` 随生成记录持久化，`_prodgen_run_video()` 会先上传音频为公网直链再写入 payload，`reedit` 可回填、`GenCard` 显示“参考音频/参考视频”标签。
+- Agent.模式视频模型的图片/视频/音频上传框改为**由每个模型的真实 LK888 参数驱动**。`_agent_video_media_requirements()` 现在声明 `image/video/audio` 的字段名、上限、是否必传、是否数组以及“至少其一”(`at_least_one`) 约束；全能参考家族（`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao`、`doubao-seedance-2-5-quannengcankao`）支持图+视频+音频，`wan2.6-shouzheng` 支持首帧图+音频，`kling-motion-control`/`wan2.2-animate-mix`/`kling-v3-omni-videoref`/`wan2.7-xuxie`/`hailuo-h3-zaishengcheng` 按真实契约弹出所需上传框。
+- 字段名与格式取自实测 `GET /v1/skills/models/{name}` 的参数定义：能收多个的字段（`image_url`/`video_url`/`audio_url`、`images`/`clips`/`reference_urls`）传数组，单文件的单数名字段（kling 的 `image_url`/`video_url`、`img_url`）传标量。
+
+### Fixed
+- `wan2.7-cankaosheng`（万相 2.7 参考生）此前把参考图写进 `images/image_urls/reference_images`、参考视频写进 `video`，而该模型真实字段是 `reference_urls` 与 `reference_video`，导致参考素材被上游忽略、实际退化为文生视频。现按真实字段提交。
+
+### Changed
+- `_agent_video_payload()` 图片/视频/音频写入改为契约驱动：声明了明确 `*_field` 的模型只写该字段，不再附带多余别名，避免触发上游“参数格式错误”400；旧图像模型（无 `image_field`）保持原多别名写法不变（`doubao-seedance-1-5-pro-251215`、`veo3.1` 等回归通过）。
+- 视频/音频上传按钮说明改用 `setAccessibleName`（无障碍名），`setToolTip("")` 保持空，遵守原生客户端“不弹黑框 tooltip”策略。
+
+### Verification And Operations
+- 新增 `tests/test_agent_media_uploads.py`（17 项）：纯函数层断言每个在售视频模型的 `_agent_video_media_requirements` 契约与 `_agent_video_payload` 字段/数组/标量/必传/至少其一；UI 层在 offscreen Qt 下真实实例化 `ProductGenPage`，断言音频/视频按钮随模型显隐、pick/clear 生效、send 的 entry 带上 `referenceAudio`、`reedit` 回填。
+- 更新 `tests/test_agent_video_duration.py` 三处旧断言：它们与实现同源、把 `wan2.7-cankaosheng` 的字段锁成了错误的 `images`/`video`（名为 `match_lk888` 却并不匹配真实 LK888 契约）。现按实测字段 `reference_urls`/`reference_video` 断言。
+- `.venv-win` 下 `tests.test_agent_media_uploads`、`tests.test_agent_mode_defaults`、`tests.test_agent_video_duration`、`tests.test_native_tooltips` 全绿；`py_compile` 通过；全量 `unittest discover` 1386 项仅余 2 个与本次无关的既有问题（`test_ui_feature_visibility` 缺 `backend/.env.dev`、`test_douyin_comment_cooldown` 平台风控用例在净基线上也失败）。
+- 仅影响本地原生客户端 Agent.模式；不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。需退出后用 `start-visible-client.bat` 重新启动生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`tests/test_agent_media_uploads.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 可恢复旧行为。
+- 未验证风险：复杂单输入模型（`kling-motion-control`、`wan2.2-animate-mix`、`wan2.7-xuxie`、`hailuo-h3-zaishengcheng`）的 payload 依实测参数定义构造，但未做真实付费出片冒烟；上线前建议对这几个各跑一次真实生成确认上游接受。全能参考家族与 `wan2.6-shouzheng` 字段规范一致、置信度高。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

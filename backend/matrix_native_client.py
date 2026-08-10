@@ -2482,6 +2482,16 @@ _LK888_FALLBACK_MODELS = [
     {"name": "hailuo-2.3", "display_name": "Hailuo 2.3", "type": "video", "duration_slots": (6, 10)},
     {"name": "wan2.7-cankaosheng", "display_name": "Wanxiang 2.7 Reference-to-Video", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
     {"name": "wan2.7-shouweizhen", "display_name": "Wanxiang 2.7 First/Last Frames", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
+    # 全能参考家族 + 其它含视频/音频输入的模型（Agent.模式按真实参数弹出图片/视频/音频上传框）
+    {"name": "hailuo-h3-quannengcankao", "display_name": "海螺 H3 全能参考", "type": "video", "duration_slots": (5, 10)},
+    {"name": "kwvideo-v2-quannengcankao", "display_name": "SD 2.0 全能参考", "type": "video", "duration_slots": (5, 10)},
+    {"name": "doubao-seedance-2-5-quannengcankao", "display_name": "SD 2.5 全能参考", "type": "video", "duration_slots": (5, 10)},
+    {"name": "wan2.6-shouzheng", "display_name": "万相 2.6 首帧", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
+    {"name": "hailuo-h3-zaishengcheng", "display_name": "海螺 H3 视频升 2K", "type": "video", "duration_slots": (5,)},
+    {"name": "kling-v3-omni-videoref", "display_name": "可灵 Omni 视频参考", "type": "video", "duration_slots": (5, 10)},
+    {"name": "kling-motion-control", "display_name": "可灵 动作控制", "type": "video", "duration_slots": (5,)},
+    {"name": "wan2.2-animate-mix", "display_name": "万相 视频换人", "type": "video", "duration_slots": (5,)},
+    {"name": "wan2.7-xuxie", "display_name": "万相 2.7 视频续写", "type": "video", "duration_slots": (3, 6, 9, 12, 15)},
 ]
 
 _LK888_IMAGE_DEFAULT = "gpt-image-2"
@@ -2533,7 +2543,20 @@ _AGENT_VIDEO_REFERENCE_LIMITS = {
     "hailuo-2.3": 1,
     "wan2.7-cankaosheng": 4,
     "wan2.7-shouweizhen": 2,
+    "hailuo-h3-quannengcankao": 9,
+    "kwvideo-v2-quannengcankao": 9,
+    "doubao-seedance-2-5-quannengcankao": 9,
+    "wan2.6-shouzheng": 1,
+    "hailuo-h3-zaishengcheng": 9,
+    "kling-v3-omni-videoref": 4,
+    "kling-motion-control": 1,
+    "wan2.2-animate-mix": 1,
+    "wan2.7-xuxie": 0,
 }
+# 平台约定：这些复数名 upload 参数即使只有一个文件也必须传数组。其余单数名单文件字段传标量。
+_PLURAL_UPLOAD_FIELD_NAMES = frozenset((
+    "images", "videos", "clips", "files", "attachments", "reference_urls", "reference_image_urls",
+))
 _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
     "viduq3-turbo": {"image_required": True},
     "viduq3-turbo-cankaosheng": {"image_required": False},
@@ -2543,10 +2566,12 @@ _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
         "video_limit": 1,
         "video_field": "video_url",
     },
+    # 万相 2.7 参考生：参考图走 reference_urls，参考视频走 reference_video（此前误写成 images/video）
     "wan2.7-cankaosheng": {
+        "image_field": "reference_urls",
         "video_required": False,
         "video_limit": 1,
-        "video_field": "video",
+        "video_field": "reference_video",
     },
     "wan2.7-shouweizhen": {"image_required": True},
     "kling-v3-omni-shouweizhen": {"image_required": True},
@@ -2561,29 +2586,104 @@ _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
         "video_limit": 1,
         "video_field": "video",
     },
+    # ---- 全能参考家族：图片 + 参考视频 + 参考音频（图/视频至少其一；SD 2.5 允许仅音频） ----
+    "hailuo-h3-quannengcankao": {
+        "image_field": "image_url",
+        "video_limit": 3, "video_field": "video_url",
+        "audio_limit": 3, "audio_field": "audio_url",
+        "at_least_one": ("image", "video"),
+    },
+    "kwvideo-v2-quannengcankao": {
+        "image_field": "image_url",
+        "video_limit": 3, "video_field": "video_url",
+        "audio_limit": 3, "audio_field": "audio_url",
+        "at_least_one": ("image", "video"),
+    },
+    "doubao-seedance-2-5-quannengcankao": {
+        "image_field": "image_url",
+        "video_limit": 10, "video_field": "video_url",
+        "audio_limit": 10, "audio_field": "audio_url",
+        "at_least_one": ("image", "video", "audio"),
+    },
+    # 万相 2.6 首帧：首帧图 img_url + 自定义音频 audio_url
+    "wan2.6-shouzheng": {
+        "image_field": "img_url",
+        "audio_limit": 1, "audio_field": "audio_url",
+    },
+    # 海螺 H3 升 2K：必传 H3 生成的源视频；可选原参考图
+    "hailuo-h3-zaishengcheng": {
+        "image_field": "image_url",
+        "video_required": True, "video_limit": 1, "video_field": "video_url",
+    },
+    # 可灵 Omni 视频参考：必传参考视频，可选参考图
+    "kling-v3-omni-videoref": {
+        "image_field": "images",
+        "video_required": True, "video_limit": 1, "video_field": "video",
+    },
+    # 可灵 动作控制 / 万相 视频换人：图片 + 视频都必传
+    "kling-motion-control": {
+        "image_required": True, "image_field": "image_url",
+        "video_required": True, "video_limit": 1, "video_field": "video_url",
+    },
+    "wan2.2-animate-mix": {
+        "image_required": True, "image_field": "image_url",
+        "video_required": True, "video_limit": 1, "video_field": "video_url",
+    },
+    # 万相 2.7 视频续写：必传首段视频（clips）
+    "wan2.7-xuxie": {
+        "video_required": True, "video_limit": 1, "video_field": "clips",
+    },
 }
 
 
 def _agent_video_media_requirements(model):
-    """Return the LK888 media contract used by both Agent UI and payloads."""
+    """Return the LK888 media contract used by both Agent UI and payloads.
+
+    Fields:
+      image/video/audio_required  -- 该类型是否必传
+      image/video/audio_limit     -- 该类型最多上传几个（0 表示不支持）
+      image/video/audio_field     -- 写进 params 的字段名（image_field 为空表示走旧的多别名图片写法）
+      image/video/audio_as_array  -- 该字段是否以数组形式提交（平台约定复数名参数一律传数组）
+      at_least_one                -- 至少要提供其中一种媒体（如 ("image","video")）
+    """
     model = str(model or "").strip()
     requirements = {
         "image_required": False,
         "image_limit": _agent_video_reference_limit(model),
+        "image_field": "",
         "video_required": False,
         "video_limit": 0,
         "video_field": "video",
         "audio_required": False,
         "audio_limit": 0,
         "audio_field": "audio",
+        "at_least_one": (),
     }
-    requirements.update(_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES.get(model) or {})
+    override = _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES.get(model) or {}
+    requirements.update(override)
     requirements["image_limit"] = max(0, int(requirements.get("image_limit") or 0))
     requirements["video_limit"] = max(0, int(requirements.get("video_limit") or 0))
     requirements["audio_limit"] = max(0, int(requirements.get("audio_limit") or 0))
     requirements["image_required"] = bool(requirements.get("image_required"))
     requirements["video_required"] = bool(requirements.get("video_required"))
     requirements["audio_required"] = bool(requirements.get("audio_required"))
+    requirements["image_field"] = str(requirements.get("image_field") or "").strip()
+    requirements["video_field"] = str(requirements.get("video_field") or "video").strip() or "video"
+    requirements["audio_field"] = str(requirements.get("audio_field") or "audio").strip() or "audio"
+    # 数组 vs 标量：能收多个的字段（limit>1）或平台约定的复数名参数走数组，单文件的单数名字段走标量。
+    # 允许 override 显式指定 *_as_array 强制覆盖。
+    for kind in ("image", "video", "audio"):
+        key = kind + "_as_array"
+        if key in override:
+            requirements[key] = bool(override[key])
+        else:
+            requirements[key] = (
+                requirements[kind + "_limit"] > 1
+                or requirements[kind + "_field"] in _PLURAL_UPLOAD_FIELD_NAMES
+            )
+    requirements["at_least_one"] = tuple(
+        str(x).strip() for x in (requirements.get("at_least_one") or ()) if str(x).strip()
+    )
     return requirements
 
 def _lk888_agent_model_selectable(row):
@@ -2746,6 +2846,12 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
         raise RuntimeError("需要上传参考视频")
     if media["audio_required"] and not audio_url:
         raise RuntimeError("需要上传参考音频")
+    if media["at_least_one"]:
+        _present = {"image": bool(refs), "video": bool(video_url), "audio": bool(audio_url)}
+        if not any(_present.get(kind) for kind in media["at_least_one"]):
+            _names = {"image": "参考图", "video": "参考视频", "audio": "参考音频"}
+            raise RuntimeError("需要至少上传：" + " / ".join(
+                _names.get(kind, kind) for kind in media["at_least_one"]))
     if model == "kling-motion-control-v3":
         return {
             "prompt": prompt[:600],
@@ -2813,6 +2919,28 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
         params.pop("aspect_ratio", None)
         if model == "wan2.7-cankaosheng":
             params["ratio"] = ar
+    elif model == "wan2.7-xuxie":
+        params = {"resolution": "720P", "duration": dur}
+    elif model == "hailuo-h3-quannengcankao":
+        params = {"duration": dur, "resolution": "768P", "aspect_ratio": ar}
+    elif model == "kwvideo-v2-quannengcankao":
+        params = {"version": "标准", "duration": dur, "resolution": "720p", "aspect_ratio": ar}
+    elif model == "doubao-seedance-2-5-quannengcankao":
+        params = {"duration": dur, "resolution": "720p", "aspect_ratio": ar}
+    elif model == "wan2.6-shouzheng":
+        params = {"quality": "standard", "resolution": "720P", "aspect_ratio": ar, "duration": dur}
+    elif model == "hailuo-h3-zaishengcheng":
+        # 视频升 2K：只吃源视频（+可选原参考图），没有时长/分辨率/比例参数
+        params = {}
+    elif model == "kling-v3-omni-videoref":
+        params = {"duration": dur, "aspect_ratio": ar,
+                  "refer_type": "feature", "keep_original_sound": "no", "mode": "std"}
+    elif model == "kling-motion-control":
+        # 动作控制：时长跟随参考视频，无 duration/resolution/aspect_ratio
+        params = {"character_orientation": "video", "keep_original_sound": "no", "mode": "std"}
+    elif model == "wan2.2-animate-mix":
+        # 视频换人：无 duration/resolution/aspect_ratio
+        params = {"mode": "wan-std"}
     payload = {"prompt": prompt[:600], "params": params}
     if refs:
         if model == "sora-2":
@@ -2840,18 +2968,22 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
             if len(frame_refs) > 1:
                 payload["params"]["last_frame_image"] = frame_refs[1]
             return payload
-        payload.update({
-            "image_urls": refs,
-            "images": refs,
-            "reference_images": refs,
-            "referenceImages": refs,
-            "reference_image_urls": refs,
-        })
-        payload["params"].update({
-            "images": refs,
-            "image_urls": refs,
-            "reference_images": refs,
-        })
+        if media["image_field"]:
+            # 契约声明了明确字段名的模型（全能参考等）：只写该字段，避免多余别名触发上游参数校验错误
+            payload["params"][media["image_field"]] = refs if media["image_as_array"] else refs[0]
+        else:
+            payload.update({
+                "image_urls": refs,
+                "images": refs,
+                "reference_images": refs,
+                "referenceImages": refs,
+                "reference_image_urls": refs,
+            })
+            payload["params"].update({
+                "images": refs,
+                "image_urls": refs,
+                "reference_images": refs,
+            })
     if model == "happyhorse-video-edit":
         payload["params"].pop("image_urls", None)
         payload["params"].pop("reference_images", None)
@@ -2874,15 +3006,11 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
         payload["params"].pop("image_urls", None)
         payload["params"].pop("reference_images", None)
     elif video_url and media["video_limit"] > 0:
-        video_field = str(media.get("video_field") or "video").strip() or "video"
-        payload["params"][video_field] = video_url
-        if video_field != "video":
-            payload["params"]["video"] = video_url
+        payload["params"][media["video_field"]] = (
+            [video_url] if media["video_as_array"] else video_url)
     if audio_url and media["audio_limit"] > 0:
-        audio_field = str(media.get("audio_field") or "audio").strip() or "audio"
-        payload["params"][audio_field] = audio_url
-        if audio_field != "audio":
-            payload["params"]["audio"] = audio_url
+        payload["params"][media["audio_field"]] = (
+            [audio_url] if media["audio_as_array"] else audio_url)
     return payload
 
 def _agent_video_duration_slots(model):
@@ -19958,6 +20086,26 @@ def _prodgen_video_reference_url(path, title=""):
     return url
 
 
+def _prodgen_audio_reference_url(path, title=""):
+    """Upload one Agent reference audio as a public URL."""
+    path = str(path or "").strip()
+    if not path or not os.path.isfile(path):
+        raise RuntimeError("参考音频上传失败:文件不存在")
+    try:
+        url, _meta = upload_asset_url(
+            path,
+            "Agent音频参考-%s" % os.path.basename(path),
+            "audio",
+            metadata={"source": "agent_audio_reference", "title": str(title or "")[:80]},
+        )
+    except Exception as exc:
+        raise RuntimeError("参考音频上传失败:%s" % str(exc)[:140]) from exc
+    url = str(url or "").strip()
+    if not _is_remote_fetchable_media_url(url):
+        raise RuntimeError("参考音频上传失败:未拿到远程模型可读取的音频URL")
+    return url
+
+
 def _prodgen_refs_desc(refs, is_video=False):
     """把多张参考图喂给多模态模型，按顺序拿到描述。"""
     refs = [str(p or "").strip() for p in (refs or []) if str(p or "").strip() and os.path.isfile(str(p or ""))]
@@ -20181,8 +20329,16 @@ def _prodgen_run_video(entry, emit=None):
             emit("phase", {"phaseText": "正在上传参考视频给视频模型…"})
         reference_video_url = _prodgen_video_reference_url(
             entry.get("referenceVideo"), display_prompt)
+    reference_audio_url = ""
+    if media["audio_required"] and not str(entry.get("referenceAudio") or "").strip():
+        raise RuntimeError("需要上传参考音频")
+    if media["audio_limit"] > 0 and str(entry.get("referenceAudio") or "").strip():
+        if emit:
+            emit("phase", {"phaseText": "正在上传参考音频给视频模型…"})
+        reference_audio_url = _prodgen_audio_reference_url(
+            entry.get("referenceAudio"), display_prompt)
     payload = _agent_video_payload(
-        model, model_prompt, dur, ar, reference_urls, reference_video_url)
+        model, model_prompt, dur, ar, reference_urls, reference_video_url, reference_audio_url)
     url = lk888_media_task(
         model,
         payload,
@@ -26280,6 +26436,10 @@ class GenCard(QtWidgets.QFrame):
         model_text = str(e.get("modelLabel") or _lk888_model_label(e.get("model")) or "").strip()
         if model_text:
             chips.addWidget(_chip_pill("sparkle", "模型: " + model_text))
+        if e.get("mode") == "video" and str(e.get("referenceVideo") or "").strip():
+            chips.addWidget(_chip_pill("video", "参考视频"))
+        if e.get("mode") == "video" and str(e.get("referenceAudio") or "").strip():
+            chips.addWidget(_chip_pill("volume", "参考音频"))
         chips.addWidget(_chip_pill("layers", "设置分组"))
         chips.addStretch()
         self.lay.addLayout(chips)
@@ -26561,6 +26721,7 @@ class ProductGenPage(BasePage):
         self._ref = ""
         self._refs = []
         self._reference_video = ""
+        self._reference_audio = ""
         self.ref_buttons = []
         self._cards = {}
         self._style = 0
@@ -26655,9 +26816,14 @@ class ProductGenPage(BasePage):
         ctl.addWidget(_round_icon_btn("plus", 40, "#8b93a3", cb=self.pick_ref, tip="上传图片"))
         self.ref_video_btn = _round_icon_btn(
             "video", 40, "#8b93a3", cb=self.pick_reference_video,
-            tip="上传动作控制参考视频")
+            tip="上传参考视频")
         self.ref_video_btn.setVisible(False)
         ctl.addWidget(self.ref_video_btn)
+        self.ref_audio_btn = _round_icon_btn(
+            "volume", 40, "#8b93a3", cb=self.pick_reference_audio,
+            tip="上传参考音频")
+        self.ref_audio_btn.setVisible(False)
+        ctl.addWidget(self.ref_audio_btn)
         self.send_btn = QtWidgets.QPushButton()
         self.send_btn.setFixedSize(46, 46)
         self.send_btn.setIcon(QtGui.QIcon(_draw_icon("arrowup", 22, "#ffffff")))
@@ -26752,13 +26918,28 @@ class ProductGenPage(BasePage):
             if not self._models_loaded:
                 base = "LK888 模型目录待同步"
             self.model_meta.setText(base + " · 当前使用 " + label)
+        media = _agent_video_media_requirements(cur) if self._mode == "video" else {}
         if getattr(self, "ref_video_btn", None) is not None:
-            media = _agent_video_media_requirements(cur) if self._mode == "video" else {}
             supports_reference_video = (
                 self._mode == "video" and int(media.get("video_limit") or 0) > 0
             )
             self.ref_video_btn.setVisible(supports_reference_video)
+            if supports_reference_video:
+                loaded = "（已选）" if self._reference_video else ""
+                req = "必传参考视频" if media.get("video_required") else "上传参考视频（可选）"
+                # 图标按钮的说明走无障碍名（不弹黑框 tooltip，遵守原生客户端 tooltip 策略）
+                self.ref_video_btn.setAccessibleName(req + loaded)
             self.ref_video_btn.setToolTip("")
+        if getattr(self, "ref_audio_btn", None) is not None:
+            supports_reference_audio = (
+                self._mode == "video" and int(media.get("audio_limit") or 0) > 0
+            )
+            self.ref_audio_btn.setVisible(supports_reference_audio)
+            if supports_reference_audio:
+                loaded = "（已选）" if self._reference_audio else ""
+                req = "必传参考音频" if media.get("audio_required") else "上传参考音频（可选）"
+                self.ref_audio_btn.setAccessibleName(req + loaded)
+            self.ref_audio_btn.setToolTip("")
         self._sync_duration_ui()
 
     def _current_video_duration_slots(self):
@@ -26991,6 +27172,17 @@ class ProductGenPage(BasePage):
         self._reference_video = ""
         self._sync_model_ui()
 
+    def pick_reference_audio(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择参考音频", "", "音频 (*.mp3 *.wav *.m4a *.aac *.ogg)")
+        if path:
+            self._reference_audio = path
+            self._sync_model_ui()
+
+    def clear_reference_audio(self):
+        self._reference_audio = ""
+        self._sync_model_ui()
+
     def add_to_publish(self, entry):
         entry = entry if isinstance(entry, dict) else {}
         files = [f for f in (entry.get("files") or []) if os.path.isfile(f)]
@@ -27044,6 +27236,7 @@ class ProductGenPage(BasePage):
         self.b_duration.setText("  %d 秒" % self._current_video_duration())
         self._set_refs(entry.get("refs") or ([entry.get("ref")] if entry.get("ref") else []))
         self._reference_video = str(entry.get("referenceVideo") or "").strip()
+        self._reference_audio = str(entry.get("referenceAudio") or "").strip()
         self._sync_model_ui()
         try:
             self.inp.setFocus()
@@ -27075,6 +27268,7 @@ class ProductGenPage(BasePage):
             "refs": list(self._refs),
             "ref": (self._refs[0] if self._refs else ""),
             "referenceVideo": self._reference_video,
+            "referenceAudio": self._reference_audio,
             "model": (self._image_model if self._mode == "image" else self._video_model),
             "modelLabel": _lk888_model_label(self._image_model if self._mode == "image" else self._video_model,
                                              self._image_models if self._mode == "image" else self._video_models),

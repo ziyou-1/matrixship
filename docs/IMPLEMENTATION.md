@@ -1,4 +1,17 @@
-﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+﻿## 2026-08-10 Agent.模式各模型上传框与真实 LK888 参数对应
+- `backend/matrix_native_client.py#L2560-L2632`：`_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES` 扩展为按模型声明 `image/video/audio` 的字段名、上限、必传、`at_least_one`；新增全能参考家族（`hailuo-h3-quannengcankao`/`kwvideo-v2-quannengcankao`/`doubao-seedance-2-5-quannengcankao`，图+视频+音频）、`wan2.6-shouzheng`（首帧图 `img_url`+音频 `audio_url`）、`hailuo-h3-zaishengcheng`、`kling-v3-omni-videoref`、`kling-motion-control`、`wan2.2-animate-mix`、`wan2.7-xuxie`，并修正 `wan2.7-cankaosheng` 的字段为 `reference_urls`/`reference_video`。`_PLURAL_UPLOAD_FIELD_NAMES` 用于判定复数名字段一律传数组。
+- `backend/matrix_native_client.py#L2639-L2688`：`_agent_video_media_requirements()` 返回契约新增 `image_field`、`*_as_array`、`at_least_one`；`*_as_array` 由 `limit>1` 或复数名字段推导（单文件单数名字段传标量，匹配 kling `image_url/video_url` 既有 v3 分支的标量约定）。
+- `backend/matrix_native_client.py#L2833-L2986`：`_agent_video_payload()` 增加 `at_least_one` 校验、各新模型的必填 select 默认值（`version/refer_type/mode/character_orientation/resolution` 等）、图片改为按 `image_field` 精确写入（无 `image_field` 的旧模型保持多别名写法），视频/音频按 `*_field`+`*_as_array` 写入并去掉多余 `video`/`audio` 别名。
+- `backend/matrix_native_client.py#L20089-L20109`：新增 `_prodgen_audio_reference_url()`，把本地参考音频经 `upload_asset_url(..., "audio", ...)` 上传为公网直链，拒绝取不到远程可读 URL 的情况。
+- `backend/matrix_native_client.py#L20285-L20345`：`_prodgen_run_video()` 新增音频分支——校验 `audio_required`、`audio_limit>0` 时上传参考音频，并把 `reference_audio_url` 传入 `_agent_video_payload()`。
+- `backend/matrix_native_client.py#L26719-L26720`、`#L26822-L26826`：`ProductGenPage` 新增 `self._reference_audio` 与 `ref_audio_btn`（`volume` 图标，初始隐藏）。
+- `backend/matrix_native_client.py#L26902-L26944`：`_sync_model_ui()` 依当前视频模型契约同步显隐视频/音频上传按钮，按钮说明写入 `setAccessibleName`，`setToolTip("")` 保持空（遵守原生客户端 tooltip 策略）。
+- `backend/matrix_native_client.py#L27175-L27183`：新增 `pick_reference_audio()`/`clear_reference_audio()`；`reedit()`/`_send_confirmed()` 读写 `referenceAudio`；`GenCard` 参数 chips 增加“参考视频/参考音频”标签。
+- `tests/test_agent_media_uploads.py`：新增 17 项测试（契约+payload 纯函数 12 项，offscreen Qt 真实实例化 `ProductGenPage` 的 UI 5 项）。
+- `tests/test_agent_video_duration.py#L553-L563`、`#L740-L744`、`#L858-L862`：修正三处与实现同源、把 `wan2.7-cankaosheng` 字段错锁成 `images`/`video` 的旧断言，改按实测 `reference_urls`/`reference_video`。
+- 验证与影响：`.venv-win` 下 Agent 相关四套测试 + `test_native_tooltips` 全绿、`py_compile` 通过、全量 1386 项仅余 2 个无关既有问题；仅影响本地原生客户端 Agent.模式，不改中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。退出后 `start-visible-client.bat` 重启生效；回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`tests/test_agent_media_uploads.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 即可恢复旧行为。
+
+## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
 - `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
 - `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。
