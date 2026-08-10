@@ -12427,31 +12427,93 @@ def _format_duration_zh(seconds):
     return "%d秒" % secs
 
 
+_REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC = 5.5
+_COMIC_DURATION_MIN_SEC = 4
+_COMIC_DURATION_MAX_SEC = 15
+_COMIC_DURATION_DEFAULT_HEADROOM_SEC = 0.5
+
+
 def _estimate_replacement_tts_duration_sec(text):
     value = re.sub(r"\s+", "", str(text or "").strip())
     if not value:
         return 0.0
-    chars_per_sec = 4.2
+    chars_per_sec = _REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC
     try:
         configured = float(os.getenv("VIDEO_REPLACE_TTS_CHARS_PER_SEC", "") or 0)
         if configured > 0:
             chars_per_sec = configured
     except (TypeError, ValueError):
-        chars_per_sec = 4.2
+        chars_per_sec = _REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC
     chars_per_sec = max(2.5, min(chars_per_sec, 8.0))
     punctuation_pause = len(re.findall(r"[，。！？；、,.!?;:：]", value)) * 0.12
     return round((len(value) / chars_per_sec) + punctuation_pause, 2)
 
 
-def _comic_video_duration_slot(speech_duration_sec):
+def _comic_duration_headroom_sec():
+    try:
+        value = float(os.getenv("VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC", "") or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        value = _COMIC_DURATION_DEFAULT_HEADROOM_SEC
+    return max(0.0, min(value, 3.0))
+
+
+def _comic_duration_slots():
+    """Video seconds the comic backend may be asked for, ascending.
+
+    Defaults to every integer second in the supported range, so a 12.1 second
+    line books 13 seconds instead of the old 15 second rung. Set
+    VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15 to restore the coarse ladder
+    if the remote model rejects arbitrary seconds.
+    """
+    slots = []
+    for part in re.split(r"[,\s;]+", str(os.getenv("VIDEO_REPLACE_COMIC_DURATION_SLOTS", "") or "").strip()):
+        if not part:
+            continue
+        try:
+            value = int(float(part))
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in slots:
+            slots.append(value)
+    if slots:
+        return tuple(sorted(slots))
+    return tuple(range(_COMIC_DURATION_MIN_SEC, _COMIC_DURATION_MAX_SEC + 1))
+
+
+def _comic_video_duration_slot(speech_duration_sec, headroom_sec=None):
     try:
         duration = max(0.0, float(speech_duration_sec or 0.0))
     except (TypeError, ValueError):
         duration = 0.0
-    for slot in (4, 8, 12, 15):
+    if duration > 0:
+        if headroom_sec is None:
+            duration += _comic_duration_headroom_sec()
+        else:
+            try:
+                duration += max(0.0, float(headroom_sec or 0.0))
+            except (TypeError, ValueError):
+                pass
+    slots = _comic_duration_slots()
+    for slot in slots:
         if duration <= slot:
             return slot
-    return 15
+    return slots[-1]
+
+
+def _comic_segment_video_duration(segment):
+    """Video seconds for one comic segment; an already planned value wins as-is."""
+    segment = segment or {}
+    try:
+        planned = float(segment.get("videoDurationSec") or 0)
+    except (TypeError, ValueError):
+        planned = 0.0
+    if planned > 0:
+        return _comic_video_duration_slot(planned, headroom_sec=0.0)
+    return _comic_video_duration_slot(
+        segment.get("speechDurationSec") or segment.get("duration")
+    )
 
 
 def _comic_split_script_for_duration(script, max_speech_sec=15.0):
@@ -12498,7 +12560,77 @@ def _comic_split_script_for_duration(script, max_speech_sec=15.0):
     return chunks or [text]
 
 
-def _comic_plan_script_segments(segments, max_speech_sec=15.0):
+def _comic_measure_tts_enabled():
+    raw = str(os.getenv("VIDEO_REPLACE_COMIC_MEASURE_TTS", "") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _comic_measure_tts_parallelism():
+    try:
+        value = int(float(os.getenv("VIDEO_REPLACE_COMIC_MEASURE_TTS_PARALLELISM", "") or 0))
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        value = 4
+    return max(1, min(value, 8))
+
+
+def _comic_measure_script_duration(job, script):
+    """Real TTS seconds for one comic line; 0.0 when it cannot be measured.
+
+    The character-count estimate is only a proxy; booking video seconds from the
+    real audio length is what stops a 11 second line from paying for 15.
+    """
+    text = str(script or "").strip()
+    if not text:
+        return 0.0
+    job = job or {}
+    try:
+        url = lk888_tts_voice(
+            text,
+            str(job.get("voiceId") or job.get("ttsVoice") or "").strip(),
+            cancel_check=_replacement_cancel_check(job),
+        )
+    except Exception as exc:
+        if _replacement_cancel_exception(exc):
+            raise
+        log("comic tts measure: %s" % str(exc)[:120])
+        return 0.0
+    if not _is_remote_fetchable_media_url(url):
+        return 0.0
+    return max(0.0, _probe_media_duration(url))
+
+
+def _comic_apply_measured_speech_durations(planned, job):
+    """Swap character-count estimates for measured TTS seconds where possible."""
+    if not (planned and job and _comic_measure_tts_enabled()):
+        return
+    targets = [item for item in planned if str(item.get("script") or "").strip()]
+    if not targets:
+        return
+    parallelism = min(_comic_measure_tts_parallelism(), len(targets))
+    log("comic plan: measuring %d TTS lines (parallelism=%d)" % (len(targets), parallelism))
+
+    def measure_one(item):
+        return item, _comic_measure_script_duration(job, item.get("script"))
+
+    if parallelism <= 1:
+        measured = [measure_one(item) for item in targets]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as pool:
+            futures = [pool.submit(measure_one, item) for item in targets]
+            measured = [future.result() for future in concurrent.futures.as_completed(futures)]
+    top_slot = _comic_duration_slots()[-1]
+    for item, seconds in measured:
+        if seconds <= 0:
+            continue
+        item["speechDurationSec"] = round(seconds, 2)
+        item["speechDurationSource"] = "measured"
+        if seconds > top_slot:
+            item["speechOverflowSec"] = round(seconds - top_slot, 2)
+
+
+def _comic_plan_script_segments(segments, max_speech_sec=15.0, job=None):
     planned = []
     for source_segment in list(segments or []):
         if not isinstance(source_segment, dict):
@@ -12509,14 +12641,15 @@ def _comic_plan_script_segments(segments, max_speech_sec=15.0):
         count = len(script_parts)
         for continuation_index, script_part in enumerate(script_parts, start=1):
             segment = dict(source_segment)
-            speech_duration = _estimate_replacement_tts_duration_sec(script_part)
+            estimated = _estimate_replacement_tts_duration_sec(script_part)
             source_start = source_segment.get("sourceStart", source_segment.get("start"))
             source_end = source_segment.get("sourceEnd", source_segment.get("end"))
             source_duration = source_segment.get("sourceDuration", source_segment.get("duration"))
             segment.update({
                 "script": script_part,
-                "speechDurationSec": round(speech_duration, 2),
-                "videoDurationSec": _comic_video_duration_slot(speech_duration),
+                "speechDurationSec": round(estimated, 2),
+                "speechEstimatedSec": round(estimated, 2),
+                "speechDurationSource": "estimated",
                 "continuationIndex": continuation_index,
                 "continuationCount": count,
                 "sourceStart": source_start,
@@ -12530,9 +12663,12 @@ def _comic_plan_script_segments(segments, max_speech_sec=15.0):
                 )
             planned.append(segment)
 
+    _comic_apply_measured_speech_durations(planned, job)
+
     cursor = 0.0
     for index, segment in enumerate(planned, start=1):
-        duration = float(segment.get("videoDurationSec") or 4)
+        segment["videoDurationSec"] = _comic_video_duration_slot(segment.get("speechDurationSec"))
+        duration = float(segment.get("videoDurationSec") or _COMIC_DURATION_MIN_SEC)
         segment["index"] = index
         segment["start"] = round(cursor, 3)
         cursor += duration
@@ -14551,9 +14687,7 @@ def _comic_project_create_payload(job):
         sequence = int(segment.get("index") or index)
         description = _comic_visual_prompt_text(segment, job=job)
         script = str(segment.get("script") or "").strip()
-        target_duration = _comic_video_duration_slot(
-            segment.get("videoDurationSec") or segment.get("speechDurationSec") or segment.get("duration")
-        )
+        target_duration = _comic_segment_video_duration(segment)
         storyboard = {
             "sequence": sequence,
             "description": description,
@@ -14719,9 +14853,7 @@ def _comic_storyboard_video_payload(job, segment, force_regenerate=True):
             if value:
                 refs.append(value)
     refs = hidden_colored_refs or list(dict.fromkeys(refs))
-    target_duration = _comic_video_duration_slot(
-        segment.get("videoDurationSec") or segment.get("speechDurationSec") or segment.get("duration")
-    )
+    target_duration = _comic_segment_video_duration(segment)
     payload = {
         "workflow_mode": "keyframes",
         "video_model": video_model,

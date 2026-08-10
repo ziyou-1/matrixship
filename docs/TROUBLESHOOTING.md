@@ -1325,7 +1325,7 @@
 - 根因：同款替换默认按约 8 秒分段生成；旧逻辑把每段 TTS 音频按对应视频片段时长合成，音频长于视频时会按视频时长收尾，导致尾部被截断。
 - 修复：`backend/matrix_native_client.py#L6031-L6079` 新增生成前口播时长估算；`backend/matrix_native_client.py#L7072-L7075` 在开始生成前阻断明显超长片段；`backend/matrix_native_client.py#L11651-L11678` 在 TTS 下载后用真实音频时长兜底，超长时返回 `replacement_tts_audio_too_long`，不再进入截断式合成。
 - 排查：查看任务 JSON 的 `audioMode`、片段 `duration/script/ttsDurationSec/ttsTimingStatus/ttsTimingError`。如果 `audioMode=auto`，使用的是生成视频自带声音，不走这套 TTS 校验；旧 `audioMode=source` 会兼容映射为 `auto`。如果 `audioMode=uploaded`，整条音轨仍按最终成片时长校验。
-- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `4.2` 字/秒，值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
+- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `5.5` 字/秒（2026-08-07 前为 `4.2`），值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
 - 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_duration_preflight_flags_segment_script_that_will_be_cut tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_audio_mode_rejects_real_audio_longer_than_segment_before_mux tests.test_video_replacement_v2.VideoReplacementV2Test.test_start_generation_blocks_tts_script_that_exceeds_segment_duration -v`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本文档即可；不涉及中心服、数据库或 `migration.sql`。回滚后 AI 配音超长仍可能被片段时长截断。
 
@@ -3146,6 +3146,16 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：当前阶段下载按钮必须为禁用状态，页面源码不应包含 `/MatrixShipAgent-Setup.exe`。运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest -v` 验证。
 - 验证：本地访问 `http://127.0.0.1:9080/download` 应返回 HTML，包含“云灵星图 AI 爆款复刻平台 Windows 客户端下载”和“Windows 客户端即将开放下载”，且不包含安装包直链。
 - 回滚：删除 `/download` 路由和页面渲染函数；不需要改动安装包直链接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+## 2026-08-07 漫剧项目模式片段时长虚高、单条成本偏贵
+- 现象：同款替换选择漫剧项目模式后，一句约 11 秒的口播被排成 15 秒视频，整条片子时长和费用明显高于预期。
+- 根因一：口播时长估算默认按 `4.2` 字/秒，比真实中文广告口播语速（约 5.5~6.5 字/秒）慢约 25%，59 字的台词被估成 14.89 秒。
+- 根因二：`_comic_video_duration_slot()` 只有 `4/8/12/15` 四个粗档位，估算值一旦越过 12 就直接跳到 15，无法申请中间秒数。
+- 修复：估算默认语速改为 `5.5` 字/秒；漫剧档位默认改为 `4..15` 每个整数秒并预留 `0.5` 秒余量；排期阶段先跑一遍 TTS 用 `_probe_media_duration()` 探测真实音频时长，测到就用真实值定视频秒数，测不到自动回落到字数估算。
+- 排查：查看任务 JSON 的片段字段 `speechDurationSource`（`measured` 表示用了真实 TTS 时长，`estimated` 表示回落到估算）、`speechDurationSec`、`speechEstimatedSec`、`videoDurationSec`。若出现 `speechOverflowSec`，说明该段真实口播已超过最大 15 秒档位，需要缩短口播稿。
+- 注意：探测用的是本地 `lk888_tts_voice()`，漫剧服务端生成成品时用的是自己的 TTS 引擎，两者语速可能有差异，因此仍保留 `0.5` 秒余量。
+- 回滚：`VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15` 恢复旧档位，`VIDEO_REPLACE_TTS_CHARS_PER_SEC=4.2` 恢复旧估算语速，`VIDEO_REPLACE_COMIC_MEASURE_TTS=0` 关闭真实时长探测；三个开关互相独立，不需要改代码。
+- 未验证项：漫剧服务端（120.26.194.174）对任意整数秒 `video_duration` 的支持尚未实测，首次启用请先跑单段冒烟；`_comic_project_create_payload()` 的 `duration_per_shot` 取的是全片最大段时长，服务端在 `video_duration_control=auto` 下是否会用它覆盖每段 `video_duration` 也需要另行确认。
+
 ## 2026-08-04 `/replacement` returns 404 or local replacement job does not start
 - Symptom: opening `http://127.0.0.1:9081/replacement` returns `replacement_web_disabled`; direct browser submits show "请从本地客户端打开替换网页" or `agent_token_required`; submitting the video/image-note form returns `replacement_invalid_source_url`, `replacement_video_missing_character_image`, or `replacement_note_missing_images`; or saving an image-note preview returns `xhs_note_replacement_missing_images`.
 - Root cause: the MVP is disabled by default through `MATRIX_REPLACEMENT_WEB_ENABLED=0`; the page shell can open locally, but `/api/replacement/*` still requires the local agent token when token auth is enabled. Customer sessions used to start from the native "打开网页版替换" button so the local executor token and redacted user context were passed through the URL hash and immediately stored in `sessionStorage`; that button no longer exists on either page as of 2026-08-07. Phase 0 accepts only `http/https` source links without userinfo credentials and requires the video character image or at least one note replacement image. Saving a note draft also requires every preview slot to point to a real readable uploaded image before copying files into the local material library.
@@ -3153,6 +3163,7 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - Diagnostics: check structured logs for `replacement_web_page_opened`, `replacement_web_job_started`, and `replacement_note_draft_saved`; they must not contain Cookie, Token, Authorization, Bearer, signed URL query strings, data URLs, or raw file bytes. If old behavior remains after changing the flag, confirm port `9081` belongs to the restarted executor and not a stale process. For draft failures, inspect `replacement_web_uploads/note/<jobId>/` and `xhs_note_replacements/<jobId>/replacement_job.json` under the local data directory.
 - Verification: run `.\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_web_mvp -v`, `.\.venv-win\Scripts\python.exe -m unittest tests.test_openapi_contract -v`, and `.\.venv-win\Scripts\python.exe -m py_compile backend\api_server.py backend\replacement_web.py backend\platform_features.py backend\matrix_native_client.py tests\test_replacement_web_mvp.py`.
 - Rollback: set `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restart the local executor; restart or roll back the native client to remove the entry button. Source rollback restores `backend/matrix_native_client.py`, `backend/api_server.py`, `backend/replacement_web.py`, `backend/platform_features.py`, `tests/test_replacement_web_mvp.py`, `docs/openapi.yaml`, `docs/API_REFERENCE.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/IMPLEMENTATION.md`, `CHANGELOG.md`, `migration.sql`, and this entry. No database, Docker image, LK888, remote AI Canvas, publishing, or billing side effect is expected.
+
 ## 2026-08-04 Windows 安装包不能选择安装位置
 - 现象：运行 `MatrixShipAgent-Setup.exe` 后，软件直接安装到 `C:\Users\<user>\AppData\Local\MatrixShipAgent\app`，安装向导没有“选择安装位置”页面。
 - 根因：Inno Setup 脚本 `backend/installer/MatrixShipAgent.iss#L18-L25` 默认安装到 `{localappdata}\MatrixShipAgent\app`，旧配置 `DisableDirPage=yes` 隐藏了目录选择页。
@@ -3160,6 +3171,7 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 相关排查：如果 `backend\build_matrix_agent.ps1` 提示找不到 Inno Setup，先确认 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`、`C:\Program Files\Inno Setup 6\ISCC.exe` 或 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` 是否存在；脚本会按这三个位置查找。
 - 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory tests.test_web_surface_removed.WebSurfaceRemovedTest.test_build_stays_native_only -v`，再重新构建安装包并在 Windows 安装向导中确认出现目录选择页。
 - 回滚：把 `backend/installer/MatrixShipAgent.iss` 的 `DisableDirPage` 改回 `yes`，必要时回滚 `backend/build_matrix_agent.ps1` 的用户级 Inno 查找路径，重新运行 `backend\build_matrix_agent.ps1` 打包并发布上一稳定安装包；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量、密钥或 `migration.sql`。
+
 ## 2026-08-04 `/replacement` video handoff is missing
 - Symptom: `/replacement` opens, but video replacement still looks like a disconnected Phase 0 form, or `GET /api/replacement/video/handoff` returns `replacement_video_handoff_not_found`.
 - Root cause: the page was opened without a valid `handoffId`, the handoff expired, the native same-style replacement page had not loaded a video breakdown source, or the running local executor is stale and does not include the handoff route.
@@ -3167,3 +3179,4 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - Checks: `GET /api/replacement/video/handoff?handoffId=<rwh...>` should return `source.host`, `sourceVideo.available`, `analysis.duration`, and no `sourceVideoPath`; a subsequent `POST /api/replacement/video/start` with the same `handoffId` should create an `rvw_...` job whose response has `sourceContext.hasBreakdownAnalysis=true`.
 - Boundary: this handoff only proves the web page is bound to the native local breakdown context. It still does not submit LK888, remote AI Canvas, provider video generation, publishing, center sync, or billing.
 - Rollback: set `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restart the local executor, or restore `backend/matrix_native_client.py`, `backend/replacement_web.py`, `backend/api_server.py`, `tests/test_replacement_web_mvp.py`, OpenAPI/API docs, `CHANGELOG.md`, `migration.sql`, and this entry.
+

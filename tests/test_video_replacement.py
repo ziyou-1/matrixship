@@ -2013,6 +2013,95 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertTrue(all(item["sourceEnd"] == 32.0 for item in planned))
         self.assertTrue(all(item["sourceDuration"] == 8.0 for item in planned))
 
+    def test_comic_duration_slot_books_next_whole_second_with_headroom(self):
+        with mock.patch.dict(self.client.os.environ, {}, clear=False):
+            self.client.os.environ.pop("VIDEO_REPLACE_COMIC_DURATION_SLOTS", None)
+            self.client.os.environ.pop("VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC", None)
+            self.assertEqual(self.client._comic_video_duration_slot(11.4), 12)
+            self.assertEqual(self.client._comic_video_duration_slot(4.05), 5)
+            self.assertEqual(self.client._comic_video_duration_slot(2.0), 4)
+            self.assertEqual(self.client._comic_video_duration_slot(20.0), 15)
+            self.assertEqual(self.client._comic_video_duration_slot(0.0), 4)
+
+    def test_comic_duration_slot_env_restores_coarse_ladder(self):
+        with mock.patch.dict(
+                self.client.os.environ,
+                {"VIDEO_REPLACE_COMIC_DURATION_SLOTS": "4,8,12,15"},
+        ):
+            self.assertEqual(self.client._comic_video_duration_slot(11.4), 12)
+            self.assertEqual(self.client._comic_video_duration_slot(12.1), 15)
+            self.assertEqual(self.client._comic_video_duration_slot(4.05), 8)
+
+    def test_comic_segment_video_duration_does_not_restack_headroom(self):
+        segment = {"videoDurationSec": 12, "speechDurationSec": 11.4}
+
+        first = self.client._comic_segment_video_duration(segment)
+        second = self.client._comic_segment_video_duration(dict(segment, videoDurationSec=first))
+
+        self.assertEqual(first, 12)
+        self.assertEqual(second, 12)
+
+    def test_comic_planner_books_measured_tts_seconds_instead_of_estimate(self):
+        segment = {
+            "index": 1,
+            "start": 0.0,
+            "end": 8.0,
+            "duration": 8.0,
+            "script": "不玩套路，618提前购，看完能帮你省下好几万。",
+            "prompt": "人物面向镜头介绍产品",
+        }
+
+        with mock.patch.object(
+                self.client, "_comic_measure_script_duration", return_value=11.4
+        ) as measure:
+            planned = self.client._comic_plan_script_segments(
+                [segment], job={"id": "job-1", "voiceId": "xiaosi"}
+            )
+
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(measure.call_count, 1)
+        self.assertEqual(planned[0]["speechDurationSec"], 11.4)
+        self.assertEqual(planned[0]["speechDurationSource"], "measured")
+        self.assertEqual(planned[0]["videoDurationSec"], 12)
+        self.assertEqual(planned[0]["duration"], 12.0)
+        self.assertGreater(planned[0]["speechEstimatedSec"], 0)
+
+    def test_comic_planner_falls_back_to_estimate_when_tts_measure_fails(self):
+        segment = {
+            "index": 1,
+            "duration": 8.0,
+            "script": "不玩套路，618提前购，看完能帮你省下好几万。",
+            "prompt": "人物面向镜头介绍产品",
+        }
+
+        with mock.patch.object(
+                self.client, "lk888_tts_voice", side_effect=RuntimeError("tts down")
+        ):
+            planned = self.client._comic_plan_script_segments([segment], job={"id": "job-2"})
+
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]["speechDurationSource"], "estimated")
+        self.assertEqual(planned[0]["speechDurationSec"], planned[0]["speechEstimatedSec"])
+        self.assertGreater(planned[0]["videoDurationSec"], 0)
+
+    def test_comic_planner_skips_tts_measure_without_job(self):
+        segment = {"index": 1, "duration": 8.0, "script": "短句", "prompt": "画面"}
+
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts:
+            planned = self.client._comic_plan_script_segments([segment])
+
+        tts.assert_not_called()
+        self.assertEqual(planned[0]["speechDurationSource"], "estimated")
+
+    def test_replacement_tts_estimate_default_speed_is_5_5_chars_per_sec(self):
+        with mock.patch.dict(self.client.os.environ, {}, clear=False):
+            self.client.os.environ.pop("VIDEO_REPLACE_TTS_CHARS_PER_SEC", None)
+            # 55 characters, no punctuation -> 55 / 5.5 == 10.0 seconds
+            self.assertEqual(
+                self.client._estimate_replacement_tts_duration_sec("产品卖点" * 13 + "省钱好"),
+                10.0,
+            )
+
     def test_comic_duration_payload_uses_upper_supported_slot_and_auto_script_uses_tts(self):
         job = {
             "audioMode": "auto",

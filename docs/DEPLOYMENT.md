@@ -346,7 +346,11 @@ tesseract --list-langs
 | `VIDEO_REPLACE_PRINCIPAL_MODEL` | `happyhorse-video-edit` | 同款替换任务未手动选择模型时的主角源视频编辑默认模型；页面模型下拉框会把任务级 `model` 写入任务 JSON，所选模型必须支持源视频 + 参考图片输入 |
 | `VIDEO_REPLACE_PRINCIPAL_MIN_CONFIDENCE` | `0.65` | 原片主角视觉定位最低置信度；低于阈值必须人工确认 |
 | `VIDEO_REPLACE_PRODUCT_PARALLEL` | `2` | 产品图原图上传并发度；运行时限制为 `1..3`，设为 `1` 可回退串行上传 |
-| `VIDEO_REPLACE_TTS_CHARS_PER_SEC` | `4.2` | 同款替换 AI 音色配音的生成前口播时长估算语速；数值越大越宽松，建议保持 `2.5..8.0` 范围 |
+| `VIDEO_REPLACE_TTS_CHARS_PER_SEC` | `5.5` | 同款替换 AI 音色配音的生成前口播时长估算语速；数值越大越宽松，建议保持 `2.5..8.0` 范围。旧默认为 `4.2`，偏慢约 25%，会把 11 秒的口播估成 15 秒 |
+| `VIDEO_REPLACE_COMIC_DURATION_SLOTS` | 无（`4..15` 每个整数秒） | 漫剧项目模式每段可申请的视频秒数档位；留空表示按整秒申请。若漫剧服务端拒绝任意整秒，设为 `4,8,12,15` 回到旧的粗档位 |
+| `VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC` | `0.5` | 漫剧项目模式在口播时长之上预留的视频余量秒数；运行时限制为 `0..3` |
+| `VIDEO_REPLACE_COMIC_MEASURE_TTS` | `1` | 漫剧项目模式排期时是否先生成一遍 TTS 并探测真实音频时长来定视频秒数；设为 `0` 回退到纯字数估算 |
+| `VIDEO_REPLACE_COMIC_MEASURE_TTS_PARALLELISM` | `4` | 上述时长探测的并发度；运行时限制为 `1..8`，设为 `1` 可回退串行 |
 | `VIDEO_REPLACE_LIPSYNC_MODEL` / `LK888_VIDEO_LIPSYNC_MODEL` | 无 | 历史兼容变量；当前同款替换 `tts/uploaded` 不再依赖已有视频口型同步模型，而是把口播稿写入 LK888 视频编辑 prompt 后本地替换音轨 |
 | `VIDEO_REPLACE_SUBTITLE_SAFE_SOURCE` | `1` | 同款替换上传给远程视频模型前是否生成字幕安全源片段；默认遮罩顶部/底部常见字幕区，最终中文字幕仍由本地后期字幕层烧录 |
 | `VIDEO_REPLACE_SUBTITLE_FONT_FILE` | 自动查找 `C:\Windows\Fonts\msyh.ttc` 等中文字体 | 同款替换最终中文字幕烧录时传给 ffmpeg/libass 的固定字体文件目录；可指定受控中文字体文件，避免系统字体回退导致中文显示异常 |

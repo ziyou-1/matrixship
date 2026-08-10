@@ -283,6 +283,19 @@
 - 引用 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py` 的 38 个测试模块共 974 条用例，除两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）外全部通过；`py_compile` 通过。
 - 本次只影响本地客户端与本地服务层；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `_expand_comic_storyboard_image_submit_kwargs()` 在首尾帧路径上仍拼接“七帧中的每一帧”前缀，属于远端文案问题，本次未改。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
 
+## 2026-08-07 漫剧项目模式按真实口播时长排期，压缩片段秒数
+### Changed
+- 同款替换口播时长估算默认语速由约 `4.2` 字/秒改为 `5.5` 字/秒，更接近真实中文口播语速；`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 覆盖行为不变。
+- 漫剧项目模式每段可申请的视频秒数由 `4/8/12/15` 四个粗档位改为 `4..15` 每个整数秒，并在口播时长之上预留 `0.5` 秒余量。原先估算值只要越过 12 秒就跳到 15 秒，现在按整秒申请。
+- 漫剧项目模式排期时先生成一遍 TTS 并探测真实音频时长来定每段视频秒数，测不到时自动回落到字数估算。片段新增 `speechDurationSource`、`speechEstimatedSec`、`speechOverflowSec` 字段便于排查。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_video_replacement.VideoReplacementHelpersTest` 新增 7 条用例：整秒档位与余量、环境变量回退粗档位、已排期时长重复调用幂等、真实 TTS 时长排期、TTS 失败回落估算、无 job 时不触发探测、默认语速 `5.5` 字/秒。
+- `tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service` 共 395 条通过。全量 1374 条中 `tests.test_ui_feature_visibility`（缺 `backend/.env.dev`）和 playwright 相关用例失败，改动前即存在，与本次无关。
+- 新增环境变量 `VIDEO_REPLACE_COMIC_DURATION_SLOTS`、`VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC`、`VIDEO_REPLACE_COMIC_MEASURE_TTS`、`VIDEO_REPLACE_COMIC_MEASURE_TTS_PARALLELISM`，均有默认值，不需要改部署配置即可生效。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`；需重启本地客户端生效。
+- 待实测：漫剧服务端（120.26.194.174）对任意整数秒 `video_duration` 的支持未验证，首次启用请先跑单段冒烟；如被拒绝，设 `VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15` 即可回到旧档位。
+- 回滚：三个环境变量可分别关闭三项改动；或回滚 `backend/matrix_native_client.py`、`backend/replacement_pipeline.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md`。
+
 ## 2026-08-06 矩阵侧扣费与漫剧侧对齐
 ### Fixed
 - `MAINDB_YUAN_TO_POWER` 由 10 改为 1。线上 `recharge_packages` 本就是 1 元 ≈ 1 算力（50元档=50算力），此前按 10 倍扣费属十倍超收。该常量同时决定扣费与微信充值入账，**必须共用一个值**。

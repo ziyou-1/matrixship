@@ -381,7 +381,8 @@ class HybridReplacementPipeline(ReplacementPipeline):
             )
         if replacement_mode == "comic_project":
             job["principalReplacementMode"] = ""
-            segments = self._call("_comic_plan_script_segments", segments, max_speech_sec=15.0)
+            segments = self._call(
+                "_comic_plan_script_segments", segments, max_speech_sec=15.0, job=job)
         job["breakdownAnalysis"] = analysis
         visual_failure = self._call("_breakdown_visual_failure", analysis)
         job["visualAnalysisFailure"] = visual_failure
