@@ -1,4 +1,13 @@
-﻿## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
+﻿## 2026-08-10 同款替换移除 SD 2.0 全能参考并对齐标签
+- `backend/matrix_native_client.py` `_LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS`/`_LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS`/`_LK888_REPLACEMENT_MODEL_LABELS`：删除 `kwvideo-v2-quannengcankao`（“SD 2.0 全能参考”）。它此前是同款替换内置备选，但漫剧生成器视频目录用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧不一致；删除后同款替换是漫剧生成器视频目录的子集。
+- `backend/matrix_native_client.py`：删除 `_replacement_is_sd20_all_reference_row` 及其在 `_replacement_supported_model_rows` 里遍历实时 LK888 目录的回填循环（否则会把 SD 2.0 全能参考从目录重新加回下拉框）；`_replacement_configured_model_is_allowed` 去掉 `sd20/seedance20` 模糊分支，仅保留主角模型和显式参考模型白名单。
+- `backend/matrix_native_client.py` `_LK888_REPLACEMENT_MODEL_LABELS`：4 个模型显示名对齐漫剧生成器——`happyhorse-video-edit`=“HappyHorse 视频编辑”、`happyhorse-r2v`=“HappyHorse 参考生视频”、`happyhorse-1.1-r2v`=“HappyHorse 1.1 参考生视频”、`wan2.7-cankaosheng`=“Wanxiang 2.7 参考生视频”。
+- `tests/test_video_replacement_v2.py`：两条 SD 2.0 全能参考“存在”用例反转为排除用例，新增 `test_replacement_configured_model_rejects_sd20_all_purpose_model`；`hailuo-h3-quannengcankao` 相关用例保持不变。
+- 注：漫剧流程的 `_comic_model_is_seedance()` 仍名义识别 `kwvideo-v2-quannengcankao`（隐藏彩铅链路），以及远程镜像 `tools/aicanvas_remote/server_current.py` 的静态目录/`API_GATEWAY_VIDEO_MODEL_IDS`/`AIC_SUBJECT_*` 仍保留该 ID，均在本次同款替换范围之外，未改动。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2 tests.test_video_replacement tests.test_agent_video_duration` 共 495 条通过，`py_compile` 通过。
+- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/ARCHITECTURE.md`、`docs/API_REFERENCE.md` 和本文档即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。代码改动需重启本地客户端后进入运行进程。
+
+## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
 - `backend/matrix_native_client.py#L2712-L2716`：`_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES["wan2.7-cankaosheng"]` 的 `video_field` 由 `video` 改为真实字段 `reference_video`。
 - `backend/matrix_native_client.py#L3039-L3047`：`_agent_video_payload()` 为 `wan2.7-cankaosheng` 增加精确分支——参考图写 `reference_urls`、参考视频写 `reference_video`，直接 return，不再走通用别名块（此前误写 `images/image_urls/reference_images` 和 `video`，模型收不到参考素材、退化为纯文生视频）。
 - `tests/test_agent_video_duration.py#L553-L558`、`#L753-L756`、`#L874-L878`：修正三处与实现同源、把该模型字段锁成 `images`/`video` 的旧断言，改按实测 `reference_urls`/`reference_video`。

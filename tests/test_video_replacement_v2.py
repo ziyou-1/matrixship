@@ -3072,10 +3072,13 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertIn("viduq3-turbo-cankaosheng", candidates)
         self.assertNotIn("happyhorse-video-edit", candidates)
 
-    def test_replacement_supported_model_rows_include_sd20_all_purpose_from_catalog(self):
+    def test_replacement_supported_model_rows_exclude_sd20_all_purpose_from_catalog(self):
+        # SD 2.0 全能参考 was removed from 同款替换; a live LK888 catalog row that looks
+        # like an SD2.0 all-reference model must no longer be surfaced into the dropdown.
         rows = [
             {"name": "happyhorse-video-edit", "display_name": "HappyHorse Video Edit", "type": "video"},
             {"name": "sd20-all-reference", "display_name": "SD 2.0 全能参考", "type": "video"},
+            {"name": "kwvideo-v2-quannengcankao", "display_name": "SD 2.0 全能参考", "type": "video"},
             {"name": "sora-2", "display_name": "Sora 2", "type": "video"},
             {"name": "gpt-image-2", "display_name": "Image", "type": "image"},
         ]
@@ -3084,18 +3087,18 @@ class VideoReplacementV2Test(unittest.TestCase):
         names = [row["name"] for row in supported]
 
         self.assertIn("happyhorse-video-edit", names)
-        self.assertIn("sd20-all-reference", names)
+        self.assertNotIn("sd20-all-reference", names)
+        self.assertNotIn("kwvideo-v2-quannengcankao", names)
         self.assertNotIn("sora-2", names)
         self.assertNotIn("gpt-image-2", names)
 
-    def test_replacement_supported_model_rows_include_known_sd20_all_purpose_model(self):
+    def test_replacement_supported_model_rows_exclude_known_sd20_all_purpose_model(self):
         supported = self.client._replacement_supported_model_rows([])
         names = [row["name"] for row in supported]
 
-        self.assertIn("kwvideo-v2-quannengcankao", names)
-        row = next(row for row in supported if row["name"] == "kwvideo-v2-quannengcankao")
-        self.assertEqual(row["display_name"], "SD 2.0 全能参考")
-        self.assertEqual(row["type"], "video")
+        self.assertNotIn("kwvideo-v2-quannengcankao", names)
+        # 海螺 H3 全能参考 stays as the built-in all-reference option.
+        self.assertIn("hailuo-h3-quannengcankao", names)
 
     def test_replacement_supported_model_rows_include_known_hailuo_h3_all_purpose_model(self):
         supported = self.client._replacement_supported_model_rows([])
@@ -3110,6 +3113,14 @@ class VideoReplacementV2Test(unittest.TestCase):
         candidates = self.client._replacement_model_candidates({"model": "hailuo-h3-quannengcankao"})
 
         self.assertEqual(candidates[0], "hailuo-h3-quannengcankao")
+
+    def test_replacement_configured_model_rejects_sd20_all_purpose_model(self):
+        # After the deletion, selecting SD 2.0 全能参考 (or any SD2.0 all-reference
+        # variant) in non-principal mode is no longer an allowed replacement model.
+        with self.assertRaises(RuntimeError):
+            self.client._replacement_model_candidates({"model": "kwvideo-v2-quannengcankao"})
+        with self.assertRaises(RuntimeError):
+            self.client._replacement_model_candidates({"model": "sd20-all-reference"})
 
     def test_hybrid_video_edit_puts_reference_images_into_params_for_lk888(self):
         # LK888 只读 params 里的字段,顶层 image_urls 被忽略。

@@ -190,7 +190,7 @@ flowchart TD
 
 - `hybrid_v2` 不再设置单视频总时长硬上限、默认约 8 秒分段、并发固定为 1。方案阶段允许人工修正口播/非口播类型和口播稿。
 - 新主角模式在方案阶段从六张源视频关键帧调用 LK888 Vision，保存 `principalActor`（最佳帧、归一化 bbox、置信度、描述和本地预览）；置信度不足时必须人工确认主角候选后才能下单。新任务接受 1-3 张人物参考图，至少一张全身图由页面确认并写入 `personReferenceFullBodyConfirmed`。
-- `principalReplacementMode=source_video_edit` 时，非口播片段默认调用 `VIDEO_REPLACE_PRINCIPAL_MODEL`（默认 `happyhorse-video-edit`）；用户也可在同款替换页选择任务级 LK888 模型，任务 JSON 的 `model` 会覆盖默认值。“SD 2.0 全能参考”使用真实模型标识 `kwvideo-v2-quannengcankao`。请求同时传 `video`/`images`、兼容视频别名和 `audio_setting=origin`；上游失败标记 `principal_video_edit_failed` 并记录实际模型。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 回滚新任务到旧候选链。
+- `principalReplacementMode=source_video_edit` 时，非口播片段默认调用 `VIDEO_REPLACE_PRINCIPAL_MODEL`（默认 `happyhorse-video-edit`）；用户也可在同款替换页选择任务级 LK888 模型，任务 JSON 的 `model` 会覆盖默认值。（`SD 2.0 全能参考`/`kwvideo-v2-quannengcankao` 已于 2026-08-10 从同款替换移除，与漫剧生成器视频目录保持一致；内置全能参考选项为海螺 H3 全能参考。）请求同时传 `video`/`images`、兼容视频别名和 `audio_setting=origin`；上游失败标记 `principal_video_edit_failed` 并记录实际模型。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 回滚新任务到旧候选链。
 - 当前同款替换新任务不再向用户开放“产品镜头锚定”“原片动作控制”“人物一致性”入口。新任务固定走主角整身远程替换主链路，写入 `identityMode=standard`、`enableFaceFusion=false`、`actionControlEnabled=false`、`productAnchorEnabled=false`；旧任务字段和 helper 保留为历史兼容。
 - 口播片段先以产品、授权人物和场景生成稳定关键帧，再复用 `TTS -> kling-avatar-image2video(mode=std)` 生成真实音频驱动口型。
 - 参考图在下单前区分本地文件、当前中心素材 URL 和公网 URL。中心服配置 `PUBLIC_MEDIA_BASE_URL` 后，为素材返回带 `orgId/expires/token` 的短期 HTTPS `publicUrls`；客户端优先将这些 URL 传给 LK888。本地/中心图片只在内存中转 data URL；Base64 不写任务 JSON 和日志。可灵数字人优先使用公网头像/关键帧 URL；没有公网 URL 时才用 JSON `params.image=data:image/...;base64,...` 兜底。

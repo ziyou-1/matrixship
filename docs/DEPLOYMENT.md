@@ -422,11 +422,11 @@ test -n "$FACEFUSION_LICENSE_REF"
 
 同款替换产品图当前直接上传用户原图，不再执行白底归一化或归一化后一致性校验。历史环境变量 `VIDEO_REPLACE_PRODUCT_NORMALIZE`、`VIDEO_REPLACE_PRODUCT_NORMALIZE_VALIDATE` 不再改变新任务的产品图处理链路；如需控制速度，只调整 `VIDEO_REPLACE_PRODUCT_PARALLEL` 并重启本地客户端。
 
-旧 LK888 主角模式仍默认调用 `happyhorse-video-edit` 源视频编辑；页面“同款替换模型”下拉框可把任务级 `model` 切换为其他适合的 LK888 视频参考模型。客户端只展示白名单和 LK888 目录中识别到的“SD 2.0 全能参考”等适合模型，不展示纯文生视频或图片模型。原片段和 1-3 张人物参考图必须先变成公网 HTTPS URL，请求同时保留 `video`、`images`、`video_url`、`video_urls`、`reference_video` 和 `params` 内源视频字段；失败记录实际 `model`、`remoteErrorId` 和 `principal_video_edit_failed`。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 后，新任务回到参考图视频候选链。源片段公网 URL 仍会写入任务 JSON 供追踪和音频回填；如无公网素材基址，会在远程下单前返回 `video_replace_remote_media_required`。`tts/uploaded` 声音模式会把口播稿写入主角替换视频 prompt；远程生成完成后，本地用 AI 音色 TTS 或上传完整配音裁切片段替换音轨，不再要求配置 `VIDEO_REPLACE_LIPSYNC_MODEL`。
+旧 LK888 主角模式仍默认调用 `happyhorse-video-edit` 源视频编辑；页面“同款替换模型”下拉框可把任务级 `model` 切换为其他适合的 LK888 视频参考模型。客户端只展示白名单内的适合模型（如海螺 H3 全能参考、参考图生视频类），不展示纯文生视频或图片模型。原片段和 1-3 张人物参考图必须先变成公网 HTTPS URL，请求同时保留 `video`、`images`、`video_url`、`video_urls`、`reference_video` 和 `params` 内源视频字段；失败记录实际 `model`、`remoteErrorId` 和 `principal_video_edit_failed`。设置 `VIDEO_REPLACE_PRINCIPAL_REPLACEMENT=0` 后，新任务回到参考图视频候选链。源片段公网 URL 仍会写入任务 JSON 供追踪和音频回填；如无公网素材基址，会在远程下单前返回 `video_replace_remote_media_required`。`tts/uploaded` 声音模式会把口播稿写入主角替换视频 prompt；远程生成完成后，本地用 AI 音色 TTS 或上传完整配音裁切片段替换音轨，不再要求配置 `VIDEO_REPLACE_LIPSYNC_MODEL`。
 
 新任务默认走漫剧项目模式。`MATRIX_COMIC_BASE_URL` / `COMIC_TOOL_URL` 指向漫剧生成器根地址，默认 `http://120.26.194.174`。本地客户端会先用中心服换 ticket，再与漫剧生成器交换 token；中心服默认把 ticket 固定签给漫剧账号 `MATRIX_COMIC_FIXED_USER_ID=44` / `MATRIX_COMIC_FIXED_USERNAME=003`，不再按当前 Matrix 用户做一对一映射。之后按角色/场景/道具写入项目库并生成分镜、首尾帧和视频。`audioMode` 当前允许 `auto` 和 `tts`：`auto` 使用生成视频自带声音，`tts` 使用 AI 音色按口播稿生成声音；上传完整配音的稳定片段接口还没有接通，`uploaded` 仍会被前置阻断。如果暂时不想让新任务进入漫剧模式，把 `VIDEO_REPLACE_DEFAULT_MODE` 改成 `legacy` 并手动重启本地客户端即可。临时开发测试可使用 Cloudflare Tunnel：
 
-`SD 2.0 全能参考` 的 LK888 生成模型标识是 `kwvideo-v2-quannengcankao`，云灵页面卡片 ID `76` 只用于上游页面展示/选择。客户端已把该标识作为同款替换内置备选；如果上游实际接口不支持源视频 + 参考图输入，应从任务级模型切回 `happyhorse-video-edit` 后重生失败片段。
+`SD 2.0 全能参考` 的 LK888 生成模型标识是 `kwvideo-v2-quannengcankao`，云灵页面卡片 ID `76` 只用于上游页面展示/选择。该标识已于 2026-08-10 从同款替换下拉框移除：漫剧生成器视频目录本就用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧此前不一致，故同款替换不再内置、也不再从 LK888 目录动态识别该模型；非主角模式若把任务级 `model` 指向它会被拒绝并提示改用 `viduq3-turbo-cankaosheng`。内置的多模态全能参考选项现为海螺 H3 全能参考（`hailuo-h3-quannengcankao`）。
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:9080
