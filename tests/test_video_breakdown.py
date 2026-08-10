@@ -114,6 +114,19 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
             "抖音连接暂时失败，请重试",
         )
 
+    def test_unexpected_download_error_is_localized_for_breakdown_status(self):
+        # An unexpected filesystem error is normalized server-side to the stable
+        # 'download_exception' code; the breakdown status shows a friendly line
+        # instead of a raw '[WinError 267] 目录名称无效' string.
+        self.assertEqual(
+            self.client._localize_download_task_error("download_exception"),
+            "视频下载失败，请稍后重试。",
+        )
+        self.assertEqual(
+            self.client._video_breakdown_download_failure_text("download_exception"),
+            "分解失败:下载未完成 视频下载失败，请稍后重试。",
+        )
+
     def test_video_breakdown_markdown_contains_source_and_report(self):
         md = self.client._video_breakdown_markdown({
             "platform": "douyin",

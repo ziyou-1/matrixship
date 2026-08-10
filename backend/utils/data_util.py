@@ -71,9 +71,19 @@ def _remove_temp_file(path):
         )
 
 
-def norm_str(str):
-    new_str = re.sub(r"|[\\/:*?\"<>| ]+", "", str).replace('\n', '').replace('\r', '')
-    return new_str
+def norm_str(value):
+    """Strip characters that are illegal in a Windows path component.
+
+    Download folder names are built from remote douyin fields
+    (title/nickname/user_id/work_id). Besides the reserved punctuation
+    \\ / : * ? " < > | and spaces, control characters are removed too, so a
+    stray ':' or tab in that data can never produce an invalid directory name
+    (WinError 267 "目录名称无效" / WinError 123) that aborts the whole download.
+    """
+    text = str(value if value is not None else "")
+    text = re.sub(r'[\\/:*?"<>|]', "", text)      # Windows-reserved punctuation
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)   # control chars incl. \t \n \r
+    return text.replace(" ", "")
 
 def norm_text(text):
     ILLEGAL_CHARACTERS_RE = re.compile(r'[\000-\010]|[\013-\014]|[\016-\037]')
@@ -316,12 +326,13 @@ def save_wrok_detail(work, path):
 
 
 def download_work(work_info, path, save_choice, auth=None):
-    work_id = work_info['work_id']
-    user_id = work_info['user_id']
-    title = work_info['title']
-    title = norm_str(title)[:40]
-    nickname = work_info['nickname']
-    nickname = norm_str(nickname)[:20]
+    # All four fields flow from untrusted douyin data into a Windows path, so
+    # every one must be sanitized (previously only title/nickname were, which
+    # let a ':' in user_id/work_id raise WinError 267 and abort the download).
+    work_id = norm_str(work_info['work_id'])[:40] or 'unknown'
+    user_id = norm_str(work_info['user_id'])[:40]
+    title = norm_str(work_info['title'])[:40]
+    nickname = norm_str(work_info['nickname'])[:20]
     if title.strip() == '':
         title = f'无标题'
     save_path = f'{path}/{nickname}_{user_id}/{title}_{work_id}'

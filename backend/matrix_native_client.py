@@ -22127,6 +22127,8 @@ def _localize_download_task_error(error):
         return XHS_LOGIN_EXPIRED_HINT
     if text == "local_browser_offline":
         return "本地客户端未在线，请先启动并登录本地客户端。"
+    if text == "download_exception":
+        return "视频下载失败，请稍后重试。"
     return text
 
 

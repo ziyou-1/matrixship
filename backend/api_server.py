@@ -8292,6 +8292,7 @@ class Handler(BaseHTTPRequestHandler):
                                 'files': [],
                             })
                         work, save_path = download_douyin_work_with_refresh(auth, url, save_choice)
+                        files = list_download_files(save_path)
                     except DouyinDetailNetworkError as exc:
                         return json_response(self, {
                             'ok': False,
@@ -8309,7 +8310,26 @@ class Handler(BaseHTTPRequestHandler):
                             'stage': 'download',
                             'context': exc.context,
                         }, status)
-                    files = list_download_files(save_path)
+                    except OSError as exc:
+                        # Defense in depth: an unexpected filesystem error (e.g. an
+                        # invalid save-path name -> WinError 267/123) must surface as
+                        # a stable contract code, never as a raw str(e)+traceback that
+                        # the client would echo verbatim to the user.
+                        raw_log = json_log(
+                            logger,
+                            'download_unexpected_failed',
+                            exc=exc,
+                            endpoint=path,
+                            platform='douyin',
+                            source_url=url,
+                        )
+                        return json_response(self, {
+                            'ok': False,
+                            'accountId': account_id,
+                            'error': 'download_exception',
+                            'errorId': (json.loads(raw_log) or {}).get('errorId'),
+                            'stage': 'download',
+                        }, 502)
                     try:
                         material = import_download_to_library(save_path, work, source_url=url, platform='douyin')
                     except Exception as exc:
@@ -8360,7 +8380,25 @@ class Handler(BaseHTTPRequestHandler):
                 gate = xhs_collection_account_gate("download", account_id, guest_mode, confirmed)
                 if not gate.get("ok"):
                     return json_response(self, {'ok': False, **gate}, 429)
-                res = xhs_download_note(url, BASE_PATH['media'], data_dir=DATA_DIR, guest_mode=guest_mode)
+                try:
+                    res = xhs_download_note(url, BASE_PATH['media'], data_dir=DATA_DIR, guest_mode=guest_mode)
+                except OSError as exc:
+                    # Defense in depth: keep an unexpected filesystem error from
+                    # leaking a raw str(e)+traceback to the client (see douyin path).
+                    raw_log = json_log(
+                        logger,
+                        'download_unexpected_failed',
+                        exc=exc,
+                        endpoint=path,
+                        platform='xhs',
+                        source_url=url,
+                    )
+                    return json_response(self, {
+                        'ok': False,
+                        'error': 'download_exception',
+                        'errorId': (json.loads(raw_log) or {}).get('errorId'),
+                        'stage': 'download',
+                    }, 502)
                 xhs_log_guest_collection_block("download", res, url=url)
                 record = xhs_safety_record("download", account_id, res) if not guest_mode else {"safety": gate.get("safety")}
                 if isinstance(res, dict):

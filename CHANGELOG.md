@@ -1,5 +1,16 @@
 ﻿# Changelog
 
+## 2026-08-10 分解视频修复 `下载未完成 [WinError 267] 目录名称无效`
+### Fixed
+- `backend/utils/data_util.py#L328-L340` 现在把抖音 `user_id`、`work_id` 和 `title`、`nickname` 一起经 `norm_str` 清洗后再拼下载目录，避免作者抖音号或作品 id 里的英文冒号 `:` 让 Windows 把路径当成 NTFS 数据流、`os.makedirs` 抛 `NotADirectoryError [WinError 267] 目录名称无效`，导致“分解视频”下载阶段直接失败并把原始异常文案回显给用户。
+- `backend/utils/data_util.py#L74-L86` 的 `norm_str` 额外剥除控制字符（`\t`、`\n`、`\r`、`\x00-\x1f`、`\x7f`），顺带修掉标题/昵称里混入控制字符时的 `[WinError 123] 文件名、目录名或卷标语法不正确` 兄弟问题；对合法标题（如“夏日穿搭分享”）的目录名保持不变。
+- 兜底加固：`backend/api_server.py#L8313-L8332`（抖音）和 `backend/api_server.py#L8385-L8401`（小红书）下载分支新增 `except OSError`，把意外的文件系统异常统一成稳定契约码 `download_exception`（502 + 脱敏 errorId，不回显 `str(e)`/traceback），避免以后任何新异常再把原始 `[WinError …]` 文案漏给用户；只捕获 `OSError`，不影响抖音鉴权错误的 `needLogin` 分支。`backend/matrix_native_client.py#L22130-L22131` 把 `download_exception` 本地化为“视频下载失败，请稍后重试。”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_download_work_path_sanitization.DownloadWorkPathSanitizationTest`（冒号 user_id/work_id、控制字符标题、全非法字符、正常标题共 5 例，修复前 4 例复现 `[WinError 267]`/`[WinError 123]`，修复后全绿）；`tests.test_api_download_contract.ApiDownloadContractTest.test_douyin_download_normalizes_unexpected_oserror_to_contract_code`、`test_xhs_download_normalizes_unexpected_oserror_to_contract_code`（断言不泄漏 `WinError 267`/traceback）；`tests.test_video_breakdown.VideoBreakdownHelpersTest.test_unexpected_download_error_is_localized_for_breakdown_status`。
+- 回归 `.\.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_authenticated_download tests.test_download_work_path_sanitization tests.test_video_breakdown`（105 通过），`py_compile` 通过。
+- 本次改动本地执行器下载落盘目录清洗、下载分支异常兜底、客户端下载错误文案与测试文档；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量密钥或 `migration.sql`。重启本地执行器后生效；回滚 `backend/utils/data_util.py`、`backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_download_work_path_sanitization.py`、`tests/test_api_download_contract.py`、`tests/test_video_breakdown.py`、`CHANGELOG.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-10 Agent 模式视频/音频上传做成顶部显眼槽位
 ### Fixed
 - Agent.模式选到必须传视频的模型（如 HappyHorse 视频编辑 `happyhorse-video-edit`）时，顶部只有「参考图」槽，而视频/音频上传藏在右下角一排小圆钮里（窄窗口会被挤出屏幕），用户反馈「必选视频却找不到上传入口」。现按模型契约在参考图旁边给出显眼的带标签槽位：必选标「（必选）」橙色、可选标「（可选）」、已选变青色打勾；`happyhorse-video-edit` 给「待编辑参考视频（必选）」，全能参考家族给「参考视频＋参考音频」，纯文生视频模型不出现、免添乱。右下角圆钮保留作次入口（现有测试仍依赖它）。
@@ -441,7 +452,6 @@
 - 二次修复：线上发现“漫剧Agent / Windows客户端 / 漫剧画布”顺序异常和重复风险后，下载卡片注入不再克隆或插入到现有 Agent 卡片后面，改为寻找工具容器并追加独立 Windows 卡片。修复版部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-append-fix-20260804_101249`；新 `server.py` SHA-256 为 `b3ecc6ebe22e10e7e88a06e4e9a67f26a88bebc9b0415a50acc54703d215540e`。
 - 文案修复：Windows 卡片说明改为“云灵星图桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”，避免用户误以为下载的是整个漫剧项目。文案修复备份为 `/root/AI-CanvasPro/server.py.bak.download-card-copy-fix-20260804_102740`；新 `server.py` SHA-256 为 `e8644cbc79429d0fbd8fbfacb58c0037a7f4d8572e39c58e22ab763672ce5cc8`。
 - 产品定位文案更新：Windows 卡片说明调整为“云灵星图 AI爆款复刻平台 Windows 桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”。部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-platform-copy-20260804_103700`；新 `server.py` SHA-256 为 `ebe4cd1f4810257985c81bc3641b7a870b2d4721f818019b60fc3613d1ec3306`。
-
 
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
@@ -1772,7 +1782,6 @@
 - 小红书笔记下载现在只保留作品主体媒体，过滤 `data:image`、`fe-platform`、`picasso-static` 等页面静态资源和小图标；过滤后没有正文图片或视频时返回 `xhs_no_note_media`，不再把页面装饰图当作素材下载成功。
 - 资产库顶部隐藏“漫剧共享库”切换按钮，标题说明同步改为仅展示本地收藏入口；底层共享库逻辑保留，后续可最小回滚恢复。
 
-
 - 素材发布页“打开素材”现在会区分单文件和多文件素材：单文件继续打开文件，多个本机文件时打开素材所在文件夹，避免只打开第一个视频或图片。
 - 数字人口播生成视频后默认按用户口播文案本地生成并烧录中文字幕；提交给 LK888/可灵数字人模型的 prompt 同步禁止画面内生成字幕、文字、标题、贴纸文字或水印，减少模型直接把乱码中文字画进视频。
 
@@ -1788,7 +1797,6 @@
 - 本次余额刷新和 LK888 失败退款修复修改 `backend/matrix_native_client.py`、`backend/central_server.py`、`tests/test_role_permissions.py`、`tests/test_billing_unified.py` 及文档；不涉及 OpenAPI、数据库结构或 `migration.sql`。代码生效需要重启本地客户端和中心服；回滚上述文件即可恢复旧行为。
 - 本次同款替换口播稿提示词修复只修改本地客户端、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；按用户要求本次修改后不自动重启本地客户端。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md` 和 `docs/IMPLEMENTATION.md` 即可。
 - 本次小红书采集图片过滤只修改本地平台适配器、下载契约测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；回滚 `backend/platform_adapters.py`、`tests/test_api_download_contract.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
-
 
 - 本次素材发布打开目录修复只修改本地客户端、测试和文档；回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 即可，不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 - 本次数字人口播字幕修复只修改本地客户端、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可。临时规避可设置 `DIGITAL_HUMAN_BURN_SUBTITLES=0` 并重启本地客户端，恢复为旧的无本地字幕后处理流程。
@@ -2355,11 +2363,6 @@
 - Real compose startup was verified with image `matrix-ship-central:prod-smoke-20260720`, container `clean_20260710_150252-matrix-central-1`, Docker health status `healthy`, and `/api/health` returning `ok=true`.
 - No database schema or data migration is required for this release; `migration.sql` remains a no-op traceability marker.
 - Rollback unit is the previous stable image tag for Docker deployment, plus source-level rollback of the touched backend/docs/tests files if running outside containers.
-
-
-
-
-
 
 ## 2026-07-28 小红书创作服务平台刷新循环修复
 - 修复小红书发布登录等待期间反复刷新创作服务平台的问题：等待函数不再用残留 cookie 触发循环跳转，登录完成后最多重新进入一次发布页。新增发布回归测试；本次只修改本地发布适配器、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`。回滚相关文件即可恢复旧行为。

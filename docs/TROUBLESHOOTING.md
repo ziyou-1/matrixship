@@ -1,4 +1,13 @@
-﻿## 2026-08-08 小红书图文笔记点"分解"报"未找到可分析的视频文件"
+﻿## 2026-08-10 分解视频显示 `分解失败:下载未完成 [WinError 267] 目录名称无效`
+- 现象：在“分解视频”粘贴抖音链接或从“内容采集”点分解，界面显示 `分解失败:下载未完成 [WinError 267] 目录名称无效`（有时带路径尾巴），不进入抽帧/转写/报告。个别标题还可能报 `[WinError 123] 文件名、目录名或卷标语法不正确`。
+- 根因：分解前要先把原视频下载到本地。`download_work` 用 `{path}/{nickname}_{user_id}/{title}_{work_id}` 拼落盘目录，但旧代码只对 `title`、`nickname` 调 `norm_str`，`user_id`（作者抖音号）和 `work_id`（作品 id）原样拼进路径。当这两个字段带英文冒号 `:` 时，Windows 把 `名字:流名` 当成 NTFS 备用数据流，父级被判定为“不是目录”，`os.makedirs` 抛 `NotADirectoryError [WinError 267] 目录名称无效`。该 OSError 未被下载分支的 `MediaDownloadError`/`DouyinDetailNetworkError` 捕获，冒泡到 `api_server` 的 do_POST 兜底处理 `{'error': str(e)}`，经本地浏览器 worker 回填为任务 error，客户端 `_video_breakdown_download_failure_text` 原样拼成上述提示。`norm_str` 旧实现也不剥控制字符，标题里混入 `\t` 等会走成 `[WinError 123]`。
+- 修复：`backend/utils/data_util.py#L328-L340` 让 `user_id`、`work_id` 与 `title`、`nickname` 一起过 `norm_str` 再拼路径（`work_id` 清空后兜底为 `unknown`）；`backend/utils/data_util.py#L74-L86` 的 `norm_str` 额外剥除 `\x00-\x1f`、`\x7f` 等控制字符并去掉旧正则里易碎的前导 `|`，合法标题目录名不变。
+- 兜底加固（防再泄漏）：`backend/api_server.py#L8313-L8332`（抖音）、`backend/api_server.py#L8385-L8401`（小红书）下载分支新增 `except OSError`，把意外文件系统异常统一成契约码 `download_exception`（502 + 脱敏 errorId，不回显 `str(e)`/traceback）；只捕 `OSError`，不干扰抖音鉴权错误的 `needLogin` 分支。`backend/matrix_native_client.py#L22130-L22131` 把 `download_exception` 本地化为“视频下载失败，请稍后重试。”。这样即使将来下载链路冒出新的 OS 异常，用户看到的也是友好文案而非原始 `[WinError …]`。
+- 排查：如仍复现，用 `.\.venv-win\Scripts\python.exe -m unittest tests.test_download_work_path_sanitization -v` 确认落盘清洗；日志/截图里不要暴露 cookie、`s_v_web_id`、Authorization 等字段，只保留 `[WinError 267]` 这类信号行。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_download_work_path_sanitization tests.test_api_download_contract tests.test_authenticated_download tests.test_video_breakdown -v`（修复前 `test_download_work_path_sanitization` 4/5 复现 `[WinError 267]`/`[WinError 123]`，修复后全绿）。
+- 回滚：恢复 `backend/utils/data_util.py`、`tests/test_download_work_path_sanitization.py`、`CHANGELOG.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-08 小红书图文笔记点"分解"报"未找到可分析的视频文件"
 - 现象：内容采集选小红书，对图文笔记点"分解"，报 `分解失败:未找到可分析的视频文件`。小红书大部分是图文，几乎必然撞上。
 - 根因：内容采集页的"分解"按钮只处理视频（下载后找视频文件抽帧分解）。图文笔记下载回来是图片、无视频文件 → 报该错。图文本应走"图文同款"，但该按钮在 2026-08-03 `5e3c052` 被有意删除，只留下孤儿处理器 `c_note_replace`，导致图文笔记在内容采集页无出口。
 - 修复：内容采集页重新加入"图文同款"按钮（下载/分解之间）。点它下载笔记后自动解析图片素材并跳转"🧩 图文同款"页复刻结构。"分解"仍只处理视频。
@@ -127,7 +136,6 @@
 - 卡片重复或顺序异常：确认公网 `/comic-tool` HTML 中不再包含 `cloneNode` 或 `insertBefore`，并包含 `findToolContainer`。旧版注入脚本会克隆“漫剧Agent”卡片并插到它后面，可能导致工具顺序变成“漫剧Agent / Windows客户端 / 漫剧画布”或出现重复 Agent；部署 append-fix 版本并强刷页面即可。
 - 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest -v`，再运行 `.\.venv-win\Scripts\python.exe -m py_compile tools\aicanvas_remote\server_current.py tests\test_minimax_aicanvas_remote.py`。线上另需执行 `/comic-tool` 页面和 `/MatrixShipAgent-Setup.exe` HEAD/GET 冒烟。
 - 回滚：恢复远程 `/root/AI-CanvasPro/server.py.bak.<timestamp>` 到 `server.py` 并重启 `ai-canvas.service`；源代码级回滚恢复 `tools/aicanvas_remote/server_current.py`、`tests/test_minimax_aicanvas_remote.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本条记录。不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
-
 
 ## 2026-08-03 新用户账号矩阵添加账号显示 `登录未完成:agent token_required`
 - 现象：新用户登录本地客户端后，进入“账号矩阵”点击添加/登录抖音账号，页面没有成功打开登录流程，而是提示“登录未完成:agent token_required”或 `agent_token_required`。
@@ -2517,9 +2525,6 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 验证：运行 `python -m unittest tests.test_agent_mode_defaults -v`，确认默认目录、环境变量覆盖和启动脚本契约通过。
 - 回滚：设置 `MATRIX_AGENT_USE_APPDATA=1` 可恢复旧 AppData 默认目录；设置 `MATRIX_AGENT_SKIP_APPDATA_MIGRATION=1` 可禁用旧目录复制。
 
-
-
-
 ## 2026-07-25 管理员充值后用户余额必须重启才变化
 - 现象：管理员给用户加云豆后，目标用户本地客户端侧栏余额仍显示旧值，重启后才变化。
 - 根因：后端 `/api/account/balance` 返回的是实时余额，但本地客户端侧栏只在登录时刷新；账户中心 `on_show()` 会刷新，普通业务页没有周期性刷新。
@@ -2551,7 +2556,6 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：上传响应的 `url` 应为 `https://img.yunlingai.net/uploads/...`，并且 `curl -I <url>` 返回 HTTP 200 与 `Content-Type: audio/...`。如果仍提示“音频地址不是远程模型可读取的公网地址”，优先检查客户端是否已重启、`.env` 是否配置 `UPLOAD_API_URL` / `UPLOAD_TOKEN`。
 - 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_upload_asset_url_uses_external_public_upload_service_for_audio -v`；服务端运行 `PYTHONPATH=. pytest tests/test_upload_service.py -q`，并用 `https://img.yunlingai.net/api/upload` 上传 mp3 后访问返回的 URL。
 - 回滚：本地回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py` 和本文件；服务端恢复 `/root/image-upload-service/backups/20260728-audio-upload/` 下的备份后重建 `image_upload_service`。
-
 
 ## 小红书图文同款冒烟记录（2026-07-25）
 
