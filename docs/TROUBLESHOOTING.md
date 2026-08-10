@@ -1,4 +1,4 @@
-﻿﻿## 2026-08-08 小红书图文笔记点"分解"报"未找到可分析的视频文件"
+﻿## 2026-08-08 小红书图文笔记点"分解"报"未找到可分析的视频文件"
 - 现象：内容采集选小红书，对图文笔记点"分解"，报 `分解失败:未找到可分析的视频文件`。小红书大部分是图文，几乎必然撞上。
 - 根因：内容采集页的"分解"按钮只处理视频（下载后找视频文件抽帧分解）。图文笔记下载回来是图片、无视频文件 → 报该错。图文本应走"图文同款"，但该按钮在 2026-08-03 `5e3c052` 被有意删除，只留下孤儿处理器 `c_note_replace`，导致图文笔记在内容采集页无出口。
 - 修复：内容采集页重新加入"图文同款"按钮（下载/分解之间）。点它下载笔记后自动解析图片素材并跳转"🧩 图文同款"页复刻结构。"分解"仍只处理视频。
@@ -51,7 +51,16 @@
 - 验证：`.\.venv-win\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"` 1367 项无新增失败；`py_compile backend\matrix_native_client.py`；暗色 / 亮色双主题离屏截图核对按钮与勾选框可见性。
 - 回滚：恢复 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
 
-﻿## 2026-08-06 矩阵侧扣费十倍超收、且漫剧消费账单看不到
+## 2026-08-07 同款替换尾帧图提示词里出现 `视觉模型分析失败（errorId: ...）` 和 `frame_01.jpg`
+- 现象：同款替换（漫剧项目模式）首尾帧生成失败，尾帧图提示词的“画面要求”里混着 `视觉模型分析失败（errorId: err-xxxx）: HTTPSConnectionPool(host='central.yunlingai.net', port=443) ... SSLEOFError(8, '[SSL: ` 和一串 `[1.24s] frame_01.jpg [2.47s] frame_02.jpg`。
+- 根因：拆解阶段的 LK888 视觉模型调用失败后走的是“降级不中断”，异常文本被当成 `breakdownAnalysis.visual` 写回分析结果（错误串在 `str(exc)[:160]` 处截断，后面紧跟 `frameNotes` 抽帧清单）。`_build_replacement_prompt()` 把 `visual` 原样放进“原片拆解证据”，漫剧模式 `_comic_visual_prompt_text()` 的逐行黑名单只认识自己写的标题词，标题行被丢掉、正文里的报错和文件清单原样保留，最终成了 storyboard `description` 并被漫剧端拼进尾帧提示词。
+- 修复：`backend/replacement_analysis.py#L35-L91` 新增 `visualStatus` 与 `breakdown_visual_failure()`；`backend/replacement_analysis.py#L242-L268` 与 `backend/matrix_native_client.py#L8146-L8172` 失败时把 `visual` 置空、异常只留结构化日志；`backend/matrix_native_client.py#L21292-L21318` 新增 `_replacement_strip_diagnostic_noise()` 并在镜头约束与拆解证据两处调用；`backend/matrix_native_client.py#L12916-L12931` 给漫剧画面描述加白名单校验；`backend/matrix_native_client.py#L20894-L20907` 报告显示视觉分析状态；`backend/matrix_native_client.py#L16675-L16696` 与 `#L15344` 生成前弹窗确认；`backend/replacement_pipeline.py#L100-L111` 记录 `visualAnalysisFailure` 并写日志。
+- 排查：先看分解报告“来源”区的 `- 视觉分析:` 一行；失败时用其中的错误编号在结构化日志里查 `workflow_reference_vision_failed` 或 `video_breakdown_vision_failed`。这类失败通常是本机到 `central.yunlingai.net` 的 LK888 网关抖动，首尾帧图走同一个网关，一般会一起失败——重新分解源视频再生成，不要在视觉分析失败的分解结果上直接开始替换。
+- 注意：漫剧端 `tools/aicanvas_remote/server_current.py#L14554-L14566` 的 strict reference 前缀写死了“七帧中的每一帧”，在只生成一张尾帧图时也会拼上。这是远端文案问题，本次未改，不影响生成成败。
+- 验证：运行 `python -m unittest tests.test_replacement_service tests.test_video_replacement tests.test_video_replacement_v2 tests.test_video_breakdown -v`，再运行 `python -m py_compile backend\matrix_native_client.py backend\replacement_analysis.py backend\replacement_pipeline.py`。
+- 回滚：恢复 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-06 矩阵侧扣费十倍超收、且漫剧消费账单看不到
 - 现象：漫剧后台的消费账单里看不到任何来自矩阵侧的消费，用户余额却在下降。核对时会发现余额比 `computing_power_records` / `model_usage_logs` 的最后一条记录少一截（排查当天账号 44 少了 77.23），像是"丢钱"。同时同一个模型经矩阵侧调用扣的算力约为漫剧侧的十倍。
 - 根因一（十倍超收）：`backend/central_server.py` 的 `MAINDB_YUAN_TO_POWER` 取 10，注释依据是"与漫剧 recharge_packages 一致：50元=500算力"。但线上 `recharge_packages` 实际是 `50元档=50算力、100元档=105、500元档=550、1000元档=1150`，**本来就是 1 元 ≈ 1 算力**。用户按 1:1 买进、矩阵侧按 10 倍扣。`tests/test_billing_unified.py` 里的用例还把这个倍率断言成了正确行为，因此长期没被发现。
 - 根因二（账单隐身）：矩阵侧扣费走 `charge_user_allow_arrears()`，只做一条无条件 `UPDATE users SET computing_power`，流水仅写中心服的 JSON 账本（`STATE["ledger"]`，持久化在 `central_data/scheduler_state.json`），从不写 `model_usage_logs` / `computing_power_records`。生产库 `model_usage_logs` 共 11415 行、`description LIKE 'matrixship%'` 的 **0 行**，`charge_generation()` 在中心服里从未被调用。
@@ -118,6 +127,7 @@
 - 卡片重复或顺序异常：确认公网 `/comic-tool` HTML 中不再包含 `cloneNode` 或 `insertBefore`，并包含 `findToolContainer`。旧版注入脚本会克隆“漫剧Agent”卡片并插到它后面，可能导致工具顺序变成“漫剧Agent / Windows客户端 / 漫剧画布”或出现重复 Agent；部署 append-fix 版本并强刷页面即可。
 - 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest -v`，再运行 `.\.venv-win\Scripts\python.exe -m py_compile tools\aicanvas_remote\server_current.py tests\test_minimax_aicanvas_remote.py`。线上另需执行 `/comic-tool` 页面和 `/MatrixShipAgent-Setup.exe` HEAD/GET 冒烟。
 - 回滚：恢复远程 `/root/AI-CanvasPro/server.py.bak.<timestamp>` 到 `server.py` 并重启 `ai-canvas.service`；源代码级回滚恢复 `tools/aicanvas_remote/server_current.py`、`tests/test_minimax_aicanvas_remote.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本条记录。不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
 
 ## 2026-08-03 新用户账号矩阵添加账号显示 `登录未完成:agent token_required`
 - 现象：新用户登录本地客户端后，进入“账号矩阵”点击添加/登录抖音账号，页面没有成功打开登录流程，而是提示“登录未完成:agent token_required”或 `agent_token_required`。

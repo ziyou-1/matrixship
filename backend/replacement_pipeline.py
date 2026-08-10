@@ -383,6 +383,18 @@ class HybridReplacementPipeline(ReplacementPipeline):
             job["principalReplacementMode"] = ""
             segments = self._call("_comic_plan_script_segments", segments, max_speech_sec=15.0)
         job["breakdownAnalysis"] = analysis
+        visual_failure = self._call("_breakdown_visual_failure", analysis)
+        job["visualAnalysisFailure"] = visual_failure
+        if visual_failure:
+            self._call(
+                "json_log",
+                getattr(self._helpers(), "_CLIENT_JSON_LOGGER"),
+                "video_replace_visual_analysis_unavailable",
+                code="video_replace_visual_analysis_unavailable",
+                jobId=str(job.get("id") or ""),
+                visualStatus=str(visual_failure.get("status") or ""),
+                visualErrorId=str(visual_failure.get("errorId") or ""),
+            )
         job["duration"] = duration
         job["outDir"] = out_dir
         job["segments"] = segments

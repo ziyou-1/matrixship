@@ -271,6 +271,18 @@
 - 需重启本地客户端生效。**未重新打包、未上传服务器**，已发布的 `MatrixShipAgent-Setup.exe` 不含本次改动。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
 - 回滚：`git checkout` 恢复 `backend/matrix_native_client.py`、`start-visible-client.bat`、`docs/API_REFERENCE.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和本条目。
 
+## 2026-08-07 同款替换首尾帧提示词不再混入视觉分析报错
+### Fixed
+- 视觉模型分析失败时不再把异常文本写进 `breakdownAnalysis.visual`。失败改为记录在新的 `visualStatus`（`status/errorId/code/message`）里，`visual` 保持为空，异常原文只留在结构化日志中，避免上游主机名、端点和抽帧文件名随分析结果流入任务负载。
+- 同款替换的镜头约束和拆解证据在进入提示词前统一经过 `_replacement_strip_diagnostic_noise()`，丢弃报错文本、URL、`host=/port=`、接口路径和 `[1.24s] frame_01.jpg` 这类抽帧清单；漫剧模式的画面描述再经白名单校验，只保留含中文描述且不含技术噪声的行。历史任务里已被污染的分析结果同样被过滤。
+- 分解报告“来源”区新增 `- 视觉分析:` 一行，失败时显示错误编号；同款替换点击“开始替换生成”前，若源视频视觉分析未成功会弹窗确认，默认取消。
+- `HybridReplacementPipeline.build_plan()` 在任务上记录 `visualAnalysisFailure`，并写出 `video_replace_visual_analysis_unavailable` 结构化日志。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service.ReplacementServiceContractTests.test_visual_analysis_failure_is_recorded_instead_of_becoming_visual_text`、`tests.test_video_replacement.VideoReplacementHelpersTest.test_failed_visual_analysis_text_never_reaches_replacement_prompts`、`test_comic_visual_prompt_keeps_only_describable_chinese_lines`、`tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_build_plan_records_failed_visual_analysis_on_job` 和 `tests.test_video_breakdown.VideoBreakdownHelpersTest.test_breakdown_markdown_reports_visual_analysis_failure_with_error_id`。
+- 引用 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py` 的 38 个测试模块共 974 条用例，除两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）外全部通过；`py_compile` 通过。
+- 本次只影响本地客户端与本地服务层；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `_expand_comic_storyboard_image_submit_kwargs()` 在首尾帧路径上仍拼接“七帧中的每一帧”前缀，属于远端文案问题，本次未改。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
 ## 2026-08-06 矩阵侧扣费与漫剧侧对齐
 ### Fixed
 - `MAINDB_YUAN_TO_POWER` 由 10 改为 1。线上 `recharge_packages` 本就是 1 元 ≈ 1 算力（50元档=50算力），此前按 10 倍扣费属十倍超收。该常量同时决定扣费与微信充值入账，**必须共用一个值**。
@@ -387,6 +399,7 @@
 - 二次修复：线上发现“漫剧Agent / Windows客户端 / 漫剧画布”顺序异常和重复风险后，下载卡片注入不再克隆或插入到现有 Agent 卡片后面，改为寻找工具容器并追加独立 Windows 卡片。修复版部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-append-fix-20260804_101249`；新 `server.py` SHA-256 为 `b3ecc6ebe22e10e7e88a06e4e9a67f26a88bebc9b0415a50acc54703d215540e`。
 - 文案修复：Windows 卡片说明改为“云灵星图桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”，避免用户误以为下载的是整个漫剧项目。文案修复备份为 `/root/AI-CanvasPro/server.py.bak.download-card-copy-fix-20260804_102740`；新 `server.py` SHA-256 为 `e8644cbc79429d0fbd8fbfacb58c0037a7f4d8572e39c58e22ab763672ce5cc8`。
 - 产品定位文案更新：Windows 卡片说明调整为“云灵星图 AI爆款复刻平台 Windows 桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”。部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-platform-copy-20260804_103700`；新 `server.py` SHA-256 为 `ebe4cd1f4810257985c81bc3641b7a870b2d4721f818019b60fc3613d1ec3306`。
+
 
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed

@@ -255,9 +255,10 @@ class ReplacementServiceContractTests(unittest.TestCase):
             downloader=None,
             download_validation=None,
             source_validation=None,
-            frame_times=None):
+            frame_times=None,
+            vision_runner=None):
         frame_times = list(frame_times or [1.0])
-        vision = FakeVisionRunner()
+        vision = vision_runner or FakeVisionRunner()
 
         def extract_frames(_video_path, frames_dir, _limit):
             os.makedirs(frames_dir, exist_ok=True)
@@ -536,6 +537,60 @@ class ReplacementServiceContractTests(unittest.TestCase):
             self.assertEqual(saved["breakdownAnalysis"]["ocr"]["engine"], "fake-ocr")
             self.assertEqual(saved["breakdownAnalysis"]["transcript"]["segments"][0]["text"], "口播测试")
             self.assertEqual(saved["breakdownAnalysis"]["visual"], "fake visual summary")
+
+    def test_visual_analysis_failure_is_recorded_instead_of_becoming_visual_text(self):
+        def failing_vision(_prompt, _frame_urls, **_kwargs):
+            raise RuntimeError(
+                "HTTPSConnectionPool(host='central.yunlingai.net', port=443): "
+                "Max retries exceeded with url: /lk888/v1/chat/completions"
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            analysis = self._replacement_analysis(
+                frame_times=[1.24, 2.47],
+                vision_runner=failing_vision,
+            )
+
+            result = analysis.analyze(
+                os.path.join(td, "source.mp4"),
+                source_url="https://www.douyin.com/video/abc123",
+                out_dir=os.path.join(td, "analysis"),
+            )
+
+            out = result["analysis"]
+            self.assertEqual(out["visual"], "")
+            self.assertEqual(out["visualStatus"], {
+                "status": "failed",
+                "errorId": "err-analysis-test",
+                "code": "workflow_reference_vision_failed",
+                "message": "视觉模型分析失败，详情见结构化日志。",
+            })
+            self.assertEqual(
+                self.analysis_module.breakdown_visual_failure(out)["errorId"],
+                "err-analysis-test",
+            )
+
+            serialized = json.dumps(out, ensure_ascii=False)
+            for leaked in (
+                    "视觉模型分析失败（errorId",
+                    "central.yunlingai.net",
+                    "HTTPSConnectionPool",
+                    "/lk888/v1/chat/completions",
+            ):
+                self.assertNotIn(leaked, serialized)
+
+    def test_successful_visual_analysis_reports_ok_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            analysis = self._replacement_analysis()
+
+            out = analysis.analyze(
+                os.path.join(td, "source.mp4"),
+                out_dir=os.path.join(td, "analysis"),
+            )["analysis"]
+
+            self.assertEqual(out["visual"], "fake visual summary")
+            self.assertEqual(out["visualStatus"]["status"], "ok")
+            self.assertEqual(self.analysis_module.breakdown_visual_failure(out), {})
 
     def test_prepare_returns_structured_failed_job_for_invalid_media_without_planning(self):
         with tempfile.TemporaryDirectory() as td:

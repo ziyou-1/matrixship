@@ -1,4 +1,4 @@
-﻿﻿## 2026-08-08 内容采集页恢复图文同款按钮
+﻿## 2026-08-08 内容采集页恢复图文同款按钮
 - `backend/matrix_native_client.py` `ContentPage.__init__`：在"下载"和"分解"之间重新创建 `self.b_note_replace = QtWidgets.QPushButton("图文同款")` 并 `addWidget`；恢复 `note_replace()` 方法（校验小红书链接→下载→emit `c_note_replace`）。
 - `_set_xhs_retry_busy` 和 `c_note_replace` 结果处理器改为对 `b_note_replace` 做 `setEnabled`（此前删按钮后只操作 `b_dl`）。孤儿处理器 `c_note_replace`（解析图片素材→跳转"🧩 图文同款"页）本来就在，现在重新接上按钮。
 - 背景：`5e3c052`（2026-08-03）有意删除该按钮，但小红书大部分是图文笔记，"分解"只处理视频，图文笔记因此在内容采集页无出口，点分解报"未找到可分析的视频文件"。按用户要求恢复。
@@ -46,7 +46,7 @@
 - 遗留问题（本次未处理，需单独决定）：本次改动使 `matrix_native_client.py` 净增约 504 行，`docs/IMPLEMENTATION.md` 中指向该文件的 `#L` 引用共 1017 处（去重后 808 处），其中 533 处因本次改动整体下移，另有 144 处在本次改动前即已失准。考虑到该文档存在 67 倍广播式重复、且主目录同一文件另有大量未提交改动，未对这些行号做批量重写。
 - 验证与影响：全量 `unittest` 1367 项无新增失败（2 项 error 为环境缺失 `playwright` 与 `backend/.env.dev`，已在干净树复现）；`py_compile` 通过；暗色 / 亮色双主题离屏截图核对。纯本地客户端展示层，不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧界面。
 
-﻿## 2026-08-07 下载失败的成品可恢复
+## 2026-08-07 下载失败的成品可恢复
 - `backend/matrix_native_client.py`(`_PRODGEN_RUNTIME_KEYS`):新增 `pendingDownloadRecovery`。`regen` 是黑名单复制,不加会把上一条的结果 URL 带进新条目。
 - `backend/matrix_native_client.py`(`_prodgen_entry_by_id` / `_prodgen_download_recovery` / `_prodgen_download_error_text`):按 id 取条目、判定是否可恢复(必须有 `resultUrl`)、把网络错误翻成不含 host 与 SSL 栈的中文文案(403 引导「重新生成」而非「恢复下载」)。
 - `backend/matrix_native_client.py`(`_prodgen_remember_result`):下载前写入 `pendingDownloadRecovery = {status, createdAt, taskId, resultUrl, model, mode, targets, downloadAttempts, lastError}`。字段名与漫剧的 `pendingComicVideoRecovery` 同构,便于日后合并。
@@ -109,6 +109,18 @@
 - `tests/test_agent_mode_defaults.py`、`tests/test_agent_video_duration.py`：源码契约断言跟随更新（`body.addLayout(ref_strip)` / `prompt_col.addWidget(self.inp)` / `REF_SLOT_W = 84` / `def _pick_video_duration`），`_mode_set` 块的切分锚点由 `def _cycle_aspect(self):` 改为 `def _menu_choice(`。
 - 验证：`py_compile` 通过，`tests` 全量 1520/1520 通过；offscreen 与真字体各渲染一次 composer 核对版式（1232×268，参考图槽 84×109，胶囊 `▾` 正常）。需重启本地客户端生效，未打包、未上线。
 
+## 2026-08-07 视觉分析失败不再污染同款替换提示词
+- `backend/replacement_analysis.py#L35-L91`：新增 `_visual_status_ok/_visual_status_failed/_visual_status_empty/_visual_status_skipped` 和 `breakdown_visual_failure()`。失败记录只带 `status/errorId/code` 和一句固定中文，异常原文留在结构化日志，避免上游主机名和端点随分析结果进入任务负载；缺少 `visualStatus` 的历史分析按 ok 处理。
+- `backend/replacement_analysis.py#L242-L268`、`backend/replacement_analysis.py#L300-L307`、`backend/matrix_native_client.py#L8146-L8172`、`backend/matrix_native_client.py#L8199-L8206`：视觉模型失败、无可用关键帧和分解整体失败时 `visual` 一律置空，失败信息写进 `visualStatus`，不再拼 `视觉模型分析失败（errorId: ...）: <异常> + frameNotes`。
+- `backend/matrix_native_client.py#L21292-L21318`：新增 `_REPLACEMENT_DIAGNOSTIC_NOISE_RE` 和 `_replacement_strip_diagnostic_noise()`，按行丢弃报错文本、URL、域名、`host=/port=/timeout=`、`/v1/` 类接口路径和 `.jpg/.png/.mp4/.log` 文件名；`_replacement_current_shot_constraints()`（时间轴取材与 `visual` 兜底两处）和 `_replacement_safe_breakdown_evidence()` 都在拼提示词前调用它，历史任务里已被污染的分析结果同样被过滤。
+- `backend/matrix_native_client.py#L12916-L12931`：`_comic_visual_prompt_text()` 增加 `describable_visual_line()` 白名单校验，标注块和普通行两条路径都要求文本含中文描述且不含技术噪声，才允许进入 storyboard `description`。原有 `drop_markers` 黑名单保留，只作为第一层过滤。
+- `backend/matrix_native_client.py#L20894-L20907`、`backend/matrix_native_client.py#L20927`：新增 `_breakdown_visual_status_label()`，分解报告“来源”区输出 `- 视觉分析: ok` 或 `- 视觉分析: 失败（错误编号 err-xxxx）`。
+- `backend/matrix_native_client.py#L16675-L16696`、`backend/matrix_native_client.py#L15344`：`VideoReplacementPage._confirm_visual_analysis_failure()` 在 `start_generation()` 收集完片段编辑后拦截，视觉分析未成功时弹确认框并默认取消。
+- `backend/replacement_pipeline.py#L100-L111`：`build_plan()` 把 `breakdown_visual_failure()` 结果写进 `job["visualAnalysisFailure"]`，失败时输出 `video_replace_visual_analysis_unavailable` 结构化日志（只带 jobId、状态和错误编号）。
+- `tests/test_replacement_service.py#L160-L168`、`#L410-L462`：`_replacement_analysis()` 支持注入 `vision_runner`；新增视觉失败/成功两条契约用例，断言 `visual` 为空、`visualStatus` 完整，且序列化后的分析结果不含上游主机名和端点。
+- `tests/test_video_replacement.py#L2101-L2150`、`tests/test_video_replacement_v2.py#L1212-L1256`、`tests/test_video_breakdown.py#L244-L267`：回归覆盖被污染分析不进视频/关键帧/漫剧三类提示词、漫剧画面描述只保留中文描述行、`build_plan()` 记录视觉失败，以及报告显示视觉分析状态。
+- 验证与影响：上述用例先在旧实现下 RED；修复后引用这三个文件的 38 个测试模块共 974 条用例通过，仅剩两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）。本次只影响本地客户端与本地服务层，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `tools/aicanvas_remote/server_current.py#L14554-L14566` 在首尾帧路径上仍拼“七帧中的每一帧”前缀，属于远端文案问题，本次未改。
+
 ## 2026-08-05 网页替换按 job 模式选管线（漫剧/hybrid）+ 网页启动器
 - `backend/matrix_native_client.py#L11690`、`#L11727`：新增 `_ReplacementServicePipeline` / `_replacement_service_pipeline()`，为 `/replacement` 网页与 Qt 共享服务按 job 的 `replacementMode` 路由 hybrid 或 comic_project 管线（镜像 `_replacement_pipeline_for_job`）；缺模式的网页 job 在 `build_plan` 时补产品默认 `VIDEO_REPLACE_DEFAULT_MODE`（默认 `comic_project`）并持久化到 job.json，使后续 execute/retry/concat 路由一致；已有模式的 Qt 共享 job 不被覆盖。修复此前网页服务 `_build_pipeline` 写死 hybrid、忽略默认漫剧模式的 gap。
 - `backend/replacement_web.py` 的 `_build_pipeline()`：`build_video_service` 改用 `_replacement_service_pipeline()` 路由管线，取代只用 `_replacement_hybrid_pipeline()`。
@@ -141,6 +153,7 @@
 - `tests/test_minimax_aicanvas_remote.py#L306-L311`: regression coverage prevents the download-card script from cloning or reordering existing tool cards.
 - `tests/test_minimax_aicanvas_remote.py#L297-L305`: card-copy coverage requires `AI爆款复刻平台`, `下载的是客户端安装包`, and `不包含漫剧项目文件`.
 - Verification and rollback: focused RED/GREEN was run for `tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest`; final verification passed the focused test, full `tests.test_minimax_aicanvas_remote`, and `py_compile` for the touched remote mirror/test. Remote runtime was deployed to `/root/AI-CanvasPro/server.py`, installer copied to `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`, and `ai-canvas.service` restarted active; no OpenAPI, database, Docker, secret, or `migration.sql` impact. Roll back `tools/aicanvas_remote/server_current.py`, `tests/test_minimax_aicanvas_remote.py`, `CHANGELOG.md`, `docs/DEPLOYMENT.md`, `docs/TROUBLESHOOTING.md`, and this entry, plus restore `/root/AI-CanvasPro/server.py.bak.download-card-test-20260804_094216` to remote `server.py` and restart `ai-canvas.service`.
+
 
 ## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。

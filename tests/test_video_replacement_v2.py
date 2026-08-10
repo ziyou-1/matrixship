@@ -1258,6 +1258,51 @@ class VideoReplacementV2Test(unittest.TestCase):
         self.assertEqual(planned["segments"][0]["script"], "strict spoken script")
         self.assertEqual(planned["segments"][0]["segmentType"], "talking")
 
+    def test_hybrid_pipeline_build_plan_records_failed_visual_analysis_on_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = {
+                "id": "job-visual-failed",
+                "outDir": td,
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "breakdownAnalysis": {
+                    "meta": {"duration": 12.0},
+                    "visual": "",
+                    "visualStatus": {
+                        "status": "failed",
+                        "errorId": "err-c049b473454f4dc6",
+                        "code": "video_breakdown_vision_failed",
+                        "message": "视觉模型分析失败，详情见结构化日志。",
+                    },
+                },
+                "pipeline": "hybrid_v2",
+            }
+
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+            planned = pipeline.build_plan(job)
+
+        self.assertEqual(
+            planned["visualAnalysisFailure"]["errorId"], "err-c049b473454f4dc6"
+        )
+        self.assertEqual(planned["visualAnalysisFailure"]["status"], "failed")
+
+    def test_hybrid_pipeline_build_plan_leaves_visual_failure_empty_when_analysis_is_fine(self):
+        with tempfile.TemporaryDirectory() as td:
+            job = {
+                "id": "job-visual-ok",
+                "outDir": td,
+                "sourceVideoPath": str(Path(td) / "source.mp4"),
+                "breakdownAnalysis": {
+                    "meta": {"duration": 12.0},
+                    "visual": "展厅中景，主播在展车旁展示。",
+                },
+                "pipeline": "hybrid_v2",
+            }
+
+            pipeline = self.pipeline_module.HybridReplacementPipeline(helpers=self.client)
+            planned = pipeline.build_plan(job)
+
+        self.assertEqual(planned["visualAnalysisFailure"], {})
+
     def test_hybrid_pipeline_execute_keeps_successful_fake_segments_done_and_passed(self):
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "segment-01.mp4"

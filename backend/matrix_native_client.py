@@ -41,6 +41,11 @@ from utils.video_transcription import (
     transcribe_audio_chunks,
     validate_service_url,
 )
+from replacement_analysis import (
+    breakdown_visual_failure as _breakdown_visual_failure,
+    _visual_status_failed,
+    _visual_status_ok,
+)
 from runtime_paths import ensure_agent_data_dir
 from platform_features import (
     digital_human_tts_upload_enabled,
@@ -9398,6 +9403,7 @@ class VideoBreakdownPage(BasePage):
                 progress("调用视觉模型分析关键帧…")
                 frame_urls = [_image_data_url(f.get("path")) for f in frames[:16]]
                 frame_urls = [u for u in frame_urls if u]
+                visual_status = _visual_status_ok()
                 try:
                     visual = lk888_vision(
                         "请逐帧描述这些短视频关键帧，重点提取人物、产品、场景、动作、字幕、道具、镜头节奏。",
@@ -9415,10 +9421,14 @@ class VideoBreakdownPage(BasePage):
                     )
                     import json as _json
                     error_id = (_json.loads(raw) or {}).get("errorId")
-                    visual = "视觉模型分析失败（errorId: %s）: %s\n%s" % (
-                        error_id or "-", str(exc)[:160], frame_notes
+                    # Diagnostics never become画面描述; the failure travels in
+                    # visualStatus so the report and the UI can show it instead.
+                    visual = ""
+                    visual_status = _visual_status_failed(
+                        error_id, "video_breakdown_vision_failed"
                     )
                 out["visual"] = visual
+                out["visualStatus"] = visual_status
                 out["frameNotes"] = frame_notes
                 progress("生成深度拆解报告…")
                 report, msg = _generate_video_breakdown_report(out)
@@ -9446,6 +9456,10 @@ class VideoBreakdownPage(BasePage):
                     "status": "failed", "text": "", "segments": [], "failedRanges": [],
                     "errors": [], "retryCount": 0, "message": "",
                 }
+                out["visual"] = out.get("visual") or ""
+                out["visualStatus"] = out.get("visualStatus") or _visual_status_failed(
+                    error_id, "video_breakdown_failed"
+                )
                 out["report"] = "## 分解失败\nerrorId: %s\n\n%s" % (error_id or "-", str(exc)[:500])
                 BRIDGE.payload.emit("video_breakdown_done", {
                     "job": job,
@@ -14427,6 +14441,22 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
                 chunks.append(chunk)
         return chunks
 
+    def describable_visual_line(value):
+        """Whitelist gate: only Chinese画面描述 may reach an image prompt.
+
+        The drop-marker list below can only reject text we already know about,
+        so anything that carries no Chinese description, or that carries
+        diagnostic noise, is rejected here regardless of what produced it.
+        """
+        candidate = str(value or "").strip()
+        if not candidate:
+            return ""
+        if _REPLACEMENT_DIAGNOSTIC_NOISE_RE.search(candidate):
+            return ""
+        if not _re.search(r"[一-鿿]", candidate):
+            return ""
+        return candidate
+
     kept = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -14441,7 +14471,9 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
         if chunks:
             kept.extend(
                 chunk for chunk in (
-                    _comic_reference_safe_visual_text(chunk, has_person_reference) for chunk in chunks)
+                    describable_visual_line(
+                        _comic_reference_safe_visual_text(chunk, has_person_reference))
+                    for chunk in chunks)
                 if chunk
             )
             continue
@@ -14454,7 +14486,8 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
         if script and stripped == script:
             continue
         stripped = _re.sub(visual_prefix, "", stripped).strip()
-        stripped = _comic_reference_safe_visual_text(stripped, has_person_reference)
+        stripped = describable_visual_line(
+            _comic_reference_safe_visual_text(stripped, has_person_reference))
         if stripped:
             kept.append(stripped)
     cleaned = _replacement_strip_source_subtitle_dialogue("\n".join(kept))
@@ -16989,6 +17022,8 @@ class VideoReplacementPage(BasePage):
         except Exception as exc:
             self._warn_generation_blocked(str(exc))
             return
+        if not self._confirm_visual_analysis_failure():
+            return
         audio_mode = self._selected_audio_mode()
         if is_comic_mode:
             block_reason = _comic_project_audio_mode_block_reason(audio_mode)
@@ -17851,6 +17886,26 @@ class VideoReplacementPage(BasePage):
     def _warn_generation_blocked(self, message):
         self.status.setText(message)
         QtWidgets.QMessageBox.warning(self, "替换生成", message)
+
+    def _confirm_visual_analysis_failure(self):
+        """Ask before generating on a breakdown whose visual analysis failed."""
+        failure = _breakdown_visual_failure(self._job.get("breakdownAnalysis") or {})
+        if not failure:
+            return True
+        error_id = str(failure.get("errorId") or "").strip()
+        message = (
+            "源视频的视觉分析没有成功%s，本次片段缺少画面依据，"
+            "生成的首尾帧和视频只能依赖抽帧时间轴与口播稿，质量会明显下降。\n\n"
+            "建议先重新分解源视频。仍要继续生成吗？"
+        ) % (("（错误编号 %s）" % error_id) if error_id and error_id != "-" else "")
+        self.status.setText("视觉分析未成功，画面依据缺失。")
+        return QtWidgets.QMessageBox.question(
+            self,
+            "替换生成",
+            message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        ) == QtWidgets.QMessageBox.Yes
 
     def _show_generation_result(self, message, ok):
         status = str(self._job.get("status") or "")
@@ -22265,6 +22320,21 @@ def _ensure_video_breakdown_report_sections(report, data):
     return "\n\n".join(parts), repaired
 
 
+def _breakdown_visual_status_label(analysis):
+    failure = _breakdown_visual_failure(analysis)
+    if not failure:
+        return "ok"
+    label = {
+        "failed": "失败",
+        "empty": "无可用关键帧",
+        "skipped": "已跳过",
+    }.get(str(failure.get("status") or ""), str(failure.get("status") or "-"))
+    error_id = str(failure.get("errorId") or "").strip()
+    if error_id and error_id != "-":
+        return "%s（错误编号 %s）" % (label, error_id)
+    return label
+
+
 def _video_breakdown_markdown(data):
     data = data or {}
     meta = data.get("meta") or {}
@@ -22283,6 +22353,7 @@ def _video_breakdown_markdown(data):
         "- OCR: %s" % (ocr.get("status") or "-"),
         "- OCR 引擎: %s" % (ocr.get("engine") or "-"),
         "- 音频转写: %s" % (transcript.get("status") or "-"),
+        "- 视觉分析: %s" % _breakdown_visual_status_label(data),
         "- 重试次数: %s" % int(transcript.get("retryCount") or 0),
     ]
     # 转写失败时必须给出原因。只写一个 "failed" 会把"服务地址配错了"和"这条视频
@@ -22656,6 +22727,33 @@ def _replacement_strip_source_subtitle_dialogue(text):
     return _replacement_excerpt("\n".join(cleaned).strip(), 2400)
 
 
+_REPLACEMENT_DIAGNOSTIC_NOISE_RE = re.compile(
+    r"https?://"
+    r"|\b[A-Za-z0-9-]+\.(?:net|com|cn|org|io|dev)\b"
+    r"|\berrorId\b|\berr-[0-9a-f]{6,}\b"
+    r"|Traceback|[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b"
+    r"|Max retries|ConnectionPool"
+    r"|\b(?:host|port|url|status_code|timeout)\s*="
+    r"|\.(?:jpg|jpeg|png|webp|gif|bmp|mp4|mov|json|log|py)\b"
+    r"|/v\d+/"
+    r"|模型分析失败|分析失败（|生成失败（|请求失败（",
+    re.I,
+)
+
+
+def _replacement_strip_diagnostic_noise(text):
+    """Drop error text, endpoints and抽帧文件清单 before they can reach a prompt.
+
+    Breakdown evidence is model input, not a log: anything that looks like a
+    stack trace, an API endpoint or a frame-file listing is never画面描述.
+    """
+    kept = [
+        line for line in str(text or "").splitlines()
+        if line.strip() and not _REPLACEMENT_DIAGNOSTIC_NOISE_RE.search(line)
+    ]
+    return "\n".join(kept).strip()
+
+
 def _replacement_time_value_to_seconds(value):
     import re as _re
     text = str(value or "").strip()
@@ -22745,7 +22843,9 @@ def _replacement_current_shot_constraints(segment, analysis, limit=900):
         except (TypeError, ValueError):
             end = start + 8.0
     report = str(analysis.get("report") or "")
-    section = _markdown_section(report, "时间轴镜头拆解") or str(analysis.get("frameNotes") or "")
+    section = _replacement_strip_diagnostic_noise(
+        _markdown_section(report, "时间轴镜头拆解") or str(analysis.get("frameNotes") or "")
+    )
     headers = []
     rows = []
     fallback_lines = []
@@ -22785,7 +22885,11 @@ def _replacement_current_shot_constraints(segment, analysis, limit=900):
         rows = ["- " + _replacement_strip_source_subtitle_dialogue(" ".join(fallback_lines))]
     body = "\n".join(row for row in rows if row).strip()
     if not body:
-        body = _replacement_strip_source_subtitle_dialogue(analysis.get("visual") or analysis.get("frameNotes") or "")
+        body = _replacement_strip_diagnostic_noise(
+            _replacement_strip_source_subtitle_dialogue(
+                analysis.get("visual") or analysis.get("frameNotes") or ""
+            )
+        )
     if not body:
         return ""
     return _replacement_excerpt(
@@ -22804,7 +22908,9 @@ def _replacement_safe_breakdown_evidence(segment, analysis, limit=900):
     ]
     cleaned = []
     for part in parts:
-        value = _replacement_strip_source_subtitle_dialogue(part)
+        value = _replacement_strip_diagnostic_noise(
+            _replacement_strip_source_subtitle_dialogue(part)
+        )
         if value:
             cleaned.append(value)
     text = "\n".join(cleaned).strip()
