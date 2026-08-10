@@ -54,10 +54,14 @@ class AgentVideoUploadContractTest(unittest.TestCase):
                 self.assertEqual(field, self.module._agent_video_media_requirements(model)["video_field"])
 
     def test_hand_written_overrides_still_win_over_the_schema(self):
-        """覆盖表里的条目是线上验证过的,schema 不能推翻它。"""
-        req = self.module._agent_video_media_requirements("wan2.7-cankaosheng")
-
-        self.assertEqual("video", req["video_field"], "schema 说 reference_video,但覆盖表说 video,以覆盖表为准")
+        """覆盖表(线上验证过的必传/字段)优先于 schema 推断。"""
+        # wan2.7-cankaosheng:2026-08-10 起覆盖表已修正为真实字段 reference_video。
+        # 旧断言写的是 video —— 那其实锁住了一个 bug(参考视频发到 video,模型收不到),
+        # 实测 LK888 schema 的字段就是 reference_video,覆盖表现已与之一致。
+        self.assertEqual(
+            "reference_video",
+            self.module._agent_video_media_requirements("wan2.7-cankaosheng")["video_field"])
+        # 覆盖表仍然凌驾于 schema:必传视频由覆盖表声明,schema 推断不一定给 required。
         self.assertTrue(self.module._agent_video_media_requirements("kling-motion-control-v3")["video_required"])
 
     def test_a_model_without_any_video_upload_stays_at_zero(self):
@@ -232,6 +236,65 @@ class AgentVideoUploadContractTest(unittest.TestCase):
                 self.assertEqual(model, page._current_model(), "目录没灌好,模型被换掉了")
                 self.assertEqual(expected, page.ref_video_btn.isVisibleTo(page))
         host.close()
+
+    def test_a_prominent_labeled_slot_appears_next_to_the_image_slot(self):
+        """右下角小圆钮容易被挤出屏幕:视频/音频要在参考图旁边有显眼的带标签槽位。
+
+        happyhorse-video-edit 视频必选,可图片可选。此前顶部只有「参考图」槽,
+        用户「必选视频却找不到上传入口」。这里断言声明了视频/音频的模型会在
+        顶部参考图行给出对应槽位,纯文生视频模型则不出现,免得添乱。
+        """
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QtWidgets = self.module.QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.module.BRIDGE = self.module.Bridge()
+        self.module.ProductGenPage._request_model_schema = lambda self, model, mode: None
+
+        page = self.module.ProductGenPage()
+        page._video_models = [{"name": k, "display_name": v.get("display_name") or k, "type": "video"}
+                              for k, v in self.schemas.items() if v.get("type") == "video"]
+        page._models_loaded = True
+        host = QtWidgets.QWidget()
+        QtWidgets.QVBoxLayout(host).addWidget(page)
+        host.resize(1200, 700)
+        host.move(-4000, -4000)
+        host.show()
+        app.processEvents()
+
+        for model, expected in (("happyhorse-video-edit", {"video"}),
+                                ("hailuo-h3-quannengcankao", {"video", "audio"}),
+                                ("kling-v2-6", set())):
+            with self.subTest(model=model):
+                page._mode_set("video")
+                page._set_current_model(model, "video")
+                app.processEvents()
+                self.assertEqual(model, page._current_model(), "目录没灌好,模型被换掉了")
+                shown = {kind for kind, btn in page._media_slot_buttons.items()
+                         if btn.isVisibleTo(page)}
+                self.assertEqual(expected, shown)
+        host.close()
+
+    def test_the_prominent_slot_switches_to_the_chosen_state_after_a_pick(self):
+        """选完视频后,顶部槽位得重建成已选态(而不是还显示空的必选槽)。"""
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QtWidgets = self.module.QtWidgets
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.module.BRIDGE = self.module.Bridge()
+        self.module.ProductGenPage._request_model_schema = lambda self, model, mode: None
+
+        page = self.module.ProductGenPage()
+        page._video_models = [{"name": k, "display_name": v.get("display_name") or k, "type": "video"}
+                              for k, v in self.schemas.items() if v.get("type") == "video"]
+        page._models_loaded = True
+        page._mode_set("video")
+        page._set_current_model("happyhorse-video-edit", "video")
+
+        page._media_files["video"] = ["C:/tmp/clip.mp4"]
+        page._style_ref_slot()
+
+        self.assertIn("video", page._media_slot_buttons, "选完仍要有视频槽")
 
 
 if __name__ == "__main__":

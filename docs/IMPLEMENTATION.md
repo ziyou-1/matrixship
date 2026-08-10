@@ -1,4 +1,11 @@
-﻿## 2026-08-10 同款替换移除 SD 2.0 全能参考并对齐标签
+﻿## 2026-08-10 Agent 模式视频/音频上传做成顶部显眼槽位
+- `backend/matrix_native_client.py#L29228-L29246` `_rebuild_ref_slots`：视频模式下按 `_media_limit(kind)>0` 在参考图行追加视频/音频槽位；重建时重置 `self._media_slot_buttons`。
+- `backend/matrix_native_client.py#L29247-L29291` 新增 `_make_media_cell(kind)`：带标签的 84×84 上传槽，必选橙框「（必选）」、可选灰框「（可选）」、已选青框打勾；点击→`pick_media_files`，右键→`clear_media_files`；按钮存入 `_media_slot_buttons[kind]` 供测试断言。
+- `pick_media_files`/`clear_media_files`/`_clear_all_media` 增加 `self._style_ref_slot()`，选/清后顶部槽位实时重建；`__init__` 增 `self._media_slot_buttons={}`。右下角 `ref_video_btn`/`ref_audio_btn` 圆钮保留作次入口。
+- `tests/test_agent_video_upload_contract.py`：新增顶部槽位出现/消失断言；修正 `test_hand_written_overrides_still_win_over_the_schema` 里 `wan2.7-cankaosheng` 的 `video_field` 断言（旧值 `video` 是 `3a57710` 修掉的 bug，本文件当时漏改，现补为 `reference_video`）。
+- 验证：`.venv-win`+offscreen Qt 跑 137 项 agent 测试全绿、`py_compile` 通过；仅本地客户端 Agent.模式 UI，不动中心服/OpenAPI/DB/Docker/密钥/migration；退出后 `start-visible-client.bat` 重启生效。
+
+## 2026-08-10 同款替换移除 SD 2.0 全能参考并对齐标签
 - `backend/matrix_native_client.py` `_LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS`/`_LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS`/`_LK888_REPLACEMENT_MODEL_LABELS`：删除 `kwvideo-v2-quannengcankao`（“SD 2.0 全能参考”）。它此前是同款替换内置备选，但漫剧生成器视频目录用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧不一致；删除后同款替换是漫剧生成器视频目录的子集。
 - `backend/matrix_native_client.py`：删除 `_replacement_is_sd20_all_reference_row` 及其在 `_replacement_supported_model_rows` 里遍历实时 LK888 目录的回填循环（否则会把 SD 2.0 全能参考从目录重新加回下拉框）；`_replacement_configured_model_is_allowed` 去掉 `sd20/seedance20` 模糊分支，仅保留主角模型和显式参考模型白名单。
 - `backend/matrix_native_client.py` `_LK888_REPLACEMENT_MODEL_LABELS`：4 个模型显示名对齐漫剧生成器——`happyhorse-video-edit`=“HappyHorse 视频编辑”、`happyhorse-r2v`=“HappyHorse 参考生视频”、`happyhorse-1.1-r2v`=“HappyHorse 1.1 参考生视频”、`wan2.7-cankaosheng`=“Wanxiang 2.7 参考生视频”。

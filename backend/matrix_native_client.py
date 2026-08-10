@@ -28511,6 +28511,7 @@ class ProductGenPage(BasePage):
         # 视频/音频都可能要传多个(wan2.7-xuxie 的 clips 上限 10)。
         # _reference_video 是取首个的属性别名,历史条目与老代码不用改。
         self._media_files = {"video": [], "audio": []}
+        self._media_slot_buttons = {}   # 顶部显眼的视频/音频上传槽,按当前模型契约重建
         self.ref_buttons = []
         self._cards = {}
         self._style = 0
@@ -29227,12 +29228,65 @@ class ProductGenPage(BasePage):
     def _rebuild_ref_slots(self):
         _clear_layout(self.ref_strip)
         self.ref_buttons = []
+        self._media_slot_buttons = {}
         for i, path in enumerate(self._refs):
             self.ref_strip.addWidget(self._make_ref_cell(path, i), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         limit = _prodgen_entry_ref_limit({"mode": self._mode, "model": self._current_model()})
         if len(self._refs) < limit:
             self.ref_strip.addWidget(self._make_ref_add_cell(), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        # 视频/音频:模型 schema 声明了就在参考图旁边给一个显眼的带标签槽位,
+        # 不再只藏在右下角那排容易被挤出屏幕的小圆钮里
+        #(用户反馈:HappyHorse 视频编辑「必选视频却找不到上传入口」)。
+        if self._mode == "video":
+            for kind in ("video", "audio"):
+                if self._media_limit(kind) > 0:
+                    self.ref_strip.addWidget(
+                        self._make_media_cell(kind), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self._apply_ref_hint(self._ref_hint_text())
+
+    def _make_media_cell(self, kind):
+        """顶部显眼的视频/音频上传槽,与参考图并排。仅当模型契约声明该类上传时才建。"""
+        req = _agent_video_media_requirements(self._current_model("video"))
+        limit = max(0, int(req.get("%s_limit" % kind) or 0))
+        required = bool(req.get("%s_required" % kind))
+        files = [p for p in (self._media_files.get(kind) or []) if str(p or "").strip()]
+        chosen = len(files)
+        field = self._media_field_label(kind)
+        cell = QtWidgets.QWidget()
+        cell.setStyleSheet("background:transparent;")
+        v = QtWidgets.QVBoxLayout(cell)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        btn = QtWidgets.QPushButton()
+        btn.setFixedSize(REF_SLOT_W, REF_SLOT_H)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+        btn.clicked.connect(lambda _=False, k=kind: self.pick_media_files(k))
+        btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        btn.customContextMenuRequested.connect(lambda _p, k=kind: self.clear_media_files(k))
+        accent = "#2ee0c6" if chosen else "#7b86a0"
+        btn.setIcon(QtGui.QIcon(_draw_icon("video" if kind == "video" else "volume", 28, accent)))
+        btn.setIconSize(QtCore.QSize(28, 28))
+        border = "#2ee0c6" if chosen else ("#f0a05a" if required else "rgba(255,255,255,0.20)")
+        btn.setStyleSheet("QPushButton{border:2px dashed %s;border-radius:%dpx;"
+                          "background:rgba(255,255,255,0.03);padding:0;}"
+                          "QPushButton:hover{border-color:#6b6ff5;background:rgba(99,102,241,0.08);}"
+                          % (border, REF_SLOT_RADIUS))
+        if chosen:
+            cap = ("%s ✓%d" % (field, chosen)) if limit > 1 else (field + " ✓")
+            cap += "\n点击换/右键清"
+        else:
+            cap = field + ("（必选）" if required else "（可选）")
+        lab = QtWidgets.QLabel(cap)
+        lab.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+        lab.setWordWrap(True)
+        lab.setFixedWidth(REF_SLOT_W)
+        color = "#2ee0c6" if chosen else ("#f0a05a" if required else "#8b93a3")
+        lab.setStyleSheet("color:%s;font-size:8.5px;background:transparent;border:0;" % color)
+        v.addWidget(btn, 0, QtCore.Qt.AlignHCenter)
+        v.addWidget(lab)
+        v.addStretch()
+        self._media_slot_buttons[kind] = btn
+        return cell
 
     def _ref_hint_text(self):
         """参考图用法说明。lk888 输入框把这段并进提示语,不再单独占一格挤压参考图行。"""
@@ -29313,14 +29367,17 @@ class ProductGenPage(BasePage):
             if path and path not in current:
                 current.append(path)
         self._media_files[media] = current[:limit]
+        self._style_ref_slot()
         self._sync_model_ui()
 
     def clear_media_files(self, media):
         self._media_files[media] = []
+        self._style_ref_slot()
         self._sync_model_ui()
 
     def _clear_all_media(self):
         self._media_files = {"video": [], "audio": []}
+        self._style_ref_slot()
         self._sync_model_ui()
 
     def pick_reference_video(self):

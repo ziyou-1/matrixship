@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## 2026-08-10 Agent 模式视频/音频上传做成顶部显眼槽位
+### Fixed
+- Agent.模式选到必须传视频的模型（如 HappyHorse 视频编辑 `happyhorse-video-edit`）时，顶部只有「参考图」槽，而视频/音频上传藏在右下角一排小圆钮里（窄窗口会被挤出屏幕），用户反馈「必选视频却找不到上传入口」。现按模型契约在参考图旁边给出显眼的带标签槽位：必选标「（必选）」橙色、可选标「（可选）」、已选变青色打勾；`happyhorse-video-edit` 给「待编辑参考视频（必选）」，全能参考家族给「参考视频＋参考音频」，纯文生视频模型不出现、免添乱。右下角圆钮保留作次入口（现有测试仍依赖它）。
+- `_rebuild_ref_slots` 新增 `_make_media_cell(kind)` 并按 `_media_limit(kind)>0` 渲染；选/清后 `pick_media_files`/`clear_media_files`/`_clear_all_media` 触发 `_style_ref_slot()` 重建，槽位实时反映已选态。
+
+### Verification And Operations
+- 补 `tests/test_agent_video_upload_contract.py`：①新增断言——happyhorse-video-edit 出现视频槽、全能参考出现视频＋音频槽、纯文生视频（kling-v2-6）不出现；②修正 `test_hand_written_overrides_still_win_over_the_schema`：它此前把 `wan2.7-cankaosheng` 的 `video_field` 锁成 `video`——那正是 `3a57710` 修掉的 bug（参考视频发到 `video`，模型收不到），当时只改了 `test_agent_video_duration` 漏了本文件，现补齐为真实字段 `reference_video`。
+- `.venv-win` + offscreen Qt 跑 137 项 agent 相关测试全绿；`py_compile` 通过。仅改本地原生客户端 Agent.模式 UI，不动中心服 API / OpenAPI / 数据库 / Docker / 密钥 / `migration.sql`。退出后 `start-visible-client.bat` 重启生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_upload_contract.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 可还原。
+
 ## 2026-08-10 同款替换移除 SD 2.0 全能参考，标签对齐漫剧生成器
 ### Fixed
 - 同款替换下拉框删除 `SD 2.0 全能参考`（真实模型标识 `kwvideo-v2-quannengcankao`）。它此前是同款替换内置备选，但漫剧生成器的视频模型目录本就用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧长期不一致；删除后同款替换成为漫剧生成器视频目录的干净子集。
