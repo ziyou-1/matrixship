@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-10 同款替换移除 SD 2.0 全能参考，标签对齐漫剧生成器
+### Fixed
+- 同款替换下拉框删除 `SD 2.0 全能参考`（真实模型标识 `kwvideo-v2-quannengcankao`）。它此前是同款替换内置备选，但漫剧生成器的视频模型目录本就用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧长期不一致；删除后同款替换成为漫剧生成器视频目录的干净子集。
+- 从 `_LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS`、`_LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS` 和标签表移除该模型；删除 `_replacement_is_sd20_all_reference_row` 及其在 `_replacement_supported_model_rows` 里的回填循环（否则会从实时 LK888 目录把它重新加回下拉框）；`_replacement_configured_model_is_allowed` 去掉 SD2.0 模糊分支。非主角模式若把任务级 `model` 指向它会被拒绝并提示改用 `viduq3-turbo-cankaosheng`。
+- 顺带把 4 个模型的同款替换显示名对齐漫剧生成器：`happyhorse-video-edit`→“HappyHorse 视频编辑”、`happyhorse-r2v`→“HappyHorse 参考生视频”、`happyhorse-1.1-r2v`→“HappyHorse 1.1 参考生视频”、`wan2.7-cankaosheng`→“Wanxiang 2.7 参考生视频”。海螺 H3 全能参考（`hailuo-h3-quannengcankao`）不受影响，仍是内置多模态全能参考选项。
+
+### Verification And Operations
+- 测试：把 `test_replacement_supported_model_rows_include_sd20_all_purpose_from_catalog` 和 `..._include_known_sd20_all_purpose_model` 两条**断言 SD 2.0 全能参考存在**的用例反转为排除用例，并新增 `test_replacement_configured_model_rejects_sd20_all_purpose_model`。旧断言固化的正是本次要删除的行为（同款替换应提供 SD 2.0 全能参考），故一并更新。`tests.test_video_replacement_v2`/`test_video_replacement`/`test_agent_video_duration` 合计 495 条通过，`py_compile` 通过。
+- 仅本地客户端 UI/模型目录变更，不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/DEPLOYMENT.md`、`docs/ARCHITECTURE.md` 和 `docs/API_REFERENCE.md` 可恢复。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

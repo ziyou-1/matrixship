@@ -2929,7 +2929,6 @@ _COMIC_PROJECT_VIDEO_FALLBACKS = (
 )
 _LK888_PRINCIPAL_VIDEO_MODEL = "happyhorse-video-edit"
 _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
-    "kwvideo-v2-quannengcankao",
     "hailuo-h3-quannengcankao",
     "viduq3-turbo-cankaosheng",
     "viduq3-cankaosheng",
@@ -2939,7 +2938,6 @@ _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
     "happyhorse-1.1-r2v",
 ))
 _LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS = (
-    "kwvideo-v2-quannengcankao",
     "hailuo-h3-quannengcankao",
 )
 _LK888_REPLACEMENT_MODEL_FALLBACKS = (
@@ -2952,18 +2950,17 @@ _LK888_REPLACEMENT_MODEL_FALLBACKS = (
 )
 _LK888_REPLACEMENT_MODEL_LABELS = {
     "doubao-seedance-2-0-260128": "Seedance 2.0 Standard（漫剧首尾帧）",
-    "happyhorse-video-edit": "HappyHorse Video Edit",
-    "kwvideo-v2-quannengcankao": "SD 2.0 全能参考",
+    "happyhorse-video-edit": "HappyHorse 视频编辑",
     "hailuo-h3-quannengcankao": "海螺 H3 全能参考",
     "viduq3-turbo-cankaosheng": "Vidu Q3 Turbo 参考生视频",
-    "wan2.7-cankaosheng": "万相 2.7 参考生视频",
+    "wan2.7-cankaosheng": "Wanxiang 2.7 参考生视频",
     "viduq3-cankaosheng": "Vidu Q3 参考生视频",
     "viduq2-cankaosheng": "Vidu Q2 参考生视频",
     "wan2.7-shouweizhen": "万相 2.7 首尾帧生视频",
     "kling-v3-omni": "Kling V3 Omni 首尾帧生视频",
     "pixverse-v6-shouweizhen": "PixVerse V6 首尾帧生视频",
-    "happyhorse-r2v": "HappyHorse 参考视频",
-    "happyhorse-1.1-r2v": "HappyHorse 1.1 参考视频",
+    "happyhorse-r2v": "HappyHorse 参考生视频",
+    "happyhorse-1.1-r2v": "HappyHorse 1.1 参考生视频",
 }
 
 
@@ -2986,40 +2983,13 @@ def _replacement_row_label(row):
     return str(row.get("display_name") or row.get("displayName") or _LK888_REPLACEMENT_MODEL_LABELS.get(name) or name).strip()
 
 
-def _replacement_is_sd20_all_reference_row(row):
-    row = row or {}
-    if str(row.get("type") or "").strip().lower() != "video":
-        return False
-    text = ("%s %s" % (_replacement_row_name(row), _replacement_row_label(row))).lower()
-    compact = "".join(ch for ch in text if ch.isalnum())
-    has_sd20 = (
-        "sd20" in compact
-        or "seedance20" in compact
-        or "sd 2.0" in text
-        or "seedance 2.0" in text
-    )
-    has_reference = (
-        "全能参考" in text
-        or "参考" in text
-        or "reference" in text
-        or "ref" in text
-        or "omni" in text
-        or "all" in text
-    )
-    return bool(has_sd20 and has_reference)
-
-
 def _replacement_configured_model_is_allowed(name):
     name = str(name or "").strip()
     if not name:
         return False
     if name == _LK888_PRINCIPAL_VIDEO_MODEL:
         return True
-    if name in _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS:
-        return True
-    compact = "".join(ch for ch in name.lower() if ch.isalnum())
-    lower = name.lower()
-    return bool(("sd20" in compact or "seedance20" in compact) and ("reference" in lower or "ref" in lower or "all" in lower))
+    return name in _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS
 
 
 def _replacement_supported_model_rows(rows=None):
@@ -3037,9 +3007,6 @@ def _replacement_supported_model_rows(rows=None):
             "type": "video",
         })
         ordered.append(row)
-    for row in catalog:
-        if _replacement_is_sd20_all_reference_row(row):
-            ordered.append(dict(row))
     for name in _LK888_REPLACEMENT_MODEL_FALLBACKS:
         row = dict(by_name.get(name) or {
             "name": name,
