@@ -1412,7 +1412,16 @@ def merge_account_sources(central_accounts, local_accounts):
             item.setdefault("nodeId", central.get("nodeId") or "")
             item.setdefault("nodeName", central.get("nodeName") or "")
         item["cookieReady"] = bool(row.get("cookieReady", central.get("cookieReady")))
-        item["online"] = bool(row.get("online", central.get("online")))
+        online = row.get("online")
+        if online is None:
+            online = central.get("online")
+        if online is None:
+            # 小红书等账号只上报 usable/cookieReady,不带 online 字段;
+            # 缺省时按可用性推断在线,避免已登录账号在风控中心/账号矩阵被误判为离线。
+            online = row.get("usable")
+        if online is None:
+            online = item["cookieReady"]
+        item["online"] = bool(online)
         item["status"] = row.get("status") or ("online" if item.get("online") and item.get("cookieReady") else "offline")
         merged.append(item)
         seen.add(key)
@@ -21813,12 +21822,16 @@ def load_comment_risk_state():
 
 
 def _xhs_safety_account_key(account):
-    refs = _account_risk_refs(account if isinstance(account, dict) else {})
-    for ref in refs:
-        text = str(ref or "").strip()
-        if text and text.lower() != "douyin-self":
-            return text
-    return "xhs-self"
+    # 与执行器 api_server._xhs_safety_account_id 对齐:用稳定账号 id 作键,
+    # 空或 douyin-self 归一到 xhs-self。不再用 set 顺序(不确定)挑第一个 ref,
+    # 否则可能取到账号名,导致暂停状态/今日用量在风控中心读不到对应记录。
+    account = account if isinstance(account, dict) else {}
+    aid = str(
+        account.get("localAccountId") or account.get("id") or account.get("accountId") or ""
+    ).strip()
+    if not aid or aid.lower() == "douyin-self":
+        return "xhs-self"
+    return aid
 
 
 def _xhs_safety_usage_text(account, kind, state=None):
@@ -30258,10 +30271,16 @@ class RiskControlPage(BasePage):
             sp.setValue(int(RISK.get(key) or sp.value()))
 
         def work():
-            _c, j = api("GET", "/api/accounts")
-            arr = j if isinstance(j, list) else ((j or {}).get("value") or (j or {}).get("accounts") or [])
+            # 小红书账号来源于本地浏览器,不在中心服 /api/accounts 里;
+            # 用账号矩阵同款(本地+中心)合并口径,风控中心才能显示小红书账号健康。
+            try:
+                accounts = load_account_matrix_rows()
+            except Exception:
+                _c, j = api("GET", "/api/accounts")
+                arr = j if isinstance(j, list) else ((j or {}).get("value") or (j or {}).get("accounts") or [])
+                accounts = clean_accounts(arr if isinstance(arr, list) else [])
             BRIDGE.payload.emit("risk_accounts", {
-                "accounts": clean_accounts(arr if isinstance(arr, list) else []),
+                "accounts": accounts,
                 "riskEvents": load_account_risk_events(),
             })
         run_bg(work)
@@ -30281,9 +30300,8 @@ class RiskControlPage(BasePage):
         for x in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
-            name = x.get("name") or x.get("nickname") or x.get("id") or "-"
-            plat = "抖音" if str(x.get("platform") or "").lower() == "douyin" else (
-                "小红书" if "xhs" in str(x.get("platform") or "").lower() else (x.get("platform") or "-"))
+            name = account_display_name(x)
+            plat = _account_platform_label(x)
             status = str(x.get("status") or x.get("state") or "-")
             summary = _account_risk_summary(x, stored_events)
             risk = summary.get("risk") or "-"
