@@ -21858,12 +21858,16 @@ def _xhs_safety_cooldown_text(account, state=None):
 
 
 def _douyin_comment_account_key(account):
-    refs = _account_risk_refs(account if isinstance(account, dict) else {})
-    for ref in refs:
-        text = str(ref or "").strip()
-        if text and text.lower() != "xhs-self":
-            return text
-    return "douyin-self"
+    # 与执行器 api_server._douyin_comment_account_id 对齐:用稳定账号 id 作键,
+    # 空归一到 douyin-self。不再用 set 顺序(不确定)挑第一个 ref,
+    # 否则可能取到账号名/handle,导致今日评论/冷却/风控暂停在风控中心读不到对应记录。
+    account = account if isinstance(account, dict) else {}
+    aid = str(
+        account.get("localAccountId") or account.get("id") or account.get("accountId") or ""
+    ).strip()
+    if not aid or aid.lower() == "xhs-self":
+        return "douyin-self"
+    return aid
 
 
 def _douyin_comment_account_usage(account, state=None):
