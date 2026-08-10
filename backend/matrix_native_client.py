@@ -2712,7 +2712,7 @@ _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
     "wan2.7-cankaosheng": {
         "video_required": False,
         "video_limit": 1,
-        "video_field": "video",
+        "video_field": "reference_video",
     },
     "wan2.7-shouweizhen": {"image_required": True},
     "kling-v3-omni-shouweizhen": {"image_required": True},
@@ -3036,6 +3036,15 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
         if model == "wan2.7-cankaosheng":
             params["ratio"] = ar
     payload = {"prompt": prompt[:600], "params": params}
+    if model == "wan2.7-cankaosheng":
+        # 真实 LK888 字段:参考图走 reference_urls、参考视频走 reference_video。
+        # 旧代码把参考图写进 images/image_urls/reference_images、参考视频写进 video,
+        # 该模型都收不到 -> 退化成纯文生视频。这里只写真实字段,不带多余别名。
+        if refs:
+            payload["params"]["reference_urls"] = refs
+        if video_url and media["video_limit"] > 0:
+            payload["params"]["reference_video"] = video_url
+        return payload
     if refs:
         if model == "sora-2":
             payload["input_reference"] = refs[:2]

@@ -553,7 +553,9 @@ class AgentVideoDurationTest(unittest.TestCase):
         self.assertEqual(9, wan_ref["params"]["duration"])
         self.assertEqual("720P", wan_ref["params"]["resolution"])
         self.assertEqual("9:16", wan_ref["params"]["ratio"])
-        self.assertEqual(refs[:4], wan_ref["params"]["images"])
+        # 万相 2.7 参考生真实字段是 reference_urls（此前误写 images,模型收不到参考图）。
+        self.assertEqual(refs[:4], wan_ref["params"]["reference_urls"])
+        self.assertNotIn("images", wan_ref["params"])
 
         self.assertEqual(9, wan_frames["params"]["duration"])
         self.assertEqual("720P", wan_frames["params"]["resolution"])
@@ -752,7 +754,8 @@ class AgentVideoDurationTest(unittest.TestCase):
 
         self.assertFalse(wan_ref["video_required"])
         self.assertEqual(1, wan_ref["video_limit"])
-        self.assertEqual("video", wan_ref["video_field"])
+        # 真实 LK888 字段:参考视频 reference_video（此前误写 video）。
+        self.assertEqual("reference_video", wan_ref["video_field"])
 
         self.assertTrue(vidu_turbo["image_required"])
         self.assertEqual(2, vidu_turbo["image_limit"])
@@ -872,7 +875,9 @@ class AgentVideoDurationTest(unittest.TestCase):
                 module._prodgen_run_video(entry)
 
         payload = media.call_args.args[1]
-        self.assertEqual("https://assets.example/reference.mp4", payload["params"]["video"])
+        # 参考视频写进真实字段 reference_video（此前误写 video）。
+        self.assertEqual("https://assets.example/reference.mp4", payload["params"]["reference_video"])
+        self.assertNotIn("video", payload["params"])
         self.assertEqual(12, payload["params"]["duration"])
         self.assertEqual("video", upload.call_args.args[2])
 

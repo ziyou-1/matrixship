@@ -1,4 +1,10 @@
-﻿## 2026-08-08 内容采集页恢复图文同款按钮
+﻿## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
+- `backend/matrix_native_client.py#L2712-L2716`：`_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES["wan2.7-cankaosheng"]` 的 `video_field` 由 `video` 改为真实字段 `reference_video`。
+- `backend/matrix_native_client.py#L3039-L3047`：`_agent_video_payload()` 为 `wan2.7-cankaosheng` 增加精确分支——参考图写 `reference_urls`、参考视频写 `reference_video`，直接 return，不再走通用别名块（此前误写 `images/image_urls/reference_images` 和 `video`，模型收不到参考素材、退化为纯文生视频）。
+- `tests/test_agent_video_duration.py#L553-L558`、`#L753-L756`、`#L874-L878`：修正三处与实现同源、把该模型字段锁成 `images`/`video` 的旧断言，改按实测 `reference_urls`/`reference_video`。
+- 验证与影响：`tests.test_agent_video_duration`、`tests.test_agent_regen_keeps_params` 全绿、`py_compile` 通过；仅影响该模型 payload，不改中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。退出后 `start-visible-client.bat` 重启生效。来源:并行分支 `claude/agent-model-params-ui-e46b0b`（已 -s ours 记录合并）中唯一目标分支尚缺的修复。
+
+## 2026-08-08 内容采集页恢复图文同款按钮
 - `backend/matrix_native_client.py` `ContentPage.__init__`：在"下载"和"分解"之间重新创建 `self.b_note_replace = QtWidgets.QPushButton("图文同款")` 并 `addWidget`；恢复 `note_replace()` 方法（校验小红书链接→下载→emit `c_note_replace`）。
 - `_set_xhs_retry_busy` 和 `c_note_replace` 结果处理器改为对 `b_note_replace` 做 `setEnabled`（此前删按钮后只操作 `b_dl`）。孤儿处理器 `c_note_replace`（解析图片素材→跳转"🧩 图文同款"页）本来就在，现在重新接上按钮。
 - 背景：`5e3c052`（2026-08-03）有意删除该按钮，但小红书大部分是图文笔记，"分解"只处理视频，图文笔记因此在内容采集页无出口，点分解报"未找到可分析的视频文件"。按用户要求恢复。

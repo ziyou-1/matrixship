@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
+### Fixed
+- Agent.模式选万相 2.7 参考生（`wan2.7-cankaosheng`）时，参考图此前写进 `images/image_urls/reference_images`、参考视频写进 `video`，而该模型真实 LK888 字段是 `reference_urls` 与 `reference_video`，导致上游收不到参考素材、退化为纯文生视频。现按真实字段提交（`_agent_video_payload` 增加该模型的精确分支，只写 `reference_urls`/`reference_video`，不带多余别名；契约 `video_field` 同步改为 `reference_video`）。
+
+### Verification And Operations
+- 更新 `tests/test_agent_video_duration.py` 三处旧断言：它们与实现同源、把该模型字段锁成了错误的 `images`/`video`（名为 `match_lk888` 却并不匹配真实 LK888 契约），现按实测字段 `reference_urls`/`reference_video` 断言。
+- `.venv-win` 下 `tests.test_agent_video_duration`、`tests.test_agent_regen_keeps_params` 全绿；`py_compile` 通过。运行时 `wan2.7-cankaosheng` 现输出 `{reference_urls:[...], reference_video:...}`，无 `images`/`video` 残留。
+- 仅影响本地原生客户端 Agent.模式该模型的 payload;不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。退出后 `start-visible-client.bat` 重启生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`CHANGELOG.md` 可恢复旧行为。
+- 本次为并行分支 `claude/agent-model-params-ui-e46b0b`（已用 -s ours 记录合并）中唯一目标分支尚缺的修复,单独移植过来;该分支其余 Agent 上传框工作与本分支已有实现重复,故不取其内容。
+
 ## 2026-08-08 内容采集页恢复"图文同款"按钮
 ### Fixed
 - 内容采集页重新加入"图文同款"按钮（在"下载"和"分解"之间），并恢复 `note_replace()` 方法。小红书笔记大部分是图文，此前只剩"分解"（视频专用），对图文笔记点分解会因找不到视频文件报"分解失败:未找到可分析的视频文件"。
