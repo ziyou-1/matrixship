@@ -1,4 +1,13 @@
-﻿## 2026-08-05 采集后下载提示「下载失败」/ 分解提示「分解失败:下载未完成 library_import_failed」
+﻿## 2026-08-10 管理员账号中心「用户管理」看不到普通用户(只有一个 admin)
+- 现象:从公网下载的客户端,平台管理员(如 `billing_admin`)登录后进「账号中心 → 用户管理(管理员)」,只显示一行 `admin`(手机号 `admin`、余额 `10000`),42 个真实用户一个都看不到,连登录中的自己也不在列表里。
+- 根因:`GET /api/admin/users` 只读中心服本地 JSON `STATE["users"]`,那里只有运维兜底账号 `user-owner`。`MAINDB_ENABLED=1` 时真实用户都在漫剧主库 `ai_education.users`,该接口从不查主库,且 `maindb.py` 当时连列出用户的函数都没有(只有按 id/手机/用户名单条查找)。账号体系已收敛到主库,但管理员**列表**这条读路径没跟着迁移。
+- 现场证据(公网只读复现):`/api/admin/users` 返回 1 个用户(`user-owner`),而 `ai_education.users` 共 42 行。
+- 修复:`maindb.list_users(limit, offset, q)` + `central_server.admin_list_users()`;`maindb_on()` 时列出主库真实用户(经 `shape_mdb_user`→`public_user`,不泄露 `password_hash`,`is_admin/is_staff`→`isPlatformAdmin`),并保留本地非 int-id 账号(`user-owner`)。`/api/admin/users` 新增可选 `q`/`limit`/`offset`,响应 `{ok, users}` 结构不变。充值不用改:`topup_user()` 已按 int id 走 `maindb.topup`。
+- 验证:本地 `tests/test_admin_users_maindb.py` 3/3、`py_compile` 通过;公网部署 `50ff78e`(镜像 `matrix-ship-central:50ff78e`,healthy,`/api/health` 200,9080 监听)后,`/api/admin/users` 由 1 变为 43(42 主库 + 1 运维),`?q=003` 命中 id 44。
+- 运维/回滚:代码打进镜像(非挂载),改动需重建镜像并 `docker compose up -d`。回滚:`ln -sfn releases/8624d97 current && cd releases/8624d97 && IMAGE_TAG=8624d97 CENTRAL_PORT=9080 docker compose -p matrixship-central-prod -f docker-compose.prod.yml up -d`(旧镜像仍在,无需重建)。
+- 遗留:列表目前含 `__deleted_account_*` 等软删除账号;若要在管理端隐藏,可给 `list_users` 加 `WHERE is_active=1` 或排除 `__deleted%`(非本次报障范围)。
+
+## 2026-08-05 采集后下载提示「下载失败」/ 分解提示「分解失败:下载未完成 library_import_failed」
 - 现象：从公网下载安装的客户端，内容采集后点「下载」提示下载失败；点「分解」提示 `分解失败:下载未完成 library_import_failed`。但视频其实已经完整下载到用户磁盘（正式版路径 `<安装目录>\_internal\datasccounts\<账号ID>\media_datas\<作者>_<作者ID>\<标题>_<视频ID>ideo.mp4`）。
 - 根因：本地浏览器链路的下载在**用户自己机器上**完成，中心服（Linux 容器）随后要把素材镜像进中心素材库。`mirror_download_material_to_library()` 取文件只有两条路：读 `sourceDownloadPath`（用户的 Windows 路径，容器里不存在），或回源 `localApi + /api/library/file/...`。而 `node_info()` 读的是 `STATE["nodes"]`，本地浏览器客户端却存在 `STATE["localBrowserClients"]`，两个集合从不相交，`localApi` 也从未随注册包上报——所以拉取对本地浏览器链路**结构上不可能成功**，函数返回 `None`，记 `missing_material_id`。旧实现随后把整个结果改写成 `ok=False` / `error=library_import_failed` 并返回 `False`，上层据此把任务判成 `failed`。客户端 `matrix_native_client.py` 的分解入口只检查 `task.status != "done" or result.ok is False`，因此把一次成功的下载显示成失败，并挡住后续分解。
 - 修复：`backend/central_server.py` 的本地浏览器 side-effect 分支保留 `ok` 与 `done` 状态，只附加 `libraryImported=False` / `libraryError` / `libraryErrorId`，并返回 `True`。结构化日志 `download_library_import_failed` 照记，可观测性不变。云端执行节点链路（`/api/node/*`，`central_server.py` 内另外两处）不动——那条路的 `localApi` 是注册过的，拉取本就应当成功。
