@@ -97,7 +97,7 @@ def central_library_file_prefix(central_parsed=None):
     parsed = central_parsed if central_parsed is not None else urlparse(CENTRAL)
     return (parsed.path or "").rstrip("/") + "/api/library/file/"
 APP_NAME = "MatrixShipAgent"
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 ACCENT = "#6366f1"
 XHS_PLATFORM_LABEL = "小" + "红书"
 XHS_PLATFORM_CODE = "x" + "hs"

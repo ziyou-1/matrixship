@@ -9,7 +9,7 @@
 #define MyAppName "矩阵星舰本地客户端"
 #define MyAppExeName "MatrixShipAgent.exe"
 #define MyAppPublisher "MatrixShip"
-#define MyAppVersion "1.1.16"
+#define MyAppVersion "1.1.17"
 
 [Setup]
 AppName={#MyAppName}
