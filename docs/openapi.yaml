@@ -142,6 +142,650 @@ paths:
                   cookieReady: {type: boolean}
                 onlineNodes: {type: integer, minimum: 0}
               additionalProperties: true
+  /replacement:
+    get:
+      summary: Local replacement web MVP page
+      description: Local execution-engine HTML page enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It provides Phase 0 video replacement and image-note replacement forms, accepts the local agent token in the page or URL hash for API submits, and does not submit real LK888/provider generation.
+      security: []
+      responses:
+        "200":
+          description: Replacement MVP page
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/start:
+    post:
+      summary: Start a local Phase 0 video replacement job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It stores a queued local job and never triggers real LK888/provider generation in the MVP. When handoffId is supplied, the job is bound to a native-client video breakdown handoff instead of requiring sourceUrl.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoStartRequest"
+      responses:
+        "200":
+          description: Local replacement job was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementStartResponse"
+        "400":
+          description: Missing source URL, invalid URL, or missing required character image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/options:
+    get:
+      summary: List video replacement model / audio-mode / voice choices
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. Returns the same model, audio-mode and AI-voice catalog the native client offers so the web form can populate its selectors.
+      responses:
+        "200":
+          description: Available models, audio modes and voices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  models: {type: array, items: {type: object}}
+                  audioModes: {type: array, items: {type: object}}
+                  voices: {type: array, items: {type: object}}
+        "404":
+          description: Feature disabled (MATRIX_REPLACEMENT_WEB_ENABLED not set)
+  /api/replacement/video/handoff:
+    get:
+      summary: Read a local native-client video replacement handoff
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It returns a redacted summary for an already-loaded native video breakdown context and never exposes local file paths or source URL query strings.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: handoffId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rwh_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Redacted handoff context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoHandoffResponse"
+        "404":
+          description: Replacement web surface is disabled or handoff is missing or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/job:
+    get:
+      summary: Poll a local video replacement job lifecycle state
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It returns a redacted lifecycle snapshot; internal file paths, tokens, cookies, signed URLs, and raw media bytes are never exposed. Poll every 1s during preparation and every 2s during generation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rvw_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Redacted lifecycle state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/prepare:
+    post:
+      summary: Prepare a local video replacement job (source resolve + plan)
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It orchestrates the local ReplacementService to resolve the source (handoff reuse or direct URL), analyze it, and build the plan. The web layer never calls providers directly, never precharges, and never returns tokens, cookies, signed URLs, or local paths. When handoffId is supplied, sourceUrl is not required. Service routing is controlled by VIDEO_REPLACEMENT_SERVICE_MODE (legacy|shared); a local circuit breaker records terminal outcomes and, after at least 100 terminal jobs, routes new jobs back to legacy when the failure ratio is strictly greater than 1% (an in-flight job is never interrupted). Structured boundary events (prepare_started, analysis_completed, provider_submitted, provider_recovered, billing_settled, video_completed, video_failed, shared_mode_circuit_opened, rollback_requested) carry only redacted context — job id, stage, model, provider-task hash, status, media-URL shape, and cost/ref.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoStartRequest"
+      responses:
+        "202":
+          description: Job was prepared; the planned (or source-failed) lifecycle state is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "400":
+          description: Invalid source URL, missing character image, or unsupported/oversized upload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or the handoff is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Source preparation failed inside the local service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/execute:
+    post:
+      summary: Execute the confirmed plan of a prepared video replacement job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It runs generation through the injected local pipeline. Provider submit success is not generation success; only the pipeline settles billing. Valid only from the planned state.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoLifecycleRequest"
+      responses:
+        "202":
+          description: Generation ran; lifecycle state advanced to running, awaiting_review, or partial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Job is not in the planned state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Generation failed inside the local service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/retry:
+    post:
+      summary: Retry failed segments of a partial video replacement job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It re-runs only the requested failed segments through the local pipeline. Valid only from the partial or awaiting_review states.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoLifecycleRequest"
+      responses:
+        "202":
+          description: Retry ran; lifecycle state advanced to running, awaiting_review, or partial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Job is not in a retryable state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Retry failed inside the local service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/concat:
+    post:
+      summary: Concatenate reviewed segments into the final video
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It concatenates and finalizes the local output. Valid only from the awaiting_review state.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoLifecycleRequest"
+      responses:
+        "202":
+          description: Final video was concatenated; lifecycle state advanced to completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Job is not ready for concat
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Concatenation failed inside the local service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/regenerate-frame:
+    post:
+      summary: Regenerate a comic-project segment start or end frame
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. Regenerates the requested start/end keyframe for one segment of a comic_project video replacement job in awaiting_review/partial. Non-comic jobs return replacement_frame_regen_comic_only.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId, segmentIndex, frameKind]
+              properties:
+                jobId: {type: string}
+                segmentIndex: {type: integer, minimum: 1}
+                frameKind: {type: string, enum: [start, end]}
+      responses:
+        "202":
+          description: Frame regeneration applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "400":
+          description: Invalid frame kind or non-comic job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Job not found or feature disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/cancel:
+    post:
+      summary: Cancel a non-terminal video replacement job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It requests cancellation; terminal jobs return their terminal state unchanged.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementVideoLifecycleRequest"
+      responses:
+        "202":
+          description: Cancellation was applied or the job was already terminal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementVideoJobResponse"
+        "401":
+          description: Local agent token is missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/download:
+    get:
+      summary: Download the finalized local video output
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It streams the finalized output for a completed job after validating job id, filename, and output root. The agent token is sent in the request header, never in the query string. Signed URLs and local paths are never exposed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rvw_[A-Za-z0-9_-]+$"}
+        - name: filename
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: Finalized local video bytes
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid job id or filename
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Requested output resolves outside the local data sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or the finalized output is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/media:
+    get:
+      summary: Stream a segment's local first/last frame image or segment preview video
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It streams a single segment media asset (start frame, end frame, or segment video) from local files that were already downloaded during generation, after validating the job id, segment index, media kind, file extension, and that the resolved file lives inside the local data sandbox. The agent token is sent in the request header, never in the query string. Provider signed URLs, raw provider task ids, and local paths are never exposed; responses are served with Cache-Control:no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^rvw_[0-9a-f]{24}$"}
+        - name: segmentIndex
+          in: query
+          required: true
+          schema: {type: integer}
+        - name: kind
+          in: query
+          required: true
+          schema: {type: string, enum: [start, end, video]}
+      responses:
+        "200":
+          description: Local segment frame image or segment video bytes
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+            video/mp4:
+              schema: {type: string, format: binary}
+        "400":
+          description: Invalid job id, segment index, media kind, or unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Requested media resolves outside the local data sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled, or the job/segment/media is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/video/save-to-library:
+    post:
+      summary: Add a completed replacement video into the local material library (素材库)
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It copies a completed video job's finalized output into the material library (素材库 / 素材发布) so it becomes publishable, after validating the job is completed and its output resolves inside the local data sandbox. This is the material-library path, not the pending-publish queue. Idempotent — a job already added returns its existing material id. The agent token is sent in the request header; local paths and provider URLs are never returned.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jobId]
+              properties:
+                jobId: {type: string, pattern: "^rvw_[0-9a-f]{24}$"}
+                title: {type: string, description: Optional material title; defaults to a 同款替换成片 label.}
+      responses:
+        "200":
+          description: Material created (or already present); returns the material id and redacted metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  id: {type: string}
+                  alreadyAdded: {type: boolean}
+                  material:
+                    type: object
+                    properties:
+                      id: {type: string}
+                      title: {type: string}
+                      type: {type: string}
+                      platform: {type: string}
+                      createdAt: {type: number}
+        "400":
+          description: Invalid job id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Job output resolves outside the local data sandbox
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled, or the job/output is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Job is not completed yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/start:
+    post:
+      summary: Start a local Phase 0 image-note replacement preview job
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It creates a safe local preview using existing image-note smoke logic and does not publish to Xiaohongshu.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/ReplacementNoteStartRequest"
+      responses:
+        "200":
+          description: Local replacement preview job was created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementStartResponse"
+        "400":
+          description: Missing source URL, invalid URL, or missing replacement image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/save-draft:
+    post:
+      summary: Save a local replacement note preview as an image-note draft
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It reuses the existing image-note draft material flow, copies validated uploaded images into the local material library, and does not publish to Xiaohongshu or sync to the center material library.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplacementNoteSaveDraftRequest"
+      responses:
+        "200":
+          description: Local image-note draft material was created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, id, material, job]
+                properties:
+                  ok: {const: true}
+                  id: {type: string}
+                  material:
+                    type: object
+                    additionalProperties: true
+                  job:
+                    type: object
+                    additionalProperties: true
+                additionalProperties: true
+        "400":
+          description: Replacement images are missing or invalid for draft material creation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/note/job:
+    get:
+      summary: Read a local Phase 0 image-note replacement preview job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^xnr_[A-Za-z0-9_-]+$"}
+      responses:
+        "200":
+          description: Local preview job state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplacementJobResponse"
+        "404":
+          description: Replacement web surface is disabled or job is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /api/replacement/file:
+    get:
+      summary: Read a local uploaded replacement image thumbnail
+      description: Local execution-engine endpoint enabled only when MATRIX_REPLACEMENT_WEB_ENABLED=1. It serves only image files stored under a known replacement upload job directory, rejects path traversal, and does not expose local filesystem paths in JSON job responses.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: taskType
+          in: query
+          required: true
+          schema: {type: string, enum: [note]}
+        - name: jobId
+          in: query
+          required: true
+          schema: {type: string, pattern: "^xnr_[A-Za-z0-9_-]+$"}
+        - name: filename
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: Local uploaded image bytes
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Invalid task, job, filename, path, or unsupported file type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Requested filename is outside the replacement upload directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Replacement web surface is disabled or the uploaded image is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /api/v1/minimax/video/generate:
     post:
       summary: Submit an authenticated MiniMax direct video task
@@ -2080,6 +2724,256 @@ components:
         guestMode: {type: boolean, default: false}
         accountCollectionConfirmed: {type: boolean, default: false}
       additionalProperties: false
+    ReplacementVideoStartRequest:
+      type: object
+      required: [characterImage]
+      properties:
+        sourceUrl:
+          type: string
+          format: uri
+          pattern: "^https?://"
+          description: Public source video URL. Required when handoffId is not supplied. Userinfo credentials, local paths, data URLs, and query secrets are not persisted.
+        handoffId:
+          type: string
+          pattern: "^rwh_[A-Za-z0-9_-]+$"
+          description: Optional native-client handoff id for an already-loaded local video breakdown context.
+        characterImage: {type: string, format: binary}
+        productImage: {type: string, format: binary}
+        sceneImage: {type: string, format: binary}
+        script: {type: string, maxLength: 4000}
+        sellingPoints: {type: string, maxLength: 4000}
+      additionalProperties: true
+    ReplacementNoteStartRequest:
+      type: object
+      required: [sourceUrl, replacementImages]
+      properties:
+        sourceUrl:
+          type: string
+          format: uri
+          pattern: "^https?://"
+          description: Source image-note URL. Userinfo credentials, local paths, data URLs, and query secrets are not persisted.
+        replacementImages:
+          type: array
+          minItems: 1
+          items: {type: string, format: binary}
+        businessName: {type: string, maxLength: 500}
+        region: {type: string, maxLength: 500}
+        sellingPoints: {type: string, maxLength: 4000}
+        audience: {type: string, maxLength: 1000}
+        tone: {type: string, maxLength: 500}
+      additionalProperties: true
+    ReplacementNoteSaveDraftRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          pattern: "^xnr_[A-Za-z0-9_-]+$"
+        selectedCopyIndex:
+          type: integer
+          minimum: 0
+          default: 0
+        copyOverride:
+          type: object
+          properties:
+            title: {type: string, maxLength: 100}
+            body: {type: string, maxLength: 5000}
+            tags:
+              oneOf:
+                - type: string
+                - type: array
+                  items: {type: string}
+          additionalProperties: false
+      additionalProperties: false
+    ReplacementStartResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean}
+        jobId: {type: string}
+        taskType: {type: string, enum: [video, note]}
+        status: {type: string, enum: [queued, preview, draft, failed]}
+        error:
+          type: string
+          enum:
+            - replacement_web_disabled
+            - replacement_invalid_source_url
+            - replacement_video_missing_character_image
+            - replacement_video_handoff_not_found
+            - replacement_note_missing_images
+            - replacement_note_preview_failed
+            - replacement_job_not_found
+            - ""
+      additionalProperties: true
+    ReplacementVideoHandoffResponse:
+      type: object
+      required: [ok, handoffId, source, sourceVideo, analysis]
+      properties:
+        ok: {const: true}
+        handoffId: {type: string, pattern: "^rwh_[A-Za-z0-9_-]+$"}
+        source:
+          type: object
+          description: Redacted source URL shape. Query strings, userinfo, signed URLs, cookies, and tokens are not returned.
+          additionalProperties: true
+        sourceVideo:
+          type: object
+          required: [available]
+          properties:
+            available: {type: boolean}
+            pathHash:
+              type: string
+              description: Non-reversible hash of the local source video path for diagnostics; the path itself is never returned.
+          additionalProperties: false
+        platform: {type: string}
+        analysis:
+          type: object
+          properties:
+            duration: {type: number}
+            transcriptSegmentCount: {type: integer, minimum: 0}
+            hasBreakdownAnalysis: {type: boolean}
+          additionalProperties: true
+        user:
+          type: object
+          additionalProperties: true
+        createdAt: {type: number}
+        expiresAt: {type: number}
+      additionalProperties: true
+    ReplacementJobResponse:
+      type: object
+      required: [ok, jobId, taskType, status]
+      properties:
+        ok: {const: true}
+        jobId: {type: string}
+        taskType: {type: string, enum: [video, note]}
+        status: {type: string, enum: [queued, preview, failed]}
+        source:
+          type: object
+          description: Redacted source URL shape. Query strings, userinfo, signed URLs, cookies, and tokens are not returned.
+          additionalProperties: true
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              field: {type: string}
+              filename: {type: string}
+              size: {type: integer, minimum: 0}
+              previewUrl:
+                type: string
+                description: Relative /api/replacement/file URL for authenticated thumbnail loading. Present only for note preview upload images.
+            additionalProperties: true
+        imageSlots:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        slotMappings:
+          type: array
+          items:
+            type: object
+            properties:
+              slotIndex: {type: integer}
+              slotRole: {type: string}
+              source: {type: string}
+              assetId: {type: string}
+              confirmationStatus: {type: string}
+              hasFile:
+                type: boolean
+                description: True when the internal compatible note job has a local filePath; the path itself is not returned.
+            additionalProperties: false
+        copyCandidates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        sourceContext:
+          type: object
+          description: Present for video jobs created from a native handoff. Contains only handoff id, platform, duration, booleans, and a non-reversible path hash.
+          additionalProperties: true
+        createdAt: {type: number}
+        updatedAt: {type: number}
+      additionalProperties: true
+    ReplacementVideoLifecycleRequest:
+      type: object
+      required: [jobId]
+      properties:
+        jobId:
+          type: string
+          pattern: "^rvw_[A-Za-z0-9_-]+$"
+        overrides:
+          type: object
+          description: Optional edited-plan overrides forwarded to the local pipeline (execute only). Never contains provider credentials.
+          additionalProperties: true
+        segmentIndices:
+          type: array
+          description: Failed segment indices to retry (retry only). Empty retries all failed segments.
+          items: {type: integer, minimum: 1}
+      additionalProperties: true
+    ReplacementVideoJobResponse:
+      type: object
+      required: [ok, jobId, taskType, status]
+      properties:
+        ok: {const: true}
+        jobId: {type: string, pattern: "^rvw_[A-Za-z0-9_-]+$"}
+        taskType: {type: string, enum: [video]}
+        status:
+          type: string
+          enum: [created, planned, running, awaiting_review, partial, completed, done, failed, cancelled, canceled]
+        stage: {type: string}
+        progressText: {type: string}
+        source:
+          type: object
+          description: Redacted source URL shape. Query strings, userinfo, signed URLs, cookies, and tokens are not returned.
+          additionalProperties: true
+        sourceContext:
+          type: object
+          description: Handoff-derived context with only ids, platform, duration, booleans, and a non-reversible path hash.
+          additionalProperties: true
+        segments:
+          type: array
+          items:
+            type: object
+            description: Per-segment lifecycle status. Internal file paths are never included.
+            properties:
+              index: {type: integer}
+              start: {type: number}
+              end: {type: number}
+              status: {type: string}
+              qcStatus: {type: string}
+              audioStatus: {type: string}
+              segmentType: {type: string}
+              stage: {type: string}
+              stageLabel: {type: string}
+              elapsedSec: {type: number}
+              etaSec: {type: number}
+              error: {type: string}
+              errorId: {type: string}
+              media:
+                type: object
+                description: Availability booleans for each local media asset of this segment. Never a URL or path; each true asset is fetched via GET /api/replacement/video/media.
+                properties:
+                  start: {type: boolean}
+                  end: {type: boolean}
+                  video: {type: boolean}
+                additionalProperties: false
+            additionalProperties: false
+        diagnostics:
+          type: object
+          additionalProperties: true
+        error: {type: string}
+        handoffId: {type: string}
+        download:
+          type: object
+          required: [available]
+          properties:
+            available: {type: boolean}
+            filename:
+              type: string
+              description: Basename only, used with GET /api/replacement/video/download. The local path is never returned.
+          additionalProperties: false
+        createdAt: {type: number}
+        updatedAt: {type: number}
+      additionalProperties: true
     DownloadFile:
       type: object
       required: [path]

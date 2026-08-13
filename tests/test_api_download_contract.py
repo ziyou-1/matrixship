@@ -477,6 +477,58 @@ class ApiDownloadContractTest(unittest.TestCase):
         self.assertNotIn("disk full", json.dumps(payload, ensure_ascii=False))
         self.assertNotIn("sk-test-secret-value", json.dumps(payload, ensure_ascii=False))
 
+    def test_douyin_download_normalizes_unexpected_oserror_to_contract_code(self):
+        # The reported failure escaped as a raw '[WinError 267] 目录名称无效'
+        # string; an unexpected OSError must now become the stable
+        # 'download_exception' contract code with a redacted errorId and no
+        # str(e)/traceback leaked to the client.
+        handler = self.make_api_handler({"url": "https://www.douyin.com/video/1"})
+        winerr = OSError(
+            "[WinError 267] 目录名称无效。: "
+            "'C:\\\\media\\\\nick_creator:handle sk-test-secret-value'"
+        )
+        with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "require_auth", return_value=object()), \
+                mock.patch.object(self.api, "download_douyin_work_with_refresh", side_effect=winerr), \
+                mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
+            status, payload = handler.do_POST()
+
+        self.assertEqual(status, 502)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload.get("stage"), "download")
+        self.assertEqual(payload.get("error"), "download_exception")
+        self.assertTrue(str(payload.get("errorId") or "").startswith("err-"))
+        self.assertNotIn("trace", payload)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("WinError 267", serialized)
+        self.assertNotIn("目录名称无效", serialized)
+        self.assertNotIn("sk-test-secret-value", serialized)
+
+    def test_xhs_download_normalizes_unexpected_oserror_to_contract_code(self):
+        handler = self.make_api_handler(
+            {
+                "url": "https://www.xiaohongshu.com/explore/note-1",
+                "accountCollectionConfirmed": True,
+            },
+            path="/api/xhs/download",
+        )
+        winerr = OSError("[WinError 267] 目录名称无效。 sk-test-secret-value")
+        with mock.patch.object(self.api, "ensure_agent_request", return_value=True), \
+                mock.patch.object(self.api, "xhs_profile_ready", return_value=True), \
+                mock.patch.object(self.api, "xhs_download_note", side_effect=winerr), \
+                mock.patch.object(self.api, "json_response", side_effect=lambda _handler, payload, status=200: (status, payload)):
+            status, payload = handler.do_POST()
+
+        self.assertEqual(status, 502)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload.get("stage"), "download")
+        self.assertEqual(payload.get("error"), "download_exception")
+        self.assertTrue(str(payload.get("errorId") or "").startswith("err-"))
+        self.assertNotIn("trace", payload)
+        serialized = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("WinError 267", serialized)
+        self.assertNotIn("sk-test-secret-value", serialized)
+
     def test_central_download_returns_library_failure_when_mirror_has_no_id(self):
         upstream = {
             "ok": True,

@@ -112,9 +112,42 @@ class XhsPlatformDisableTest(unittest.TestCase):
         pick_node.assert_not_called()
 
     def test_local_browser_xhs_task_type_is_disabled(self):
-        source = (BACKEND / "central_server.py").read_text(encoding="utf-8")
-        self.assertIn("platform_disabled", source)
-        self.assertIn("MATRIX_XHS_ENABLED", source)
+        with mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "0"}, clear=False), \
+                mock.patch.object(self.central, "require_role", return_value=True), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "user-owner"}), \
+                mock.patch.object(self.central, "request_org_id", return_value="org-default"):
+            result, status = self.central.local_browser_create_task(
+                object(), {"type": "xhs.search", "payload": {"platform": "xhs", "query": "丰田"}})
+
+        self.assertEqual(status, 404)
+        self.assertEqual(result["error"], "platform_disabled")
+
+    def test_central_restores_xhs_task_routing_when_flag_is_set(self):
+        """MATRIX_XHS_ENABLED=1 是文档承诺的恢复开关,中心服必须真的放行。
+
+        旧实现三个路由闸门都无条件拦截 xhs,开关只在本地客户端和本地执行器生效,
+        内容采集搜索因此固定失败在 `搜索失败:platform_disabled`。
+        """
+        with mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"}, clear=False), \
+                mock.patch.object(self.central, "pick_node", return_value=None):
+            _task, error, status = self.central.create_task(
+                "/api/xhs/search", body={"platform": "xhs", "query": "丰田"})
+
+        self.assertNotEqual(status, 404)
+        self.assertNotEqual((error or {}).get("error"), "platform_disabled")
+
+    def test_central_local_browser_channel_accepts_xhs_task_when_flag_is_set(self):
+        allowed = set(self.central.LOCAL_BROWSER_ALLOWED_TYPES) | {"xhs.search"}
+        with mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "1"}, clear=False), \
+                mock.patch.object(self.central, "LOCAL_BROWSER_ALLOWED_TYPES", allowed), \
+                mock.patch.object(self.central, "require_role", return_value=True), \
+                mock.patch.object(self.central, "current_user", return_value={"id": "user-owner"}), \
+                mock.patch.object(self.central, "request_org_id", return_value="org-default"):
+            result, status = self.central.local_browser_create_task(
+                object(), {"type": "xhs.search", "payload": {"platform": "xhs", "query": "丰田"}})
+
+        self.assertNotEqual(status, 404)
+        self.assertNotEqual((result or {}).get("error"), "platform_disabled")
 
     def test_local_browser_capabilities_hide_xhs_and_restore_with_flag(self):
         worker = importlib.import_module("local_browser_worker")

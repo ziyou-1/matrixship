@@ -36,6 +36,7 @@ from utils.cookie_util import (
     get_persistent_profile_cookies,
 )
 from utils.publish_util import publish_to_douyin
+import replacement_web
 import xhs_note_replacement
 try:
     from edge_ui_comment import send_comment_via_edge_ui
@@ -58,6 +59,7 @@ from platform_features import (
     log_platform_disabled,
     payload_uses_xhs,
     platform_disabled_result,
+    replacement_web_enabled,
     xhs_enabled,
 )
 
@@ -1033,6 +1035,94 @@ def _copy_material_file(src, dst):
         shutil.copyfile(src, dst)
 
 
+def save_xhs_note_draft_payload(body):
+    body = body if isinstance(body, dict) else {}
+    job = body.get('job') if isinstance(body.get('job'), dict) else None
+    if not job and body.get('jobId'):
+        job = xhs_note_replacement.load_job(DATA_DIR, str(body.get('jobId') or ''))
+    if not job:
+        return {'ok': False, 'error': 'not_found'}, 404
+    if 'selectedCopyIndex' in body:
+        job['selectedCopyIndex'] = int(body.get('selectedCopyIndex') or 0)
+    copy_override = body.get('copyOverride') if isinstance(body.get('copyOverride'), dict) else {}
+    if copy_override:
+        selected_idx = int(job.get('selectedCopyIndex') or 0)
+        candidates = job.get('copyCandidates') if isinstance(job.get('copyCandidates'), list) else []
+        while len(candidates) <= selected_idx:
+            candidates.append({})
+        current_copy = candidates[selected_idx] if isinstance(candidates[selected_idx], dict) else {}
+        edited = dict(current_copy)
+        if 'title' in copy_override:
+            edited['title'] = str(copy_override.get('title') or '').strip()
+        if 'body' in copy_override:
+            edited['body'] = str(copy_override.get('body') or '').strip()
+        if 'tags' in copy_override:
+            raw_tags = copy_override.get('tags')
+            if isinstance(raw_tags, str):
+                raw_tags = re.split("[,\\uFF0C\\s]+", raw_tags)
+            tags = []
+            for tag in raw_tags if isinstance(raw_tags, list) else []:
+                text = str(tag or '').strip()
+                if not text:
+                    continue
+                if not text.startswith('#'):
+                    text = '#' + text
+                if text not in tags:
+                    tags.append(text)
+            edited['tags'] = tags
+        candidates[selected_idx] = edited
+        job['copyCandidates'] = candidates
+    material_error = xhs_note_replacement.replacement_material_error(job)
+    if material_error:
+        return {'ok': False, 'error': material_error, 'stage': 'save_draft'}, 400
+    source_paths = []
+    missing_slots = []
+    for mapping in job.get('slotMappings') or []:
+        fp = str(mapping.get('filePath') or '').strip()
+        if not fp:
+            missing_slots.append(mapping.get('slotIndex'))
+            continue
+        src = fp
+        if not os.path.isabs(src):
+            src = os.path.join(MATERIALS_DIR, os.path.basename(src))
+        if not os.path.isfile(src) or not validate_image_file(src).get('ok'):
+            missing_slots.append(mapping.get('slotIndex'))
+            continue
+        source_paths.append((mapping, src))
+    expected_slots = len(((job.get('template') or {}).get('imageSlots') or []))
+    if missing_slots or not source_paths or (expected_slots and len(source_paths) < expected_slots):
+        return {
+            'ok': False,
+            'error': 'xhs_note_replacement_missing_images',
+            'stage': 'save_draft',
+            'missingSlots': [x for x in missing_slots if x],
+        }, 400
+    mid = uuid.uuid4().hex
+    mdir = os.path.join(MATERIALS_DIR, mid)
+    os.makedirs(mdir, exist_ok=True)
+    saved = []
+    used_names = set()
+    for idx, (_mapping, src) in enumerate(source_paths, start=1):
+        safe = _slot_material_filename(src, _mapping, idx, used_names)
+        dst = os.path.join(mdir, safe)
+        _copy_material_file(src, dst)
+        saved.append(safe)
+    payload = xhs_note_replacement.build_draft_material_payload(job, saved)
+    payload.update({
+        'id': mid,
+        'title': payload.get('title') or (job.get('template') or {}).get('originalCopy', {}).get('title') or '鍥炬枃鍚屾鑽夌',
+        'urls': ['/api/library/file/%s/%s' % (mid, fn) for fn in saved],
+        'createdAt': time.time(),
+    })
+    with STATE_LOCK:
+        lib = load_library()
+        lib.insert(0, payload)
+        save_library(lib)
+    job.update({'status': 'draft', 'publishDraftMaterialId': mid, 'updatedAt': time.time()})
+    xhs_note_replacement.save_job(DATA_DIR, job)
+    return {'ok': True, 'id': mid, 'material': payload, 'job': job}, 200
+
+
 def load_settings():
     with STATE_LOCK:
         return dict(_MEM['settings'])
@@ -1135,6 +1225,12 @@ def current_accounts():
             'cookieReady': True,
             'cookieCount': 1,
             'usable': True,
+            # 只有 xhs_profile_ready() 为真才走到这里,即本机登录态可用。
+            # 缺少这三个字段时,客户端合并会回落到中心服记录;账号矩阵登录直连
+            # 本地引擎、不回报中心服,于是登录成功也会显示离线。
+            'online': True,
+            'status': 'online',
+            'needLogin': False,
             'capabilities': xhs_caps,
         }))
     return accounts
@@ -4966,17 +5062,26 @@ def _xhs_safety_usage(state, account_id, now=None):
         usage.setdefault(action + "Count", 0)
     usage.setdefault("lastActionAt", 0)
     usage.setdefault("lastAction", "")
+    if not isinstance(usage.get("lastActionAtBy"), dict):
+        usage["lastActionAtBy"] = {}
     usage.setdefault("paused", False)
     usage.setdefault("pausedReason", "")
     return usage
 
 
-def _xhs_safety_snapshot(account_id, usage=None, cfg=None, now=None):
+def _xhs_safety_snapshot(account_id, usage=None, cfg=None, now=None, action=""):
     cfg = cfg or load_risk_config()
     if usage is None:
         state = load_xhs_safety_state()
         usage = _xhs_safety_usage(state, account_id, now=now)
-    last = float(usage.get("lastActionAt") or 0)
+    # 间隔冷却按动作类型分别计算:search/download/comment/publish 各自独立,
+    # 一次搜索不再阻塞紧随其后的下载。action 为空时回退到全局最近动作(兼容旧调用)。
+    action = str(action or "").strip()
+    by = usage.get("lastActionAtBy") if isinstance(usage.get("lastActionAtBy"), dict) else {}
+    if action:
+        last = float(by.get(action) or 0)
+    else:
+        last = float(usage.get("lastActionAt") or 0)
     interval = int(cfg.get("minInterval") or 0)
     cooldown_left = max(0, int(interval - (float(time.time() if now is None else now) - last))) if last and interval else 0
     return {
@@ -5007,7 +5112,7 @@ def xhs_safety_preflight(action, account_id="xhs-self", now=None, dry_run=False)
     cfg = load_risk_config()
     state = load_xhs_safety_state()
     usage = _xhs_safety_usage(state, account_id, now=now)
-    snapshot = _xhs_safety_snapshot(account_id, usage=usage, cfg=cfg, now=now)
+    snapshot = _xhs_safety_snapshot(account_id, usage=usage, cfg=cfg, now=now, action=action)
     if usage.get("paused"):
         return {"ok": False, "blocked": True, "error": "xhs_safety_paused", "safety": snapshot}
     if action == "publish" and int(usage.get("publishCount") or 0) >= int(cfg.get("dailyPublish") or 0):
@@ -5109,6 +5214,12 @@ def xhs_safety_record(action, account_id, result, now=None, dry_run=False):
     ts = time.time() if now is None else float(now)
     usage["lastActionAt"] = ts
     usage["lastAction"] = action
+    if action:
+        by = usage.get("lastActionAtBy")
+        if not isinstance(by, dict):
+            by = {}
+        by[action] = ts
+        usage["lastActionAtBy"] = by
     success = bool(isinstance(result, dict) and (result.get("ok") or result.get("published") or result.get("clicked")))
     if success and action in XHS_SAFETY_ACTIONS:
         key = action + "Count"
@@ -5125,7 +5236,7 @@ def xhs_safety_record(action, account_id, result, now=None, dry_run=False):
         usage["pausedReason"] = reason.strip()
         usage["pausedAt"] = ts
     save_xhs_safety_state(state)
-    return {"ok": True, "safety": _xhs_safety_snapshot(account_id, usage=usage, now=now)}
+    return {"ok": True, "safety": _xhs_safety_snapshot(account_id, usage=usage, now=now, action=action)}
 
 
 def run_publish(material, account_id, dry_run, title_override=None, platform=None):
@@ -5244,6 +5355,16 @@ def json_response(handler, payload, status=200):
     body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
+    handler.send_header('Content-Length', str(len(body)))
+    send_cors_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def html_response(handler, html_body, status=200):
+    body = str(html_body or '').encode('utf-8')
+    handler.send_response(status)
+    handler.send_header('Content-Type', 'text/html; charset=utf-8')
     handler.send_header('Content-Length', str(len(body)))
     send_cors_headers(handler)
     handler.end_headers()
@@ -5578,6 +5699,19 @@ def run_xhs_login(job_id, fresh=False):
             'fresh': bool(fresh),
             'error': None if logged else 'login_not_detected',
         }
+        if logged:
+            # 账号列表就绪判定 xhs_profile_ready() 无 marker 时只认强 cookie;
+            # 主站/DOM 判定登录成功但 profile 缺强 cookie 时会显示 0 个授权账号。
+            # 与云登录路径(_read_login_state)一致地写入 marker,保证登录态即就绪。
+            try:
+                _save_json(os.path.join(DATA_DIR, 'xhs_auth_state.json'), {
+                    'loggedIn': True,
+                    'cookieCount': res.get('cookieCount', 0),
+                    'profileDir': xhs_profile,
+                    'savedAt': time.time(),
+                })
+            except Exception:
+                pass
     except Exception as e:
         if fresh and bak:
             _profile_restore_aside(xhs_profile, bak)
@@ -7083,6 +7217,36 @@ class Handler(BaseHTTPRequestHandler):
         json_response(self, {'ok': True})
 
     def handle_multipart(self, path):
+        if path in ('/api/replacement/video/start', '/api/replacement/video/prepare', '/api/replacement/note/start'):
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            fields, files = parse_multipart(self)
+            if path == '/api/replacement/video/prepare':
+                result = replacement_web.prepare_video_job(DATA_DIR, fields, files)
+                task_type = 'video'
+                ok_status = 202
+            elif path == '/api/replacement/video/start':
+                # Compat alias: creates a queued Phase 0 skeleton only; it can never
+                # bypass plan confirmation because it does not execute generation.
+                result = replacement_web.start_video_job(DATA_DIR, fields, files)
+                task_type = 'video'
+                ok_status = 200
+            else:
+                result = replacement_web.start_note_job(DATA_DIR, fields, files)
+                task_type = 'note'
+                ok_status = 200
+            status = ok_status if result.get('ok') else (result.get('statusCode') or 400)
+            json_log(
+                logger,
+                'replacement_web_job_started',
+                level='info',
+                endpoint=path,
+                taskType=task_type,
+                jobId=result.get('jobId') or '',
+                ok=bool(result.get('ok')),
+                error=result.get('error') or '',
+            )
+            return json_response(self, result, status)
         fields, files = parse_multipart(self)
         if path == '/api/library/upload':
             title = (fields.get('title') or '').strip()
@@ -7137,14 +7301,181 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return json_response(self, {'ok': False, 'error': str(e)}, 500)
 
+    def serve_replacement_file(self, qs):
+        task_type = (qs.get('taskType') or [''])[0]
+        job_id = (qs.get('jobId') or [''])[0]
+        filename = (qs.get('filename') or [''])[0]
+        fp, error, status = replacement_web.upload_file_path(DATA_DIR, task_type, job_id, filename)
+        if error:
+            return json_response(self, {'ok': False, 'error': error}, status)
+        ctype = mimetypes.guess_type(fp)[0] or 'application/octet-stream'
+        if not str(ctype or '').startswith('image/'):
+            return json_response(self, {'ok': False, 'error': 'unsupported_file_type'}, 400)
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            send_cors_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_file_read_failed', exc=e, taskType=task_type, jobId=job_id)
+            return json_response(self, {'ok': False, 'error': 'replacement_file_read_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
+
+    def serve_replacement_video_download(self, qs):
+        job_id = (qs.get('jobId') or qs.get('id') or [''])[0]
+        filename = (qs.get('filename') or [''])[0]
+        fp, error, status = replacement_web.final_media_path(DATA_DIR, job_id, filename)
+        if error:
+            return json_response(self, {'ok': False, 'error': error}, status)
+        ctype = mimetypes.guess_type(fp)[0] or 'application/octet-stream'
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Disposition', 'attachment; filename="%s"' % os.path.basename(fp))
+            self.send_header('Cache-Control', 'no-store')
+            send_cors_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_download_failed', exc=e, jobId=job_id)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_download_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
+
+    def serve_replacement_video_media(self, qs):
+        job_id = (qs.get('jobId') or qs.get('id') or [''])[0]
+        segment_index = (qs.get('segmentIndex') or qs.get('segment_index') or [''])[0]
+        kind = (qs.get('kind') or [''])[0]
+        fp, media_type, error, status = replacement_web.video_segment_media_path(DATA_DIR, job_id, segment_index, kind)
+        if error:
+            return json_response(self, {'ok': False, 'error': error}, status)
+        ctype = mimetypes.guess_type(fp)[0] or ('video/mp4' if media_type == 'video' else 'application/octet-stream')
+        if not str(ctype or '').startswith(media_type + '/'):
+            return json_response(self, {'ok': False, 'error': 'unsupported_file_type'}, 400)
+        try:
+            with open(fp, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            send_cors_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_media_failed', exc=e, jobId=job_id, kind=kind)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_media_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId')}, 500)
+
+    def add_replacement_video_to_library(self, body):
+        body = body if isinstance(body, dict) else {}
+        job_id = str(body.get('jobId') or body.get('id') or '')
+        fp, meta, error, status = replacement_web.video_job_library_source(DATA_DIR, job_id)
+        if error:
+            return json_response(self, {'ok': False, 'error': error, 'stage': 'save_library'}, status)
+        # Idempotent: a job already in the library returns its existing material id.
+        if meta.get('existingMaterialId'):
+            return json_response(self, {'ok': True, 'id': meta['existingMaterialId'], 'alreadyAdded': True})
+        try:
+            mid = uuid.uuid4().hex
+            mdir = os.path.join(MATERIALS_DIR, mid)
+            os.makedirs(mdir, exist_ok=True)
+            safe = os.path.basename(meta.get('filename') or '') or 'replacement.mp4'
+            dst = os.path.join(mdir, safe)
+            _copy_material_file(fp, dst)
+            title = str(body.get('title') or '').strip() or ('同款替换成片 %s' % (meta.get('jobId') or ''))
+            item = {
+                'id': mid, 'title': title, 'type': 'video',
+                'files': [safe], 'urls': ['/api/library/file/%s/%s' % (mid, safe)],
+                'published': 0, 'createdAt': time.time(),
+                'platform': meta.get('platform') or '',
+                'source': '同款替换生成', 'replacementJobId': meta.get('jobId') or '',
+            }
+            with STATE_LOCK:
+                lib = load_library()
+                lib.insert(0, item)
+                save_library(lib)
+            replacement_web.mark_video_added_to_library(DATA_DIR, job_id, mid)
+            json_log(
+                logger, 'replacement_video_added_to_library', level='info',
+                endpoint='/api/replacement/video/save-to-library',
+                jobId=meta.get('jobId') or '', materialId=mid, platform=meta.get('platform') or '',
+            )
+            return json_response(self, {'ok': True, 'id': mid, 'material': {
+                'id': mid, 'title': title, 'type': 'video',
+                'platform': item['platform'], 'createdAt': item['createdAt'],
+            }})
+        except Exception as e:
+            raw_log = json_log(logger, 'replacement_video_save_library_failed', exc=e, jobId=job_id)
+            return json_response(self, {'ok': False, 'error': 'replacement_video_save_library_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId'), 'stage': 'save_library'}, 500)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
+        if path == '/replacement':
+            if not origin_allowed(self.headers.get('Origin') or ''):
+                return json_response(self, {'ok': False, 'error': 'origin_not_allowed'}, 403)
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            json_log(
+                logger,
+                'replacement_web_page_opened',
+                level='info',
+                endpoint=path,
+                authorized=bool(request_authorized(self)),
+            )
+            return html_response(self, replacement_web.replacement_page_html())
         if not ensure_agent_request(self, path):
             return
         if (path.startswith('/api/xhs') or path.startswith('/api/xhs-note-replacement')) and not xhs_enabled():
             return json_response(self, _xhs_disabled(route=path), 404)
+        if path in ('/api/replacement/video/job', '/api/replacement/note/job'):
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            task_type = 'video' if path == '/api/replacement/video/job' else 'note'
+            job_id = (qs.get('id') or qs.get('jobId') or [''])[0]
+            job = replacement_web.load_job(DATA_DIR, task_type, job_id)
+            if not job:
+                return json_response(self, {'ok': False, 'error': 'replacement_job_not_found'}, 404)
+            if task_type == 'video':
+                return json_response(self, replacement_web.video_job_response(job))
+            return json_response(self, replacement_web.job_response(job))
+        if path == '/api/replacement/video/handoff':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            handoff_id = (qs.get('id') or qs.get('handoffId') or [''])[0]
+            handoff = replacement_web.load_video_handoff(DATA_DIR, handoff_id)
+            if not handoff:
+                return json_response(self, {'ok': False, 'error': 'replacement_video_handoff_not_found'}, 404)
+            json_log(
+                logger,
+                'replacement_video_handoff_loaded',
+                level='info',
+                endpoint=path,
+                handoffId=handoff_id,
+            )
+            return json_response(self, replacement_web.handoff_response(handoff))
+        if path == '/api/replacement/video/options':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return json_response(self, {'ok': True, **replacement_web.video_replacement_options()})
+        if path == '/api/replacement/file':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return self.serve_replacement_file(qs)
+        if path == '/api/replacement/video/download':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return self.serve_replacement_video_download(qs)
+        if path == '/api/replacement/video/media':
+            if not replacement_web_enabled():
+                return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+            return self.serve_replacement_video_media(qs)
         if path in ('/api/health', '/api/agent/status'):
             authorized = request_authorized(self)
             if not authorized:
@@ -7291,6 +7622,82 @@ class Handler(BaseHTTPRequestHandler):
         if payload_uses_xhs(body) and not xhs_enabled():
             return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
         try:
+            if path in (
+                    '/api/replacement/video/execute',
+                    '/api/replacement/video/retry',
+                    '/api/replacement/video/concat',
+                    '/api/replacement/video/cancel',
+                    '/api/replacement/video/regenerate-frame'):
+                if not replacement_web_enabled():
+                    return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+                job_id = str(body.get('jobId') or body.get('id') or '')
+                if path == '/api/replacement/video/execute':
+                    overrides = body.get('overrides') if isinstance(body.get('overrides'), dict) else {}
+                    result = replacement_web.execute_video_job(DATA_DIR, job_id, overrides)
+                elif path == '/api/replacement/video/retry':
+                    segment_indices = body.get('segmentIndices') or body.get('segment_indices') or []
+                    result = replacement_web.retry_video_job(DATA_DIR, job_id, segment_indices)
+                elif path == '/api/replacement/video/concat':
+                    result = replacement_web.concat_video_job(DATA_DIR, job_id)
+                elif path == '/api/replacement/video/regenerate-frame':
+                    result = replacement_web.regenerate_frame_video_job(
+                        DATA_DIR,
+                        job_id,
+                        body.get('segmentIndex') if body.get('segmentIndex') is not None else body.get('segment_index'),
+                        body.get('frameKind') or body.get('frame_kind'),
+                    )
+                else:
+                    result = replacement_web.cancel_video_job(DATA_DIR, job_id)
+                status = 202 if result.get('ok') else (result.get('statusCode') or 400)
+                json_log(
+                    logger,
+                    'replacement_video_lifecycle',
+                    level='info',
+                    endpoint=path,
+                    jobId=job_id,
+                    status=result.get('status') or '',
+                    ok=bool(result.get('ok')),
+                    error=result.get('error') or '',
+                )
+                return json_response(self, result, status)
+
+            if path == '/api/replacement/video/save-to-library':
+                if not replacement_web_enabled():
+                    return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+                return self.add_replacement_video_to_library(body)
+
+            if path == '/api/replacement/note/save-draft':
+                if not replacement_web_enabled():
+                    return json_response(self, replacement_web.replacement_disabled_payload(), 404)
+                if not xhs_note_replacement.feature_enabled():
+                    return json_response(self, {'ok': False, 'error': 'feature_disabled'}, 404)
+                try:
+                    payload, status = save_xhs_note_draft_payload(body)
+                    if payload.get('ok'):
+                        web_job = replacement_web.mark_note_draft_saved(
+                            DATA_DIR,
+                            str(body.get('jobId') or (payload.get('job') or {}).get('id') or ''),
+                            payload.get('id') or '',
+                            xhs_job=payload.get('job') if isinstance(payload.get('job'), dict) else None,
+                            material=payload.get('material') if isinstance(payload.get('material'), dict) else None,
+                        )
+                        if web_job:
+                            payload['job'] = replacement_web.job_response(web_job)
+                    json_log(
+                        logger,
+                        'replacement_note_draft_saved',
+                        level='info',
+                        endpoint=path,
+                        jobId=str(body.get('jobId') or ''),
+                        draftMaterialId=payload.get('id') or '',
+                        ok=bool(payload.get('ok')),
+                        error=payload.get('error') or '',
+                    )
+                    return json_response(self, payload, status)
+                except Exception as exc:
+                    raw_log = json_log(logger, 'replacement_note_save_draft_failed', exc=exc, endpoint=path)
+                    return json_response(self, {'ok': False, 'error': 'replacement_note_save_draft_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId'), 'stage': 'save_draft'}, 500)
+
             if path == '/api/xhs-note-replacement/template':
                 if not xhs_note_replacement.feature_enabled():
                     return json_response(self, {'ok': False, 'error': 'feature_disabled'}, 404)
@@ -7355,90 +7762,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not xhs_note_replacement.feature_enabled():
                     return json_response(self, {'ok': False, 'error': 'feature_disabled'}, 404)
                 try:
-                    job = body.get('job') if isinstance(body.get('job'), dict) else None
-                    if not job and body.get('jobId'):
-                        job = xhs_note_replacement.load_job(DATA_DIR, str(body.get('jobId') or ''))
-                    if not job:
-                        return json_response(self, {'ok': False, 'error': 'not_found'}, 404)
-                    if 'selectedCopyIndex' in body:
-                        job['selectedCopyIndex'] = int(body.get('selectedCopyIndex') or 0)
-                    copy_override = body.get('copyOverride') if isinstance(body.get('copyOverride'), dict) else {}
-                    if copy_override:
-                        selected_idx = int(job.get('selectedCopyIndex') or 0)
-                        candidates = job.get('copyCandidates') if isinstance(job.get('copyCandidates'), list) else []
-                        while len(candidates) <= selected_idx:
-                            candidates.append({})
-                        current_copy = candidates[selected_idx] if isinstance(candidates[selected_idx], dict) else {}
-                        edited = dict(current_copy)
-                        if 'title' in copy_override:
-                            edited['title'] = str(copy_override.get('title') or '').strip()
-                        if 'body' in copy_override:
-                            edited['body'] = str(copy_override.get('body') or '').strip()
-                        if 'tags' in copy_override:
-                            raw_tags = copy_override.get('tags')
-                            if isinstance(raw_tags, str):
-                                raw_tags = re.split(r'[,，\s]+', raw_tags)
-                            tags = []
-                            for tag in raw_tags if isinstance(raw_tags, list) else []:
-                                text = str(tag or '').strip()
-                                if not text:
-                                    continue
-                                if not text.startswith('#'):
-                                    text = '#' + text
-                                if text not in tags:
-                                    tags.append(text)
-                            edited['tags'] = tags
-                        candidates[selected_idx] = edited
-                        job['copyCandidates'] = candidates
-                    material_error = xhs_note_replacement.replacement_material_error(job)
-                    if material_error:
-                        return json_response(self, {'ok': False, 'error': material_error, 'stage': 'save_draft'}, 400)
-                    source_paths = []
-                    missing_slots = []
-                    for mapping in job.get('slotMappings') or []:
-                        fp = str(mapping.get('filePath') or '').strip()
-                        if not fp:
-                            missing_slots.append(mapping.get('slotIndex'))
-                            continue
-                        src = fp
-                        if not os.path.isabs(src):
-                            src = os.path.join(MATERIALS_DIR, os.path.basename(src))
-                        if not os.path.isfile(src) or not validate_image_file(src).get('ok'):
-                            missing_slots.append(mapping.get('slotIndex'))
-                            continue
-                        source_paths.append((mapping, src))
-                    expected_slots = len(((job.get('template') or {}).get('imageSlots') or []))
-                    if missing_slots or not source_paths or (expected_slots and len(source_paths) < expected_slots):
-                        return json_response(self, {
-                            'ok': False,
-                            'error': 'xhs_note_replacement_missing_images',
-                            'stage': 'save_draft',
-                            'missingSlots': [x for x in missing_slots if x],
-                        }, 400)
-                    mid = uuid.uuid4().hex
-                    mdir = os.path.join(MATERIALS_DIR, mid)
-                    os.makedirs(mdir, exist_ok=True)
-                    saved = []
-                    used_names = set()
-                    for idx, (_mapping, src) in enumerate(source_paths, start=1):
-                        safe = _slot_material_filename(src, _mapping, idx, used_names)
-                        dst = os.path.join(mdir, safe)
-                        _copy_material_file(src, dst)
-                        saved.append(safe)
-                    payload = xhs_note_replacement.build_draft_material_payload(job, saved)
-                    payload.update({
-                        'id': mid,
-                        'title': payload.get('title') or (job.get('template') or {}).get('originalCopy', {}).get('title') or '图文同款草稿',
-                        'urls': ['/api/library/file/%s/%s' % (mid, fn) for fn in saved],
-                        'createdAt': time.time(),
-                    })
-                    with STATE_LOCK:
-                        lib = load_library()
-                        lib.insert(0, payload)
-                        save_library(lib)
-                    job.update({'status': 'draft', 'publishDraftMaterialId': mid, 'updatedAt': time.time()})
-                    xhs_note_replacement.save_job(DATA_DIR, job)
-                    return json_response(self, {'ok': True, 'id': mid, 'material': payload, 'job': job})
+                    payload, status = save_xhs_note_draft_payload(body)
+                    return json_response(self, payload, status)
                 except Exception as exc:
                     raw_log = json_log(logger, 'xhs_note_save_failed', exc=exc, endpoint=path)
                     return json_response(self, {'ok': False, 'error': 'xhs_note_save_failed', 'errorId': (json.loads(raw_log) or {}).get('errorId'), 'stage': 'save_draft'}, 500)
@@ -7967,6 +8292,7 @@ class Handler(BaseHTTPRequestHandler):
                                 'files': [],
                             })
                         work, save_path = download_douyin_work_with_refresh(auth, url, save_choice)
+                        files = list_download_files(save_path)
                     except DouyinDetailNetworkError as exc:
                         return json_response(self, {
                             'ok': False,
@@ -7984,7 +8310,26 @@ class Handler(BaseHTTPRequestHandler):
                             'stage': 'download',
                             'context': exc.context,
                         }, status)
-                    files = list_download_files(save_path)
+                    except OSError as exc:
+                        # Defense in depth: an unexpected filesystem error (e.g. an
+                        # invalid save-path name -> WinError 267/123) must surface as
+                        # a stable contract code, never as a raw str(e)+traceback that
+                        # the client would echo verbatim to the user.
+                        raw_log = json_log(
+                            logger,
+                            'download_unexpected_failed',
+                            exc=exc,
+                            endpoint=path,
+                            platform='douyin',
+                            source_url=url,
+                        )
+                        return json_response(self, {
+                            'ok': False,
+                            'accountId': account_id,
+                            'error': 'download_exception',
+                            'errorId': (json.loads(raw_log) or {}).get('errorId'),
+                            'stage': 'download',
+                        }, 502)
                     try:
                         material = import_download_to_library(save_path, work, source_url=url, platform='douyin')
                     except Exception as exc:
@@ -8035,7 +8380,25 @@ class Handler(BaseHTTPRequestHandler):
                 gate = xhs_collection_account_gate("download", account_id, guest_mode, confirmed)
                 if not gate.get("ok"):
                     return json_response(self, {'ok': False, **gate}, 429)
-                res = xhs_download_note(url, BASE_PATH['media'], data_dir=DATA_DIR, guest_mode=guest_mode)
+                try:
+                    res = xhs_download_note(url, BASE_PATH['media'], data_dir=DATA_DIR, guest_mode=guest_mode)
+                except OSError as exc:
+                    # Defense in depth: keep an unexpected filesystem error from
+                    # leaking a raw str(e)+traceback to the client (see douyin path).
+                    raw_log = json_log(
+                        logger,
+                        'download_unexpected_failed',
+                        exc=exc,
+                        endpoint=path,
+                        platform='xhs',
+                        source_url=url,
+                    )
+                    return json_response(self, {
+                        'ok': False,
+                        'error': 'download_exception',
+                        'errorId': (json.loads(raw_log) or {}).get('errorId'),
+                        'stage': 'download',
+                    }, 502)
                 xhs_log_guest_collection_block("download", res, url=url)
                 record = xhs_safety_record("download", account_id, res) if not guest_mode else {"safety": gate.get("safety")}
                 if isinstance(res, dict):

@@ -673,7 +673,7 @@
 | `video_replace_progress` | 后台任务 -> 同款替换页 | 更新 `principal_video_edit`、`editing`、`digital_human`、`face_swapping`、`audio_muxing`、`qc`、`awaiting_review` 阶段 |
 | `video_replace_done` | 后台任务 -> 同款替换页 | 返回成片路径、资产 ID、音频检查、人工审核状态、失败片段和敏感素材清理结果 |
 
-旧 LK888 链路继续通过中心服 `/lk888` 反代调用媒体模型，客户端不保存真实 LK888 Key。`replacementJob` 还保存 `principalActor`、`personReferencePaths`、`personReferenceUrls`、`personReferenceFullBodyConfirmed`、`principalReplacementMode`、任务级 `model` 和 `sourceReplacementEntities`；旧 `faceSourcePaths` / `faceSourceUrls` 字段继续读取兼容。`sourceReplacementEntities` 由当前 `breakdownAnalysis.report/visual/frameNotes/ocr/transcript` 动态提取，记录原片人物、产品和场景槽位，不能把“展厅/门店”固定解释为汽车类目；开始生成或单段重试会重新计算，避免旧任务 JSON 里的错误槽位继续污染 QC。`principalReplacementMode=source_video_edit` 时，非口播请求默认使用 `happyhorse-video-edit`（或 `VIDEO_REPLACE_PRINCIPAL_MODEL`），如果页面选择了同款替换模型则由 `replacementJob.model` 覆盖，并保留源视频字段；LK888 “SD 2.0 全能参考”的真实模型标识为 `kwvideo-v2-quannengcankao`，云灵页面卡片 ID `76` 不写入生成请求。请求字段名集合写入 `segment.remoteRequestFields`，不写 URL 内容。每个 `segment` 保存 `segmentType`、`script`、`sourceSegmentUrl`、`editedVideoPath`、`audioStatus`、`qcStatus`、`qcWarnings`、`reviewApproved`、实际使用的 `model` 和 `errorId`。声音来源保存为 `audioMode=auto|tts|uploaded`：`auto` 使用生成视频自带声音且不回填原片声音，历史 `source/origin/original/source_audio` 会兼容映射为 `auto`；`tts` 使用 `voiceId` 按片段口播稿生成配音，`uploaded` 使用 `replacementAudioPath/replacementAudioUrl` 在最终成片阶段替换整条音轨且不做音色克隆。主角视觉 QC 另保存 `principalReplacementMatch`、`fullBodyAppearanceMatch`、`otherSubjectsPreserved`、`motionPreserved`；任一为否时硬阻断。任务状态只落本地 JSON，不新增公开 HTTP API 或数据库表。
+旧 LK888 链路继续通过中心服 `/lk888` 反代调用媒体模型，客户端不保存真实 LK888 Key。`replacementJob` 还保存 `principalActor`、`personReferencePaths`、`personReferenceUrls`、`personReferenceFullBodyConfirmed`、`principalReplacementMode`、任务级 `model` 和 `sourceReplacementEntities`；旧 `faceSourcePaths` / `faceSourceUrls` 字段继续读取兼容。`sourceReplacementEntities` 由当前 `breakdownAnalysis.report/visual/frameNotes/ocr/transcript` 动态提取，记录原片人物、产品和场景槽位，不能把“展厅/门店”固定解释为汽车类目；开始生成或单段重试会重新计算，避免旧任务 JSON 里的错误槽位继续污染 QC。`principalReplacementMode=source_video_edit` 时，非口播请求默认使用 `happyhorse-video-edit`（或 `VIDEO_REPLACE_PRINCIPAL_MODEL`），如果页面选择了同款替换模型则由 `replacementJob.model` 覆盖，并保留源视频字段；（`SD 2.0 全能参考`/`kwvideo-v2-quannengcankao` 已于 2026-08-10 从同款替换下拉框移除，非主角模式不再接受该模型。）请求字段名集合写入 `segment.remoteRequestFields`，不写 URL 内容。每个 `segment` 保存 `segmentType`、`script`、`sourceSegmentUrl`、`editedVideoPath`、`audioStatus`、`qcStatus`、`qcWarnings`、`reviewApproved`、实际使用的 `model` 和 `errorId`。声音来源保存为 `audioMode=auto|tts|uploaded`：`auto` 使用生成视频自带声音且不回填原片声音，历史 `source/origin/original/source_audio` 会兼容映射为 `auto`；`tts` 使用 `voiceId` 按片段口播稿生成配音，`uploaded` 使用 `replacementAudioPath/replacementAudioUrl` 在最终成片阶段替换整条音轨且不做音色克隆。主角视觉 QC 另保存 `principalReplacementMatch`、`fullBodyAppearanceMatch`、`otherSubjectsPreserved`、`motionPreserved`；任一为否时硬阻断。任务状态只落本地 JSON，不新增公开 HTTP API 或数据库表。
 
 主角模式的最小任务字段示例：
 
@@ -825,6 +825,132 @@ LK888 实际扣费规则：凡是通过中心服 `/lk888/*` 或同款替换漫�
 `/api/local-browser/task` 支持 `douyin.comment.publish` 任务类型，中心服会转发到本地执行器 `/api/douyin/comment/publish`。payload 可携带 `accountId`、`awemeId`/`targetId`、`content`、`replyId`、`safeMode`、`preflight`、`force` 和 `channel`。抖音评论会在任何 API/UI 通道前读取 `risk_config.json.dailyComment/minInterval` 与 `comment_risk_state.json` 的账号级状态；命中每日评论上限、最小间隔冷却或平台风险暂停时，任务结果返回 `ok=false`、`skipped=true`、后端机器 `error`（如 `douyin_daily_comment_limit`、`douyin_comment_cooldown`、`douyin_comment_risk_cooldown`）、`status`、`cooldownLeft`、`safety` 以及中文 `message/userMessage`。这类硬门禁不被 `force=true` 或 `safeMode=false` 绕过；`force` 只跳过浏览器 DOM 预检，`safeMode=false` 只关闭评论文案清洗与 DOM 预检。发布成功后按 `accountId` 更新当天 `commentCount/day`、最近评论时间和兼容全局字段，供风控中心“今日评论/冷却”列显示；风险暂停按账号隔离，持久化的风险响应只保留安全字段和 URL/正文指纹。
 
 这些接口的响应 Schema 分别为 `AccountBalance`、`BillingAnalytics`、`LegacyBillingLedgerResponse`、`BillingLedgerResponse`、`LocalBrowserStatus`、`LocalBrowserTask`、`CentralNodes`、`EnterpriseUsage` 和 `EnterpriseTaskCenter`。OpenAPI 的 Ledger 200 使用互斥 `oneOf`：仅历史分支保留顶层 `additionalProperties: true` 和任意原始行字段；严格参数化分支与运行时 Draft 2020-12 schema 一致，要求分页且禁止未声明字段。
+
+## 本地网页替换 MVP
+
+运行单元：本地执行引擎 `127.0.0.1:9081`。功能开关为 `MATRIX_REPLACEMENT_WEB_ENABLED=1`，默认关闭；关闭时 `GET /replacement` 与 `/api/replacement/*` 返回 HTTP 404、`replacement_web_disabled`。`GET /replacement` 只返回本地页面外壳。**2026-08-07 起客户端不再提供任何“打开网页版替换”按钮**（“同款替换”和“图文同款”两页的入口和 `open_replacement_web_page()` 一并删除），两种同款替换都只在客户端内完成；网页版仅剩手工 `/replacement#token=...` 这条本地排查兜底路径，不要发给客户；真正创建和查询 job 的 `/api/replacement/*` 仍受 `MATRIX_AGENT_TOKEN_AUTH` 和本机 agent token 保护。
+
+### GET /replacement
+
+返回 `text/html; charset=utf-8`，首屏就是替换操作台，不做营销落地页。页面包含“视频替换”和“图文替换”两个页签，直接提交到本机 `/api/replacement/video/start` 与 `/api/replacement/note/start`。当本机 token 鉴权开启时，页面从输入框或 URL hash（`#token=` / `#agentToken=`，不会发到服务端 query）写入 `sessionStorage`，提交时携带 `X-Matrix-Agent-Token`。本地客户端入口会生成 `/replacement#token=...&user=...`；视频同款替换页在已经载入分解结果时还会追加 `handoffId=...`，供网页读取当前本地视频分解上下文。`user` 只包含脱敏 `userId/displayName/orgId/account/appRole/roleScope`，不包含中心服 session、手机号、Cookie 或平台授权；页面读取 hash 后清理地址栏。
+
+Phase 0 只跑本地 job skeleton：视频替换创建 `rvw_...` queued job；图文替换创建 `xnr_...` preview job，并复用现有图文同款逻辑生成候选文案。视频 handoff 只把本地客户端已经持有的分解摘要绑定到网页 job，不提交真实生成。页面会在生成后读取本地 job，展示图片槽位、候选文案，并允许用户选择一套文案后编辑标题、正文和标签。该 MVP 不触发真实 LK888、远程 AI Canvas、模型生成、发布或扣费。页面会把缺 token、401、校验失败、非 JSON 响应和网络错误转成中文提示；视频提交成功时显示“本地视频替换任务已创建”，并说明当前客户预览版暂不执行真实视频生成。
+
+图文 job 响应的 `files[].previewUrl` 是相对路径 `/api/replacement/file?...`，只用于当前本机页面加载上传图片缩略图。页面通过 `fetch` 携带 `X-Matrix-Agent-Token` 后转换为 blob URL 显示，不把 token 放进 query，也不会在 JSON 中返回本地 `filePath`。
+
+### POST /api/replacement/video/start
+
+请求为 `multipart/form-data`：
+
+```text
+sourceUrl=https://example.com/video/1
+handoffId=rwh_...  # optional; from native video replacement page
+characterImage=<binary image, required>
+productImage=<binary image, optional>
+sceneImage=<binary image, optional>
+script=<optional text>
+sellingPoints=<optional text>
+```
+
+`sourceUrl` 只接受 `http/https`；如果请求携带有效 `handoffId`，可不提交 `sourceUrl`，任务会绑定到本地客户端写入的分解上下文。带 userinfo 凭据、本地路径、`data:` URL 或无法解析的链接会返回 HTTP 400、`replacement_invalid_source_url`；找不到或过期的 handoff 返回 `replacement_video_handoff_not_found`。任务 JSON 对外只返回脱敏后的 host/pathHash、文件名、文件大小和 `sourceContext` 摘要，不返回本地视频绝对路径、查询串、Cookie、Token、Authorization、Bearer、签名 URL 或原始文件内容。
+
+成功响应示例：
+
+```json
+{
+  "ok": true,
+  "jobId": "rvw_...",
+  "taskType": "video",
+  "status": "queued"
+}
+```
+
+缺少主角图返回 HTTP 400、`replacement_video_missing_character_image`。
+
+### GET /api/replacement/video/handoff
+
+按 `handoffId=rwh_...` 查询本地客户端写入的视频分解交接摘要。该接口仍要求本机 agent token；关闭功能开关返回 `replacement_web_disabled`，找不到或过期返回 HTTP 404、`replacement_video_handoff_not_found`。成功响应只包含 `source`、`sourceVideo.available/pathHash`、`analysis.duration/transcriptSegmentCount/hasBreakdownAnalysis`、`platform`、脱敏用户信息和过期时间，不返回 `sourceVideoPath` 或来源链接查询串。
+
+### GET /api/replacement/video/job
+
+按 `jobId=rvw_...` 查询本地视频替换 job。找不到任务返回 HTTP 404、`replacement_job_not_found`。成功响应使用 `ReplacementJobResponse`，包含 `ok/jobId/taskType/status/source/sourceContext/files/createdAt/updatedAt` 等脱敏字段。
+
+### POST /api/replacement/note/start
+
+请求为 `multipart/form-data`：
+
+```text
+sourceUrl=https://www.xiaohongshu.com/explore/abc
+replacementImages=<one or more binary images, required>
+businessName=<required text>
+region=<optional text>
+sellingPoints=<optional text>
+audience=<optional text>
+tone=<optional text>
+```
+
+链接规则与脱敏规则同视频接口。成功时返回 `xnr_...` job，状态为 `preview`，并带对象数组结构的 `copyCandidates` 候选文案和 `slotMappings` 图片槽位映射；缺少替换图返回 HTTP 400、`replacement_note_missing_images`。
+
+### POST /api/replacement/note/save-draft
+
+将 `/replacement` 图文替换预览保存为本机素材库中的 `type=image_note` 草稿。网页会把当前选择的 `selectedCopyIndex` 和用户编辑后的 `copyOverride` 一起提交。该接口复用既有 `/api/xhs-note-replacement/save-draft` 的本地草稿素材流程，只复制已校验的上传图片到本地素材库并写回 `draftMaterialId`；不发布小红书、不同步中心素材库、不调用 LK888、不触发计费。
+
+请求为 `application/json`：
+
+```json
+{
+  "jobId": "xnr_...",
+  "selectedCopyIndex": 0,
+  "copyOverride": {
+    "title": "可选标题",
+    "body": "可选正文",
+    "tags": ["#可选标签"]
+  }
+}
+```
+
+成功返回 `ok=true`、本机素材 `id`、`material` 和更新后的兼容 `job`。找不到任务返回 HTTP 404、`not_found`；任一图片槽位没有真实可读图片文件时返回 HTTP 400、`xhs_note_replacement_missing_images`。
+
+### GET /api/replacement/note/job
+
+按 `jobId=xnr_...` 查询本地图文替换预览 job。找不到任务返回 HTTP 404、`replacement_job_not_found`。V1 不发布小红书笔记；需要真实发布时仍按“小红书图文同款”既有接口和平台开关推进。
+
+### GET /api/replacement/file
+
+按 `taskType=note&jobId=xnr_...&filename=<stored image>` 读取当前本地 job 上传目录里的图片缩略图。该接口与其他 `/api/replacement/*` 一样受本机 agent token 保护，并由 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 控制；只允许图片扩展名，只能读取 `replacement_web_uploads/note/<jobId>/` 下的文件，`../`、反斜杠穿越、非图片扩展名或不存在文件会返回 `bad_path`、`forbidden`、`unsupported_file_type` 或 `not_found`。响应是图片字节和 `Cache-Control: no-store`，不返回本地绝对路径。
+
+可观测性：页面打开记录 `replacement_web_page_opened` 结构化日志；创建 job 记录 `replacement_web_job_started`，保存草稿记录 `replacement_note_draft_saved`，只包含 endpoint、taskType/jobId/draftMaterialId、ok 和稳定 error。回滚时关闭 `MATRIX_REPLACEMENT_WEB_ENABLED` 即可隐藏网页和 API；代码回滚恢复 `backend/api_server.py`、`backend/replacement_web.py`、`backend/platform_features.py`、OpenAPI/API 文档和本测试文件。
+
+### 视频替换生命周期、来源模式与轮询
+
+Qt 原生页面与 `/replacement` 网页共用同一套本地 `ReplacementService`，`job.json` 是唯一跨进程事实源。两类来源模式：
+
+- **handoff 复用**：原生客户端打开网页时通过短期 `handoffId`（`rwh_...`）复用已下载的源视频和分解结果，`prepare` 无需 `sourceUrl`。
+- **直接链接**：客户粘贴 `http/https` 视频链接，服务负责平台校验、本地下载、抽帧/OCR/转写/视觉分析和替换方案生成。
+
+生命周期路由（均受 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 和本机 agent token 保护，成功返回 202；`start` 为旧 MVP 兼容入口，仅创建 queued skeleton，不能绕过方案确认）：
+
+```text
+POST /api/replacement/video/prepare  -> 202  planned | source-failed（400 非法来源/缺主角图/超限；404 功能关闭或 handoff 缺失；500 准备失败）
+POST /api/replacement/video/execute  -> 202  仅 planned 可执行（409 非法状态；404 job 不存在）
+GET  /api/replacement/video/job      -> 200  脱敏生命周期快照
+POST /api/replacement/video/retry    -> 202  仅 partial/awaiting_review，只重试失败片段（409 非法状态）
+POST /api/replacement/video/concat   -> 202  仅 awaiting_review（409 非法状态）
+POST /api/replacement/video/cancel   -> 202  终态 job 原样返回，不伪造成功/失败
+GET  /api/replacement/video/download -> 200  校验 jobId/filename/输出根后串流成片，token 走请求头
+```
+
+轮询节奏：准备阶段每 1 秒，生成阶段每 2 秒。响应从不返回本地绝对路径、查询串、Token、Cookie、Authorization、Bearer、签名 URL 或原始字节；provider task id 仅以哈希出现。
+
+### 服务模式切换、熔断与回滚
+
+`VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared` 控制新任务走旧 Qt 链路还是共享服务，默认 `legacy`。**修改后需重启本地执行端生效**。首次发布让网页用 `shared`、Qt 保持 `legacy`，完成本地真实链路验证后再把 Qt 切到 `shared`。
+
+本机自动熔断：本地执行端在 agent 数据目录持久化最近至多 500 条终态任务（`replacement_metrics.json`，只存 job 哈希）。只有累计 **至少 100 个终态任务** 且失败率 **严格大于 1%**（`failed/total > 0.01`）时，才把 **新任务** 切回 `legacy` 并写 `shared_mode_circuit_opened` / `rollback_requested` 结构化事件；正好 1%（100 个里 1 个失败）不熔断。取消（cancelled）是终态但不计为失败。熔断只影响新任务的路由决策，**绝不中断已在运行的任务**。
+
+结构化边界事件（脱敏后只含 jobId、stage、model、provider-task 哈希、status、media-URL 形状和 cost/ref）：`prepare_started`、`analysis_completed`、`provider_submitted`、`provider_recovered`、`billing_settled`、`video_completed`、`video_failed`、`shared_mode_circuit_opened`、`rollback_requested`。
+
+回滚：把 `VIDEO_REPLACEMENT_SERVICE_MODE` 设为 `legacy` 并重启本地执行端；保留已有 job 文件和生成媒体以便追溯，不删除任务数据、不重复提交已完成 provider task、不重复结算费用。本机熔断不等于跨客户自动恢复旧安装包，发布侧仍需保留上一稳定版本镜像或安装包 Tag，必要时按日志决定客户端版本回滚。本次发布无数据库迁移（见 `migration.sql`）。
 
 ## 小红书图文同款
 

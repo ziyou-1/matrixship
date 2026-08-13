@@ -281,12 +281,13 @@ class AgentModeDefaultsTest(unittest.TestCase):
         src = CLIENT.read_text(encoding="utf-8")
 
         self.assertIn("ref_strip = QtWidgets.QHBoxLayout()", src)
-        self.assertIn("cv.addLayout(ref_strip)", src)
+        self.assertIn("body.addLayout(ref_strip)", src)
+        self.assertIn("body.addLayout(prompt_col, 1)", src)
         self.assertIn("self.inp = QtWidgets.QPlainTextEdit()", src)
         self.assertIn("self.inp.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)", src)
         self.assertIn("self.inp.setMinimumHeight(78)", src)
         self.assertIn("self.inp.setMaximumHeight(138)", src)
-        self.assertIn("cv.addWidget(self.inp)", src)
+        self.assertIn("prompt_col.addWidget(self.inp)", src)
         self.assertNotIn("midrow.addWidget(self.ref_slot", src)
         self.assertIn("self.inp.setPlainText(entry.get(\"prompt\") or \"\")", src)
         self.assertIn("prompt = self.inp.toPlainText().strip()", src)
@@ -331,7 +332,7 @@ class AgentModeDefaultsTest(unittest.TestCase):
         page_block = src[page_start:page_end]
         label_block = page_block[page_block.index("def _ref_label(self, i):"):page_block.index("def _make_ref_cell(self, path, i):")]
         rebuild_block = page_block[page_block.index("def _rebuild_ref_slots(self):"):page_block.index("def _style_ref_slot(self):")]
-        mode_block = page_block[page_block.index("def _mode_set(self, m):"):page_block.index("def _cycle_aspect(self):")]
+        mode_block = page_block[page_block.index("def _mode_set(self, m):"):page_block.index("def _menu_choice(")]
         video_block = src[src.index("def _prodgen_run_video(entry, emit=None):"):src.index("def _prodgen_generate(entry, emit=None):")]
         card_start = src.index("class GenCard")
         card_end = src.index("class ProductGenPage", card_start)
@@ -358,9 +359,9 @@ class AgentModeDefaultsTest(unittest.TestCase):
         end = src.index("def _rebuild_ref_slots(self):", start)
         block = src[start:end]
 
-        self.assertIn("REF_SLOT_W = 112", src)
-        self.assertIn("REF_SLOT_H = 56", src)
-        self.assertIn("REF_SLOT_RADIUS = 13", src)
+        self.assertIn("REF_SLOT_W = 84", src)
+        self.assertIn("REF_SLOT_H = 84", src)
+        self.assertIn("REF_SLOT_RADIUS = 14", src)
         self.assertIn("btn.setFixedSize(REF_SLOT_W, REF_SLOT_H)", block)
         self.assertIn("pm.scaled(REF_SLOT_W, REF_SLOT_H, QtCore.Qt.KeepAspectRatioByExpanding", block)
         self.assertIn("crop_x = max(0, (pm.width() - REF_SLOT_W) // 2)", block)
@@ -378,7 +379,8 @@ class AgentModeDefaultsTest(unittest.TestCase):
         self.assertIn("image_urls = _prodgen_image_reference_urls(refs, display_prompt) if has_ref else None", src)
         self.assertIn("def _agent_image_payload(", src)
         self.assertIn("payload = _agent_image_payload(model, model_prompt, size=size, image_urls=image_urls)", src)
-        self.assertIn("url = lk888_media_task(model, payload, [\"png\", \"jpg\", \"jpeg\", \"webp\"], tries=150)", src)
+        self.assertIn("url = lk888_media_task(model, payload, [\"png\", \"jpg\", \"jpeg\", \"webp\"], tries=150,", src)
+        self.assertIn("exclude_urls=image_urls", src)
         self.assertIn("ref_desc = _prodgen_refs_desc(refs, is_video=True) if has_ref else \"\"", src)
         self.assertIn("第1张为待修改图", src)
         self.assertIn("第2张起为参考图", src)

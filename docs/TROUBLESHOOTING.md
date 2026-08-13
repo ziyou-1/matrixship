@@ -1,10 +1,156 @@
-﻿## 2026-08-03 新用户账号矩阵添加账号显示 `登录未完成:agent token_required`
+﻿## 2026-08-10 分解视频显示 `分解失败:下载未完成 [WinError 267] 目录名称无效`
+- 现象：在“分解视频”粘贴抖音链接或从“内容采集”点分解，界面显示 `分解失败:下载未完成 [WinError 267] 目录名称无效`（有时带路径尾巴），不进入抽帧/转写/报告。个别标题还可能报 `[WinError 123] 文件名、目录名或卷标语法不正确`。
+- 根因：分解前要先把原视频下载到本地。`download_work` 用 `{path}/{nickname}_{user_id}/{title}_{work_id}` 拼落盘目录，但旧代码只对 `title`、`nickname` 调 `norm_str`，`user_id`（作者抖音号）和 `work_id`（作品 id）原样拼进路径。当这两个字段带英文冒号 `:` 时，Windows 把 `名字:流名` 当成 NTFS 备用数据流，父级被判定为“不是目录”，`os.makedirs` 抛 `NotADirectoryError [WinError 267] 目录名称无效`。该 OSError 未被下载分支的 `MediaDownloadError`/`DouyinDetailNetworkError` 捕获，冒泡到 `api_server` 的 do_POST 兜底处理 `{'error': str(e)}`，经本地浏览器 worker 回填为任务 error，客户端 `_video_breakdown_download_failure_text` 原样拼成上述提示。`norm_str` 旧实现也不剥控制字符，标题里混入 `\t` 等会走成 `[WinError 123]`。
+- 修复：`backend/utils/data_util.py#L328-L340` 让 `user_id`、`work_id` 与 `title`、`nickname` 一起过 `norm_str` 再拼路径（`work_id` 清空后兜底为 `unknown`）；`backend/utils/data_util.py#L74-L86` 的 `norm_str` 额外剥除 `\x00-\x1f`、`\x7f` 等控制字符并去掉旧正则里易碎的前导 `|`，合法标题目录名不变。
+- 兜底加固（防再泄漏）：`backend/api_server.py#L8313-L8332`（抖音）、`backend/api_server.py#L8385-L8401`（小红书）下载分支新增 `except OSError`，把意外文件系统异常统一成契约码 `download_exception`（502 + 脱敏 errorId，不回显 `str(e)`/traceback）；只捕 `OSError`，不干扰抖音鉴权错误的 `needLogin` 分支。`backend/matrix_native_client.py#L22130-L22131` 把 `download_exception` 本地化为“视频下载失败，请稍后重试。”。这样即使将来下载链路冒出新的 OS 异常，用户看到的也是友好文案而非原始 `[WinError …]`。
+- 排查：如仍复现，用 `.\.venv-win\Scripts\python.exe -m unittest tests.test_download_work_path_sanitization -v` 确认落盘清洗；日志/截图里不要暴露 cookie、`s_v_web_id`、Authorization 等字段，只保留 `[WinError 267]` 这类信号行。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_download_work_path_sanitization tests.test_api_download_contract tests.test_authenticated_download tests.test_video_breakdown -v`（修复前 `test_download_work_path_sanitization` 4/5 复现 `[WinError 267]`/`[WinError 123]`，修复后全绿）。
+- 回滚：恢复 `backend/utils/data_util.py`、`tests/test_download_work_path_sanitization.py`、`CHANGELOG.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-08 小红书图文笔记点"分解"报"未找到可分析的视频文件"
+- 现象：内容采集选小红书，对图文笔记点"分解"，报 `分解失败:未找到可分析的视频文件`。小红书大部分是图文，几乎必然撞上。
+- 根因：内容采集页的"分解"按钮只处理视频（下载后找视频文件抽帧分解）。图文笔记下载回来是图片、无视频文件 → 报该错。图文本应走"图文同款"，但该按钮在 2026-08-03 `5e3c052` 被有意删除，只留下孤儿处理器 `c_note_replace`，导致图文笔记在内容采集页无出口。
+- 修复：内容采集页重新加入"图文同款"按钮（下载/分解之间）。点它下载笔记后自动解析图片素材并跳转"🧩 图文同款"页复刻结构。"分解"仍只处理视频。
+- 排查：图文笔记用"图文同款"，视频笔记用"分解"。若点图文同款提示"仅支持小红书笔记"，确认平台切到小红书且链接是 `xiaohongshu.com`/`xhslink.com`。图文同款也可从左侧导航"🧩 图文同款"页手动处理已采集素材。确认跑的是本仓库最新代码（旧客户端无此按钮）。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_note_replacement -v`。
+- 回滚：恢复 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 小红书搜索后点下载/分解报 `xhs_safety_interval`
+- 现象：内容采集选小红书，搜索出结果后，点“下载”或“分解”，状态栏立刻报 `分解失败:下载未完成 xhs_safety_interval`（或 `下载失败:xhs_safety_interval`）。
+- 根因：小红书安全间隔冷却（`minInterval` 默认 45s）此前全账号共享一个 `lastActionAt`。搜索会写这个时间戳，紧随其后的下载在 45s 内被判定“间隔未到”而拦截。“搜索→点结果→下载”是自然顺序流，所以第一次点下载几乎必被拦。
+- 修复：冷却改为按动作类型分别计算，`search`/`download`/`comment`/`publish` 各自独立，搜索不再阻塞下载；同类型动作之间仍保留 45s 限速。
+- 排查：如果仍被拦，看返回的 `safety.cooldownLeft` 是不是针对 `download` 本身（说明刚下载过，属正常限速，等 `cooldownLeft` 秒即可）；确认跑的是本仓库最新代码（旧执行器无此修复，见端口冲突/老客户端条目）。想临时关掉全部限速可设 `XHS_SAFETY_MODE=0`（会削弱防风控，仅本地测试用）。
+- 边界：平台风险暂停 `xhs_safety_paused` 仍是全局的（一次风控信号暂停所有动作），与本间隔逻辑无关。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_safety_mode -v`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_safety_mode.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 小红书登录提示“账号已入矩阵”但卡片显示 0 个授权账号
+- 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、提示“登录成功，账号已入矩阵”，但小红书卡片仍是“0 个授权账号 / 暂无授权账号”。抖音正常。
+- 根因：账号矩阵登录走 `/api/xhs/login` → `run_xhs_login()` → `platform_adapters.xhs_login()`。登录判定接受 DOM 登录态或主站 `web_session`，但登录成功后**没有写 `xhs_auth_state.json`**。账号列表就绪判定 `xhs_profile_ready()` 无 marker 时只认强 cookie（`id_token`/`customerClientId`/`galaxy_creator_session_id`/`access-token-creator`）。主站/DOM 登录成功但 profile 缺这些强 cookie 时，`current_accounts()` 返回 0 个小红书账号。
+- 修复：`run_xhs_login()` 登录成功后写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径一致，让“登录成功”即“就绪”。
+- 排查：先确认客户端连的是哪个执行器/中心服，以及跑的是不是本仓库最新代码。**注意**：如果 9081 被安装版/codex-runtime 老客户端占用（见端口冲突条目），双击 `start-visible-client.bat` 启的新执行器抢不到 9081，你看到的仍是老代码——完全退出所有客户端进程后再重启。修复后重新登录小红书，卡片应显示 1 个授权账号。
+- 边界：账号移除会删除或禁用 `xhs_auth_state.json`；重新登录会重新写入并恢复显示。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_account_online_status -v`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 内容采集选小红书搜索报 `搜索失败:platform_disabled`
+- 现象：账号矩阵里小红书账号已显示“可用”，内容采集页选小红书、填关键词点搜索，状态栏立刻返回 `搜索失败:platform_disabled`。抖音搜索正常。
+- 根因：内容采集搜索走 `submit_local_task()` → 中心服 `/api/local-browser/task`（与账号矩阵登录不同，登录 2026-08-03 起已改为直连本机执行器）。中心服的三个小红书闸门 `create_task()`、`local_browser_create_task()` 和 POST 分发器**无条件**返回 `platform_disabled`，从不读取 `MATRIX_XHS_ENABLED`。本地客户端和本地执行器都正确读了开关，所以账号能登录、能显示在线，唯独任务派发被中心服拦死。
+- 修复：新增 `_xhs_route_blocked()`，开关打开返回 `None` 放行，关闭时维持原 `platform_disabled` 脱敏契约；三个闸门改为调用它。生产默认（不设开关）行为不变。
+- 排查：先确认客户端连的是哪个中心服——`start-visible-client.bat` 的 `START_LOCAL_CENTRAL=0` 时连的是公网中心服 `https://central.yunlingai.net`，本机不会监听 9080。**本修复只改本仓库代码，连远程中心服时必须等该中心服也部署本修复并带 `MATRIX_XHS_ENABLED=1` 重启后才生效。** 本地测试把 `START_LOCAL_CENTRAL` 设为 `1`，注意该模式没有漫剧主库，只有 `admin / test123456` 能登录，余额和任务也不是生产数据。
+- 边界：`LOCAL_BROWSER_ALLOWED_TYPES` 在 import 期计算，开关必须在中心服启动前设置；启动后再改环境变量不会生效。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_platform_disable -v`，确认既有「关闭时拦截」和新增「打开后放行」两个方向都通过。
+- 回滚：恢复 `backend/central_server.py`、`tests/test_xhs_platform_disable.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及 OpenAPI、数据库、Docker 或 `migration.sql`。
+
+## 2026-08-08 小红书登录成功后账号矩阵仍显示“离线”
+- 现象：账号矩阵点“登录 / 添加 小红书 账号”，浏览器登录成功、账号卡片也出现了，但状态徽标一直是“离线”。同时内容采集、获客寻客和素材发布的账号下拉找不到该账号，或提示“账号已存在，但登录态已失效”。
+- 根因：本地执行器 `/api/accounts` 返回的小红书行没有 `online` / `status` 字段，抖音行有。客户端 `merge_account_sources()` 合并时回落到中心服账号记录；而 2026-08-03 起账号矩阵登录改为直连本机执行器，不再经中心服本地浏览器任务通道，中心服 `local_browser_upsert_account()` 不再被触发，也就没有这条记录，于是 `online=False` → 徽标“离线”。抖音本地行自带 `online`，不受影响。
+- 修复：`backend/api_server.py#L1218-L1235` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支只有 `xhs_profile_ready()` 为真才进入，本机登录态失效时整行不返回，账号矩阵仍会按离线/不显示处理。
+- 排查：先看本机执行器 `/api/accounts` 返回的 `xhs-self` 是否带 `online: true`；如果带了但徽标仍是离线，说明跑的是旧进程，完全退出后用 `start-visible-client.bat` 重启本地客户端和本地执行器。中心服“账号资产总览”里看不到小红书账号是另一件事：中心服进程必须同样带 `MATRIX_XHS_ENABLED=1`，否则 `sync_node_accounts_locked()` 和 `local_browser_upsert_account()` 会静默丢弃所有小红书账号上报。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_xhs_account_online_status -v`，再运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_multi_account tests.test_native_publish tests.test_account_matrix_metrics tests.test_xhs_platform_disable tests.test_api_download_contract tests.test_xhs_safety_mode`。
+- 回滚：恢复 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-08 亮色主题下主色按钮、勾选框、禁用按钮看不见
+- 现象：切换到亮色主题后，`#primary` 主色按钮（如「生成同款预览」「执行替换生成」）显示为白底白字几乎不可见；`QCheckBox` 勾选框在白卡上完全看不到方框，其中包括「我确认已获得该人物素材授权」这类必须勾选的授权确认项；禁用态按钮为白字压浅灰，读不出按钮文案。
+- 根因一（主色按钮）：页面容器调用了无类型选择器的 `setStyleSheet("background:transparent")`。Qt 中在父控件上设置的无类型选择器会沿继承作用到全部子控件，从而把子级 `#primary` 按钮的主色背景一并刷成透明；暗色主题下白字压深色卡片仍可辨认，因此该问题长期只在亮色主题下暴露。
+- 根因二（勾选框）：`QCheckBox::indicator` 的描边与底色在 QSS 中硬编码为 `rgba(255,255,255,*)`，亮色主题的卡片本身是白色，白描边压白卡等于没有边框。
+- 根因三（禁用态）：亮色主题 `primaryDisBg`/`primaryDisText` 为浅灰底 + 纯白字；`QPushButton:disabled` 同样硬编码 `rgba(255,255,255,*)`。
+- 修复：页面容器改用 QSS 既有的 `QWidget#page` 规则代替 `setStyleSheet`；`QCheckBox::indicator`、`QPushButton:disabled`、`QLineEdit:disabled` 系列改为读取 `THEMES` 中新增的 `checkBg`/`checkBorder`/`checkDisBg`/`checkDisBorder`/`disBg`/`disBorder` token；亮色 `primaryDisText` 由纯白改为可读的中性色。详见 `backend/matrix_native_client.py` 的 `THEMES` 与 `build_qss()`。
+- 排查：在容器控件上写样式表时，一律使用带类型或带 objectName 的选择器（如 `QScrollArea{...}`、`QWidget#page`），不要写裸 `background:transparent`；新增控件后务必在亮色和暗色两个主题下各截一次图，只看暗色会漏掉这一整类问题。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"` 1367 项无新增失败；`py_compile backend\matrix_native_client.py`；暗色 / 亮色双主题离屏截图核对按钮与勾选框可见性。
+- 回滚：恢复 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-07 同款替换尾帧图提示词里出现 `视觉模型分析失败（errorId: ...）` 和 `frame_01.jpg`
+- 现象：同款替换（漫剧项目模式）首尾帧生成失败，尾帧图提示词的“画面要求”里混着 `视觉模型分析失败（errorId: err-xxxx）: HTTPSConnectionPool(host='central.yunlingai.net', port=443) ... SSLEOFError(8, '[SSL: ` 和一串 `[1.24s] frame_01.jpg [2.47s] frame_02.jpg`。
+- 根因：拆解阶段的 LK888 视觉模型调用失败后走的是“降级不中断”，异常文本被当成 `breakdownAnalysis.visual` 写回分析结果（错误串在 `str(exc)[:160]` 处截断，后面紧跟 `frameNotes` 抽帧清单）。`_build_replacement_prompt()` 把 `visual` 原样放进“原片拆解证据”，漫剧模式 `_comic_visual_prompt_text()` 的逐行黑名单只认识自己写的标题词，标题行被丢掉、正文里的报错和文件清单原样保留，最终成了 storyboard `description` 并被漫剧端拼进尾帧提示词。
+- 修复：`backend/replacement_analysis.py#L35-L91` 新增 `visualStatus` 与 `breakdown_visual_failure()`；`backend/replacement_analysis.py#L242-L268` 与 `backend/matrix_native_client.py#L8146-L8172` 失败时把 `visual` 置空、异常只留结构化日志；`backend/matrix_native_client.py#L21292-L21318` 新增 `_replacement_strip_diagnostic_noise()` 并在镜头约束与拆解证据两处调用；`backend/matrix_native_client.py#L12916-L12931` 给漫剧画面描述加白名单校验；`backend/matrix_native_client.py#L20894-L20907` 报告显示视觉分析状态；`backend/matrix_native_client.py#L16675-L16696` 与 `#L15344` 生成前弹窗确认；`backend/replacement_pipeline.py#L100-L111` 记录 `visualAnalysisFailure` 并写日志。
+- 排查：先看分解报告“来源”区的 `- 视觉分析:` 一行；失败时用其中的错误编号在结构化日志里查 `workflow_reference_vision_failed` 或 `video_breakdown_vision_failed`。这类失败通常是本机到 `central.yunlingai.net` 的 LK888 网关抖动，首尾帧图走同一个网关，一般会一起失败——重新分解源视频再生成，不要在视觉分析失败的分解结果上直接开始替换。
+- 注意：漫剧端 `tools/aicanvas_remote/server_current.py#L14554-L14566` 的 strict reference 前缀写死了“七帧中的每一帧”，在只生成一张尾帧图时也会拼上。这是远端文案问题，本次未改，不影响生成成败。
+- 验证：运行 `python -m unittest tests.test_replacement_service tests.test_video_replacement tests.test_video_replacement_v2 tests.test_video_breakdown -v`，再运行 `python -m py_compile backend\matrix_native_client.py backend\replacement_analysis.py backend\replacement_pipeline.py`。
+- 回滚：恢复 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-06 矩阵侧扣费十倍超收、且漫剧消费账单看不到
+- 现象：漫剧后台的消费账单里看不到任何来自矩阵侧的消费，用户余额却在下降。核对时会发现余额比 `computing_power_records` / `model_usage_logs` 的最后一条记录少一截（排查当天账号 44 少了 77.23），像是"丢钱"。同时同一个模型经矩阵侧调用扣的算力约为漫剧侧的十倍。
+- 根因一（十倍超收）：`backend/central_server.py` 的 `MAINDB_YUAN_TO_POWER` 取 10，注释依据是"与漫剧 recharge_packages 一致：50元=500算力"。但线上 `recharge_packages` 实际是 `50元档=50算力、100元档=105、500元档=550、1000元档=1150`，**本来就是 1 元 ≈ 1 算力**。用户按 1:1 买进、矩阵侧按 10 倍扣。`tests/test_billing_unified.py` 里的用例还把这个倍率断言成了正确行为，因此长期没被发现。
+- 根因二（账单隐身）：矩阵侧扣费走 `charge_user_allow_arrears()`，只做一条无条件 `UPDATE users SET computing_power`，流水仅写中心服的 JSON 账本（`STATE["ledger"]`，持久化在 `central_data/scheduler_state.json`），从不写 `model_usage_logs` / `computing_power_records`。生产库 `model_usage_logs` 共 11415 行、`description LIKE 'matrixship%'` 的 **0 行**，`charge_generation()` 在中心服里从未被调用。
+- 根因三（可重复扣费）：幂等靠反向扫描 `STATE["ledger"]` 找同 `ref` 的负数流水，而该账本被 `_add_ledger()` 截断到最近 8000 条；且"查重"在 `with LOCK` 内、"扣款"在锁外，两个并发结算可以同时查不到、同时扣款。
+- 修复：`MAINDB_YUAN_TO_POWER` 默认值改为 1（该常量同时决定扣费换算与微信充值入账，**不可拆成两个**，只改一边即为十倍定价错误）。新增 `maindb.charge_actual_cost()`：在**同一事务**内写 `model_usage_logs`、`SELECT ... FOR UPDATE` 锁余额行、条件扣费、更新余额、回填流水的 `balance_before/after`、并写 `computing_power_records`。`charge_user_allow_arrears()` 更名为 `charge_user_actual_cost()` 并改为调用它；漫剧账号**不再写 JSON 账本**。
+- 语句顺序：先 `model_usage_logs` 再 `users`，与 `refund_generation()` 一致。反序会与并发退款形成死锁环，改动此处前务必确认两侧同序。
+- 幂等：改由 `model_usage_logs.request_id` 的唯一索引保证（线上已存在 `ix_model_usage_logs_request_id`，unique=1，且重复组数为 0，**无需 ALTER**）。重复结算返回 `duplicate`，上层视为成功、不重试。
+- 余额不足：改为直接拒绝（`insufficient_balance`），不再允许扣成负数。这是行为变更——此前余额可为负，用户会遇到"以前能跑、现在被拦"。
+- 账单一致性：`billing_analytics.normalize_billing_records()` 会按 `ref` / `request_id` 合并去重（`billing_analytics.py#L177-L179`）。因此矩阵侧写入 `model_usage_logs` 的 `request_id` **必须**与 JSON 账本的 `ref` 字节相同（现为 `lk888:<taskId>`），否则账户中心会重复计数。本次已改为只写 MySQL，从结构上消除双源。
+- 排查：漫剧账单看不到矩阵消费时，按 `ref` 三层对账——`users.computing_power`（唯一真值）→ `model_usage_logs`（两个界面的明细来源）→ JSON 账本（仅非漫剧账号与充值/兑换码）。MySQL 有而 JSON 无属正常（截断）；JSON 有而 MySQL 无说明写库失败，必须告警。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_billing_parity tests.test_billing_analytics tests.test_billing_unified tests.test_billing_dashboard_api tests.test_account_billing_dashboard tests.test_billing_rollout_guard tests.test_native_billing_rates tests.test_aicanvas_frame_billing tests.test_lk888_media_task_parsing tests.test_openapi_contract` 181/181 通过。新增 `tests/test_billing_parity.py` 11 条，已用 `git stash` 对旧代码做 RED 验证（1 失败 + 9 错误）。
+- 迁移：无需迁移。矩阵侧微信支付从未配置（四个密钥为空、充值订单 0 条），`MAINDB_YUAN_TO_POWER` 的 10 倍**只作用在扣费上**，没有任何余额按 10 倍充入过。生产也未设该环境变量，改代码默认值即生效。
+- 回滚：回滚 `backend/maindb.py`、`backend/central_server.py`、`tests/test_billing_parity.py`、`tests/test_billing_unified.py` 与本节，重建中心服镜像并重启。回滚后恢复十倍扣费与账单隐身。不涉及数据库结构变更。
+
+## 2026-08-06 中心服 compose 在 `current` 软链目录下推断出错误项目名，险些挂空数据卷启动
+- 现象：在 `/opt/matrixship-central-prod/current` 下执行 `docker compose -f docker-compose.prod.yml up -d` 重建中心服，输出 `project has been loaded without an explicit name from a symlink. Using name "current"`，随后创建 `current_default` 网络和 `current_matrix-central-data` 数据卷，最后以 `Bind for :::9080 failed: port is already allocated` 失败。
+- 根因：`current` 是指向 `releases/<tag>` 的软链，compose 在没有 `-p`、目录下也没有 `.env` 或 `name:` 字段时，用当前目录名推断项目名，于是把项目名定为 `current` 而不是 `matrixship-central-prod`。项目名是卷名和容器名的前缀，compose 因此**不认识**已有的 `matrixship-central-prod_matrix-central-data`，转而新建同名后缀的空卷。这次是原容器仍占着 9080 才启动失败；**若端口空闲，新容器会挂着空的 `/app/central_data` 正常起来，企业、用户、成员关系看起来全部消失**（与本文件 `scheduler_state.json` 被默认骨架覆盖那条是不同成因、相同表象）。
+- 修复：重建命令必须显式带项目名，`--no-build` 避免误触发 `build:` 段重新构建镜像，`IMAGE_TAG` 必须显式传当前 release（compose 里默认值是 `prod-local`，不传会指向一个不存在或过期的镜像）：`cd /opt/matrixship-central-prod/current && IMAGE_TAG=<release> docker compose -p matrixship-central-prod -f docker-compose.prod.yml up -d --no-build`。当前 release 用 `readlink -f current` 或 `docker inspect matrixship-central-prod-matrix-central-1 --format '{{.Config.Image}}'` 确认。
+- 排查：误建的项目用 `docker rm -f current-matrix-central-1`、`docker network rm current_default`、`docker volume rm current_matrix-central-data` 清理；`docker volume ls | grep matrix` 之后应只剩 `matrixship-central-prod_matrix-central-data` 一个。重建后必须确认挂载卷名正确：`docker inspect matrixship-central-prod-matrix-central-1 --format '{{range .Mounts}}{{.Name}}{{end}}'`。
+- 验证：2026-08-06 修改 `backend/.env.prod` 的 `CENTRAL_ADMIN_PASSWORD` 后按上述命令重建，实测容器 `running/healthy`、镜像 tag 未变、挂载卷为 `matrixship-central-prod_matrix-central-data`、`scheduler_state.json` 仍为 393649 字节、9080 正常 LISTEN、`/api/health` 200，四个 `MATRIX_*` feature flag 与重建前一致仍为 `0`。
+- 回滚：`.env.prod` 改动回滚为 `cp -p .env.prod.bak-<时间戳> .env.prod` 后按同一条命令重建。误建项目的清理不可回滚，但那三个对象都是本次新建的空对象，删除不影响生产数据。不涉及代码、镜像、数据库、OpenAPI 或 `migration.sql`。
+- 遗留：`docker-compose.prod.yml` 里没有 `name:` 字段，只要有人漏掉 `-p` 就会重踩。根治办法是在该文件顶部加 `name: matrixship-central-prod`（compose v2.20+ 支持），或在 `current/` 放一个含 `COMPOSE_PROJECT_NAME=matrixship-central-prod` 的 `.env`。**另外：公网中心服平台管理员口令目前仍是仓库和文档里公开写着的弱口令，`http://120.26.194.174:9080` 直接对外，建议收到 nginx 之后再改随机口令。**
+
+## 2026-08-06 分解失败 `remote service URL must use https; http is allowed only for loopback hosts`
+- 现象：公网下载安装的客户端，采集和下载都正常，分解视频走到"调用视觉模型分析关键帧"之后失败，报告里只有来源信息，`音频转写: failed`，末尾是上面这条英文错误和一个 errorId。
+- 根因：客户端不直连模型服务，转写用的 base_url 是 `lk888_config()["base_url"]` = `CENTRAL + "/lk888"`。2026-08-05 把 CENTRAL 默认值改成公网明文 `http://120.26.194.174:9080` 之后，`backend/utils/video_transcription.py` 的 `validate_service_url()` 判定"非回环主机必须 HTTPS"而抛 `ValueError`；该异常没有被捕获，一路冒到分解主流程，把整份报告变成失败。改之前默认值是回环地址，这条校验永远放行，所以从未暴露。校验本身是对的——明文会让口播音频和登录凭据一起过公网。
+- 修复：中心服增加 HTTPS 独立入口 `https://central.yunlingai.net`（nginx 新增两个 server 块 + Let's Encrypt 证书），客户端默认中心服改为该地址；`_transcribe_breakdown_audio()` 捕获 `ValueError` 并降级为"转写这一步失败"，画面与 OCR 分析继续，失败原因和错误码写入报告；`_video_breakdown_markdown()` 增加"转写失败原因/代码"两行。
+- 为什么用独立子域而不是在已有站点上挂路径前缀：带前缀时客户端里所有"URL 是否属于中心服"的 path 比较会静默失配——`_xhs_note_source_image_headers()` 会丢鉴权头拿 401，`_central_library_image_to_data_url()` 会直接返回空串把同款替换的参考图悄悄丢掉且毫无报错；中心服 `_central_base()` 按 Host 重建 URL 时也会丢前缀；共享 vhost 还会让 `X-Matrix-User-Token` 的作用域只剩一处 path 判断兜底。
+- 排查：客户端启动日志有 `MatrixShipAgent 启动 v<版本> · 中心服 <URL>`，应显示 `https://central.yunlingai.net`。若分解仍失败，先看报告里的"转写失败原因/代码"——它现在会区分"服务地址不合法"(`transcribe_service_url_invalid`)、"未配置"(`lk888_not_configured`) 和真正的转写错误，不再一律显示 `failed`。中心服侧用 `GET /lk888/v1/models` 验证代理是否通。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown tests.test_video_breakdown_transcribe_degrade tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes tests.test_native_publish tests.test_xhs_note_replacement` 209/209 通过；新增用例先用 `git stash` 对旧代码做 RED 验证（2 失败 + 4 错误）。服务端从公网实测：health 200 且 `ssl_verify_result=0`、HTTP 301 跳 HTTPS、登录 200、`/lk888/v1/models` 200 共 55 个模型。
+- 回滚：服务端 `cp -a /root/ai-education-platform/nginx/nginx.conf.bak-20260805_matrix_https /root/ai-education-platform/nginx/nginx.conf && docker exec ai_education_nginx nginx -t && docker exec ai_education_nginx nginx -s reload`；客户端回滚 `backend/matrix_native_client.py`、`backend/agent_launcher.py`、`backend/local_browser_worker.py`、`backend/local_login.py`、两个测试文件、`backend/.env.example` 与本节，并重新打包安装包。不涉及中心服 API、数据库、`migration.sql` 或密钥。
+- 遗留：证书 2026-11-04 到期，**尚未配置自动续期**；到期未续会导致所有客户端 TLS 校验失败、全线登录不上。
+
+## 2026-08-05 公网客户端「分解视频」全部失败（视觉分析步骤）
+- 现象：从公网下载安装的客户端，登录、内容采集都正常，但「分解视频」到"调用视觉模型分析关键帧"这一步失败。本机开发环境同样失败，但报错不同（`ReadTimeout` / `ConnectionError`，本机中心服的 lk888 代理出网不通）。
+- 根因：客户端不直连模型服务，`lk888_vision()` 会把请求发给 `中心服 + /lk888/v1/chat/completions`。生产中心服的 `LK888_API_KEY` 为空，`lk888_proxy` 在 `if not key:` 处直接返回 503 `lk888_not_configured`，请求根本到不了上游。
+- 修复：在生产 `backend/.env.prod` 填入 `LK888_API_KEY`（该行原本存在但值为空），重启中心服容器使 `env_file` 重新加载。纯配置变更，不改代码、不需要重新打包客户端。
+- 排查：容器内 `printenv LK888_API_KEY` 应非空（**只看长度，不要打印值**）。带有效会话调用 `GET /lk888/v1/models` 应返回 200 和模型列表；返回 503 `lk888_not_configured` 即为本问题，返回 401 `not_authenticated` 说明会话无效而非配置问题。注意客户端 `lk888_vision()` 的默认视觉模型是 `gemini-3.1-pro-preview`（`matrix_native_client.py` 内写死，分解调用点不传 model），需确认它在上游模型列表中。
+- 验证：2026-08-05 配置后实测，`GET /lk888/v1/models` 返回 200、共 55 个模型且包含 `gemini-3.1-pro-preview`；`POST /lk888/v1/chat/completions` 以 `max_tokens=1` 打到该模型返回 200，`usage.total_tokens=12`，计费未拦截。中心服 health 200，登录回归正常。
+- 回滚：把 `.env.prod` 恢复为备份 `.env.prod.bak-20260805_lk888`（SHA-256 `4173fb6b6ec788ba705333adf851985d08fc6d89f416d0d4326b0cd7b4bebcb2`）并重启容器。回滚后分解功能会重新全部失败。不涉及代码、镜像、数据库、OpenAPI 或 `migration.sql`。**密钥只存在于服务器 `.env.prod`，不得提交进仓库。**
+
+## 2026-08-05 公网下载的客户端默认连本机中心服导致登录失败
+- 现象：从公网下载安装 Windows 客户端后，登录页报 `HTTPConnectionPool(host='127.0.0.1', port=9080)`、`NewConnectionError` 或 `WinError 10061`。
+- 根因：`backend/matrix_native_client.py` 的 `CENTRAL` 默认值是 `http://127.0.0.1:9080`。9080 是中心服端口（本机执行引擎用 9081，见 `backend/agent_launcher.py`），普通用户机器上没有中心服进程，TCP 连接被拒。2026-08-04 的记录写了此问题已修复为公网地址，但代码里始终没有这次改动，回归用例 `test_central_defaults_to_local_loopback` 反而把回环默认值断言成了正确行为。
+- 修复：`backend/matrix_native_client.py` 默认中心服改为 `http://120.26.194.174:9080`；`backend/.env.example` 和 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 说明同步；`tests/test_video_breakdown.py` 的两条用例改回 `test_central_defaults_to_public_production_server` / `test_central_env_override_still_supports_local_development`。
+- 排查：客户端启动日志有一行 `MatrixShipAgent 启动 v<版本> · 中心服 <URL>`，先确认它显示的是公网地址还是 `127.0.0.1:9080`。装了旧包的用户可临时设置环境变量 `MATRIX_CENTRAL` 后重启客户端顶一下，长期方案是重装新包。本机开发调试必须显式设置 `MATRIX_CENTRAL=http://127.0.0.1:9080`，出厂 `start-visible-client.bat` 已这样设置。
+- 验证：`.\.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes` 91/91 通过，`py_compile` 通过。改动只在源码层，**必须重新打包安装包并重传到服务器**才对下载用户生效。
+- 回滚：回滚 `backend/matrix_native_client.py`、`backend/.env.example`、`tests/test_video_breakdown.py`、`docs/DEPLOYMENT.md` 和本条记录；服务器端把 `MatrixShipAgent-Setup.exe` 恢复为部署时备份的 `.bak-*` 文件。不涉及中心服 API、OpenAPI、数据库或 `migration.sql`。
+
+## 2026-08-04 视频替换共享模式自动回退到 legacy（熔断）
+- 现象：设置了 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 并重启后，新的视频替换任务仍走旧 Qt 链路；日志出现 `replacement_shared_mode_circuit_opened` 和 `replacement_rollback_requested`。
+- 根因：本机自动熔断已触发。本地执行端在 `<agent-data-dir>/replacement_metrics.json` 持久化最近至多 500 条终态任务，当累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时，新任务自动切回 `legacy`；正好 1%（100 个里 1 个失败）不熔断，取消（cancelled）不计为失败，运行中的任务不会被打断。
+- 修复：先按 `video_failed` 事件的 `failureStage`、`model` 和 provider-task 哈希定位真实失败原因（来源下载、分析、生成或计费）；修复后失败率随新终态样本回落到 1% 以内即自动恢复 `shared`。需要立即恢复时可清空或轮转该本机 `replacement_metrics.json`（仅影响熔断统计窗口，不影响任何 job 数据），再重启本地执行端。
+- 排查：确认 `replacement_metrics.json` 只包含 job 哈希、status、failure 和时间戳，不含明文 job id、Token、Cookie、Authorization、签名 URL 或本地绝对路径；确认边界事件里 provider task id 只以哈希出现，media URL 只保留 scheme+host。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_service.ReplacementCircuitBreakerTests tests.test_replacement_service.ReplacementEventRedactionTests -v`。
+- 回滚：把 `VIDEO_REPLACEMENT_SERVICE_MODE` 设为 `legacy` 并重启本地执行端即可强制旧链路；保留 job 文件和生成媒体，不删除任务数据、不重复提交已完成 provider task、不重复结算。本机熔断不等于跨客户自动恢复旧安装包，必要时按上一稳定安装包/Tag 回滚客户端。不涉及中心服 API、数据库、Docker、`migration.sql`。
+
+## 2026-08-04 `/comic-tool` 第 4 个 Windows 客户端下载入口不可用
+- 现象：打开 `https://manju.yunlingai.net/comic-tool` 后只看到 3 个创作工具，或第 4 个工具不是「Windows 客户端」，或按钮仍显示“即将开放”。
+- 根因：线上远程 AI Canvas 仍运行旧 `/root/AI-CanvasPro/server.py`，`platform-index.html` 未注入 `yunling-download-card-injector`，或浏览器缓存了旧 SPA HTML。
+- 修复：部署包含下载卡片注入的 `tools/aicanvas_remote/server_current.py` 到 `/root/AI-CanvasPro/server.py`，重启 `ai-canvas.service`，然后强刷 `/comic-tool`。本地测试只证明镜像逻辑，不能代替远程部署。
+- 排查：查看 `/comic-tool` HTML 是否包含 `yunling-download-card-injector`；确认 `ai-canvas.service` active、`8777` 监听、`/login` 返回 200。不要记录 Cookie、Token、Authorization 或完整私有 URL。
+- 下载 404：确认远程主机存在 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`，或已设置 `AICANVAS_AGENT_INSTALLER` / `MATRIXSHIP_AGENT_INSTALLER` 指向真实 `.exe` 文件；再检查 `HEAD /MatrixShipAgent-Setup.exe` 是否返回 attachment 和正确 `Content-Length`。
+- 卡片重复或顺序异常：确认公网 `/comic-tool` HTML 中不再包含 `cloneNode` 或 `insertBefore`，并包含 `findToolContainer`。旧版注入脚本会克隆“漫剧Agent”卡片并插到它后面，可能导致工具顺序变成“漫剧Agent / Windows客户端 / 漫剧画布”或出现重复 Agent；部署 append-fix 版本并强刷页面即可。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest -v`，再运行 `.\.venv-win\Scripts\python.exe -m py_compile tools\aicanvas_remote\server_current.py tests\test_minimax_aicanvas_remote.py`。线上另需执行 `/comic-tool` 页面和 `/MatrixShipAgent-Setup.exe` HEAD/GET 冒烟。
+- 回滚：恢复远程 `/root/AI-CanvasPro/server.py.bak.<timestamp>` 到 `server.py` 并重启 `ai-canvas.service`；源代码级回滚恢复 `tools/aicanvas_remote/server_current.py`、`tests/test_minimax_aicanvas_remote.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本条记录。不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-03 新用户账号矩阵添加账号显示 `登录未完成:agent token_required`
 - 现象：新用户登录本地客户端后，进入“账号矩阵”点击添加/登录抖音账号，页面没有成功打开登录流程，而是提示“登录未完成:agent token_required”或 `agent_token_required`。
 - 根因：账号矩阵旧链路先经中心服 `/api/local-browser/task` 派发给本地浏览器 worker，再转发到本机执行引擎 `127.0.0.1:9081`。新用户登录、账号隔离目录切换或 token 文件刷新后，旧 worker/旧 `9081` 进程可能继续使用上一轮 token，本机执行器因此拒绝请求。双击 `start-visible-client.bat` 时如果没有清理旧 `9081`，新客户端也可能打到残留执行器。
 - 修复：`backend/local_browser_worker.py#L85-L95` 安全读取当前 token；`backend/local_browser_worker.py#L202-L207` 在每次转发前动态刷新 `X-Matrix-Agent-Token`；`backend/matrix_native_client.py#L1629-L1699` 让账号矩阵登录直连本机执行器并轮询登录状态；`backend/matrix_native_client.py#L6356-L6362` 切换按钮调用；`start-visible-client.bat#L11-L12` 显式设置本机执行器端口，`start-visible-client.bat#L53-L80` 启动客户端前清理旧 `9081`。
 - 排查：完全退出旧客户端后，双击更新后的 `start-visible-client.bat` 重新启动；确认 `9081` 是本次客户端会话启动的本地执行器。日志和截图中不要暴露 `MATRIX_AGENT_TOKEN`、`agent_token.txt` 内容或 Authorization 头。
 - 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_dm_auto_reply.DouyinDmAutoReplyContractsTest -v`、`$env:PYTHONPATH='backend'; .\.venv-win\Scripts\python.exe -m unittest tests.test_auth_login_modes tests.test_start_visible_client_script -v`，再运行 `.\.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py backend\local_browser_worker.py tests\test_auth_login_modes.py tests\test_start_visible_client_script.py tests\test_douyin_dm_auto_reply.py`。
 - 回滚：恢复 `backend/local_browser_worker.py`、`backend/matrix_native_client.py`、`start-visible-client.bat`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和本条记录即可；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+
+## 2026-08-04 `/replacement` can open but image-note thumbnails are blank
+- Symptom: `/replacement` opens and the image-note preview job is created, but uploaded image slots show blank thumbnails.
+- Root cause: thumbnail bytes are served by token-protected `GET /api/replacement/file`; a plain `<img src>` request cannot send `X-Matrix-Agent-Token`, or the running local executor is stale and lacks the safe file route.
+- Fix: run the updated local executor with `MATRIX_REPLACEMENT_WEB_ENABLED=1`. The page must load thumbnails with `fetch(previewUrl, {headers: authHeaders()})`, convert the blob with `URL.createObjectURL`, and keep the token in the header/session storage rather than a query parameter.
+- Checks: confirm `/api/replacement/note/job` returns `files[].previewUrl` without `replacement_web_uploads` or an absolute local path; confirm `/api/replacement/file?taskType=note&jobId=<xnr...>&filename=<stored image>` returns image bytes only for the matching job upload and rejects `../secret.png`.
+- Rollback: set `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restart the local executor, or restore `backend/replacement_web.py`, `backend/api_server.py`, `tests/test_replacement_web_mvp.py`, OpenAPI/API docs, `CHANGELOG.md`, `migration.sql`, and this entry. No database schema, center service, LK888, or remote AI Canvas rollback is involved.
 
 ## 2026-08-03 Asset Library still shows the note-template button
 - Symptom: the Asset Library filter row still shows a `note_template` / note-template button after the source was updated.
@@ -769,13 +915,20 @@
 - 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_marks_xhs_account_violation_as_high_risk tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_applies_persisted_xhs_task_risk_to_same_platform -v`，应 2/2 通过；再运行完整 `tests.test_agent_mode_defaults` 回归和 `py_compile`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复旧判断；必要时删除运行数据目录下的 `account_risk_events.json` 清空本地风险缓存。本次不涉及数据库迁移、OpenAPI 或 Web 端。
 
-## 2026-07-28 登录首页仍显示注册按钮
-- 现象：首页登录卡顶部仍出现“注册”，不符合当前只保留“登录 / 加入企业”的入口要求。
-- 根因：旧实现把 `self.tab_reg` 和另外两个模式按钮一起加入 `tabrow`，并且标题仍写成“登录 / 注册”。
-- 修复：登录卡现在只把 `self.tab_login` 和 `self.tab_invite` 加入顶部按钮行；`self.tab_reg` 保留为隐藏对象以兼容内部旧注册模式和既有逻辑，但不在首页显示。
-- 排查：检查运行中的客户端源码是否包含 `backend/matrix_native_client.py#L21258-L21279` 的新逻辑；若仍显示注册按钮，说明当前客户端未重启或运行的不是这个工作区版本。
-- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`；Qt 冒烟应输出 `LOGIN_HOME_TABS True False True`。
-- 回滚：回滚 `backend/matrix_native_client.py`、相关测试和本文档即可恢复旧的“登录 / 注册 / 加入企业”三入口。
+## 2026-08-04 登录首页仍显示注册或加入企业入口
+- 现象：首页登录卡顶部仍出现“注册”或“加入企业”，不符合当前只保留“账号登录”的入口要求。
+- 根因：统一漫剧账号体系后，普通用户应直接用漫剧账号密码登录；登录前加入企业会把账号体系和企业归属混在一起，容易造成交付和权限理解混乱。
+- 修复：登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”；`self.tab_login/self.tab_reg/self.tab_invite` 仅保留为隐藏兼容对象，不再加入登录页布局。企业成员交付提示改为建议管理员使用“添加成员”或“重置密码”。
+- 排查：检查运行中的客户端源码是否包含 `backend/matrix_native_client.py#L30324-L30343` 的新逻辑；若仍显示注册或加入企业按钮，说明当前客户端未重启、运行旧 EXE，或打包产物尚未更新。
+- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`，并重新打开客户端确认登录卡只展示账号和密码输入。
+- 回滚：回滚 `backend/matrix_native_client.py`、相关测试和本文档即可恢复旧的“登录 / 加入企业”入口；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+
+## 2026-08-04 浏览器下载客户端后登录失败连接 `127.0.0.1:9080`
+- 现象：用户从公网下载并安装 Windows 客户端后，登录页报 `HTTPConnectionPool(host='127.0.0.1', port=9080)`、`NewConnectionError` 或 `WinError 10061`。
+- 根因：旧安装包内客户端无 `MATRIX_CENTRAL` / `CENTRAL_URL` 环境变量时默认连接本机中心服 `http://127.0.0.1:9080`；普通用户电脑没有中心服进程，所以 TCP 连接被拒绝。
+- 修复：`backend/matrix_native_client.py#L56-L66` 的默认中心服改为 `http://120.26.194.174:9080`，并同步 `backend/.env.example#L2-L2` 和 `docs/DEPLOYMENT.md#L310-L310`；中心服地址使用独立校验，允许生产 HTTP 中心服，但不放宽远程素材 URL 的 HTTPS 校验。开发环境如需本机中心服必须显式设置 `MATRIX_CENTRAL=http://127.0.0.1:9080`。
+- 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_defaults_to_public_production_server tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_env_override_still_supports_local_development -v`，再重新打包安装包并确认公网下载的新客户端登录请求不再访问 `127.0.0.1:9080`。
+- 回滚：恢复 `backend/matrix_native_client.py` 默认值和上一版服务器安装包；如果公网中心服不可用，先恢复旧包或临时让用户设置 `MATRIX_CENTRAL` 指向可用中心服。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
 
 ## 2026-07-28 小红书创作服务平台一直刷新
 - 现象：点击“发布到小红书”后，创作服务平台浏览器已经打开，但登录页或创作者中心页面会反复刷新，用户还没来得及完成扫码/登录，页面又被重新跳转。
@@ -1180,7 +1333,7 @@
 - 根因：同款替换默认按约 8 秒分段生成；旧逻辑把每段 TTS 音频按对应视频片段时长合成，音频长于视频时会按视频时长收尾，导致尾部被截断。
 - 修复：`backend/matrix_native_client.py#L6031-L6079` 新增生成前口播时长估算；`backend/matrix_native_client.py#L7072-L7075` 在开始生成前阻断明显超长片段；`backend/matrix_native_client.py#L11651-L11678` 在 TTS 下载后用真实音频时长兜底，超长时返回 `replacement_tts_audio_too_long`，不再进入截断式合成。
 - 排查：查看任务 JSON 的 `audioMode`、片段 `duration/script/ttsDurationSec/ttsTimingStatus/ttsTimingError`。如果 `audioMode=auto`，使用的是生成视频自带声音，不走这套 TTS 校验；旧 `audioMode=source` 会兼容映射为 `auto`。如果 `audioMode=uploaded`，整条音轨仍按最终成片时长校验。
-- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `4.2` 字/秒，值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
+- 配置：`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 默认约 `5.5` 字/秒（2026-08-07 前为 `4.2`），值越大越宽松；生产建议只在确认当前 TTS 音色实际语速后调整。
 - 验证：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_duration_preflight_flags_segment_script_that_will_be_cut tests.test_video_replacement_v2.VideoReplacementV2Test.test_tts_audio_mode_rejects_real_audio_longer_than_segment_before_mux tests.test_video_replacement_v2.VideoReplacementV2Test.test_start_generation_blocks_tts_script_that_exceeds_segment_duration -v`。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和本文档即可；不涉及中心服、数据库或 `migration.sql`。回滚后 AI 配音超长仍可能被片段时长截断。
 
@@ -2372,9 +2525,6 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 验证：运行 `python -m unittest tests.test_agent_mode_defaults -v`，确认默认目录、环境变量覆盖和启动脚本契约通过。
 - 回滚：设置 `MATRIX_AGENT_USE_APPDATA=1` 可恢复旧 AppData 默认目录；设置 `MATRIX_AGENT_SKIP_APPDATA_MIGRATION=1` 可禁用旧目录复制。
 
-
-
-
 ## 2026-07-25 管理员充值后用户余额必须重启才变化
 - 现象：管理员给用户加云豆后，目标用户本地客户端侧栏余额仍显示旧值，重启后才变化。
 - 根因：后端 `/api/account/balance` 返回的是实时余额，但本地客户端侧栏只在登录时刷新；账户中心 `on_show()` 会刷新，普通业务页没有周期性刷新。
@@ -2406,7 +2556,6 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：上传响应的 `url` 应为 `https://img.yunlingai.net/uploads/...`，并且 `curl -I <url>` 返回 HTTP 200 与 `Content-Type: audio/...`。如果仍提示“音频地址不是远程模型可读取的公网地址”，优先检查客户端是否已重启、`.env` 是否配置 `UPLOAD_API_URL` / `UPLOAD_TOKEN`。
 - 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2.VideoReplacementV2Test.test_upload_asset_url_uses_external_public_upload_service_for_audio -v`；服务端运行 `PYTHONPATH=. pytest tests/test_upload_service.py -q`，并用 `https://img.yunlingai.net/api/upload` 上传 mp3 后访问返回的 URL。
 - 回滚：本地回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py` 和本文件；服务端恢复 `/root/image-upload-service/backups/20260728-audio-upload/` 下的备份后重建 `image_upload_service`。
-
 
 ## 小红书图文同款冒烟记录（2026-07-25）
 
@@ -2858,7 +3007,7 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - Symptom: Agent image/video generation fails with LK888 400, for example `model ... does not support /v1/images/*`, `use POST /v1/media/generate`, missing required params, or invalid `duration`.
 - Root cause: the Agent model catalog must treat local UI model names as client-owned aliases with per-model LK888 rules. Image models such as `doubao-seedream-5-0-260128`, `mj_imagine`, Gemini/Nano Banana, Vidu, Kling, Wanxiang, Qwen and GPT image rows need LK888 media payload params, not a one-size `/v1/images/generations` request. Non-generic rows such as `kling-avatar-image2video`, `vidu-jieshuoman`, and `vidu-mv` must not appear in generic Agent video choices.
 - Fix: `backend/matrix_native_client.py#L2357-L2409` defines canonical Agent model rows and excludes digital-human-only rows from Agent selectors; `backend/matrix_native_client.py#L2462-L2538` builds model-specific image/video payload params; `backend/matrix_native_client.py#L2845-L2868` filters the LK888 catalog before the UI sees it; `backend/matrix_native_client.py#L18832-L18915` submits Agent image/video generation through `lk888_media_task()`.
-- Reference and slot rules: image refs are capped by `_AGENT_IMAGE_REFERENCE_LIMITS` (`qwen-image/kling-v3/kling-v3-omni/wan2.7-image=4`, `kling-image-o1=10`). Video refs are capped by `_AGENT_VIDEO_REFERENCE_LIMITS` (`viduq3=7`, `viduq3-turbo=2`, `viduq3-turbo-cankaosheng=7`, `wan2.7-cankaosheng=4`, `wan2.7-shouweizhen=2`, `sora-2=2`, `veo3.1=3`, `grok-video-3=0`, `grok-imagine-video-1.5-preview=1`, `pixverse-v6-shouweizhen=2`, `happyhorse-i2v=1`, `hailuo-2.3=2`). Vidu Q3 rows normalize duration to 4/8/12/16 seconds; Wanxiang 2.7 reference rows normalize to 3/6/9/12/15 seconds; Sora-2 rows normalize duration to 4/8/12 seconds; Veo 3.1 normalizes duration to 8 seconds; Grok Imagine 1.5 accepts 1-15 seconds and requires one first-frame image.
+- Reference and slot rules: image refs are capped by `_AGENT_IMAGE_REFERENCE_LIMITS` (`qwen-image/kling-v3/kling-v3-omni/wan2.7-image=4`, `kling-image-o1=10`). Video refs are capped by `_AGENT_VIDEO_REFERENCE_LIMITS` (`viduq3=7`, `viduq3-turbo=2`, `viduq3-turbo-cankaosheng=7`, `wan2.7-cankaosheng=4`, `wan2.7-shouweizhen=2`, `sora-2=2`, `veo3.1=3`, `grok-video-3=1`, `grok-imagine-video-1.5-preview=1`, `pixverse-v6-shouweizhen=2`, `happyhorse-i2v=1`, `hailuo-2.3=2`). Vidu Q3 rows normalize duration to 4/8/12/16 seconds; Wanxiang 2.7 reference rows normalize to 3/6/9/12/15 seconds; Sora-2 rows normalize duration to 4/8/12 seconds; Veo 3.1 normalizes duration to 8 seconds; Grok Imagine 1.5 accepts 1-15 seconds and requires one first-frame image.
 - Special payload checks: if LK888 says a Wanxiang first/last-frame request has too many images, confirm only two refs reach `params.images` and that `first_frame_image/last_frame_image` are set. If Sora reference generation fails, confirm refs are in `input_reference`, not generic `images`. If Veo 3.1 rejects generation mode or duration, confirm `duration=8`, text-only requests send `generation_mode=fast` plus `generation_type=TEXT`, and reference-image requests send `generation_mode=components` plus `generation_type=REFERENCE` with up to 3 `images`. If Grok 3 rejects size fields, confirm it sends `size=vertical_hd/horizontal_hd` and omits generic `resolution/aspect_ratio`; if Grok Imagine 1.5 rejects uploads, confirm exactly one first-frame URL reaches `params.images` with `aspect_ratio` and `resolution=720p`. If HappyHorse first-frame fails on aspect fields, confirm `aspect_ratio` is removed and `resolution=720P` is present.
 - First/last-frame UI rule: if an Agent card for `kling-v3-omni-shouweizhen`, `pixverse-v6-shouweizhen`, `wan2.7-shouweizhen`, or any future `*-shouweizhen` catalog row shows `参考图3`, the running client is stale. Restart the local client and confirm `backend/matrix_native_client.py#L19334-L19357` limits saved `entry.refs`, while `backend/matrix_native_client.py#L25722-L25722` labels visible slots as `首帧/尾帧`.
 - Check: run `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_video_duration tests.test_agent_mode_defaults -v` plus focused digital-human tests. If runtime still shows the old model or endpoint, restart the local client and confirm the running source contains `_agent_image_payload`, `_agent_video_payload`, and `_LK888_AGENT_EXCLUDED_MODEL_IDS`. If Sora-2 still submits `duration=5`, the running client is stale; restart it and confirm `sora-2` has `duration_slots=(4, 8, 12)`. If `VIDU Narrated Comic` or `VIDU-Music MV` is still visible in the video model selector, confirm `vidu-jieshuoman` and `vidu-mv` are present in `_LK888_AGENT_EXCLUDED_MODEL_IDS`.
@@ -2886,6 +3035,25 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - Check: inspect `panelOpened`, `editorCandidateCount`, `textBubbleCount`, `customerTextCount`, `meTextCount`, and `unknownDirectionCount`. Diagnostics contain counts and geometry only; do not add cookie values or message bodies to logs.
 - Verification: `\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_dm_auto_reply -v` passed 81 tests, and `py_compile` passed for the touched Python files. A real read-only smoke with the selected account opened the target conversation and returned three customer text bubbles, exactly `呢` / `你好` / `你好`, with no action-label suffix. No message was sent during verification.
 - Rollback: restore `backend/api_server.py`, `backend/matrix_native_client.py`, `tests/test_douyin_dm_auto_reply.py`, `CHANGELOG.md`, `docs/IMPLEMENTATION.md`, and this entry, then restart the local client and local executor. No OpenAPI, database, Docker, or `migration.sql` change is involved.
+## 2026-08-07 Agent.模式「生成失败」但远程其实已经出片
+- Symptom: Agent.模式视频/图片生成走到最后报 `HTTPSConnectionPool(host='cos.lingkeai.vip', ...) SSLEOFError` 或各类网络错误,卡片标记「失败」,但**用户已经被扣费**。
+- Diagnosis: 从 `data_dir()/logs/client-*.log` 或条目的 `rawError` 里取出 URL,直接 `curl -s -o /dev/null -w "%{http_code} %{size_download}" <url>`。**返回 200 且体积正常 = 成品确实已经生成,只是没下载下来。**
+- Root cause: 扣费发生在 `lk888_media_task` 返回结果那一刻(中心服反代 `settle_lk888_actual_charge` 按实际用量结算),比 `_wf_download` 早。`product_image` / `product_video` 在 `_SERVER_CHARGED_CAPS` 里,所以 `_start` 里的 `refund_cap` 是**空操作**;远程任务成功,中心服的失败退款分支也不会命中。而结果 URL 此前从不落盘,下载一失败就彻底丢了。
+- Fix: `_prodgen_remember_result()` 在下载**之前**把 `resultUrl` + `taskId` 写进条目的 `pendingDownloadRecovery`;`_start` 把这种情况标成 `下载失败` 而不是 `失败`;卡片上出现「恢复下载」,走 `ProductGenPage.recover_download()` 只重下不重生成。`_wf_download` 加了退避重试(403 除外)与 `.part` 原子落盘。
+- Recovery: 老条目(修复前产生的)没有 `pendingDownloadRecovery`,只能从 `rawError` 里抠 URL 手动下载 —— 前提是那条 URL 不带签名。带签名的模型(Kling/Vidu/Sora 等)超过有效期就真的没了。
+- Check: `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_download_recovery -v`
+- Trap: `_PRODGEN_RUNTIME_KEYS` 必须包含 `pendingDownloadRecovery`。`regen` 是黑名单复制,漏掉它「再次生成」的新条目会带着上一条的结果 URL,点「恢复下载」拿到上一次的视频,且不报任何错。
+- Note: 排查代理导致的网络中断时,先确认失败的域名有没有被路由规则覆盖。结果媒体在 `cos.lingkeai.vip`,与上传用的 `img.yunlingai.net`、中心服 `central.yunlingai.net` **不是同一个域名**,只加 `yunlingai.net` 的直连规则盖不住它。按进程名放行比逐个域名可靠。
+
+## 2026-08-07 Agent.模式生成结果就是上传的参考图
+- Symptom: Agent.模式带参考图改图(如 `人物变成短发`,Nano Banana 2),页面显示的「生成结果」和上传的原图看起来一模一样,状态是「完成」,不报错,照常扣费。
+- Diagnosis: 对比文件哈希,不要靠肉眼。`sha1(生成文件) == sha1(参考图)` 且字节数相同,即可断定下载到的就是输入本身 —— 模型不可能产出与输入逐字节相同的 PNG。条目和文件位置见 `data_dir()/productgen.json` 的 `refs` 与 `files`。
+- Root cause: `_extract_lk888_media_url()` 遍历任务状态时**遇到第一个符合后缀的 URL 就返回**,不区分输入与输出。`_agent_image_payload()` 把参考图 URL 塞进 7 个字段(顶层 `image_urls`/`images`/`reference_images`/`referenceImages` 与 `params` 里三个),任务状态一旦回显请求参数,回显的参考图就排在成品前面。`images`/`image_urls`/`reference_images` 都不在优先键名表内,走的是「遍历所有键」那条兜底路径。
+- Fix: `backend/matrix_native_client.py` 的 `_extract_lk888_media_url(obj, exts, exclude=None)` 跳过本次传入的素材 URL(比对时去掉 query,签名 URL 每次签名不同);`lk888_media_task(..., exclude_urls=...)` 透传;`_prodgen_run_image` 传 `image_urls`,`_prodgen_run_video` 传 `reference_urls` + `reference_video_url`。
+- Check: `.\.venv-win\Scripts\python.exe -m unittest tests.test_agent_result_not_input_echo -v`。注意 `_extract_lk888_media_url` **必须自包含**:`tests/test_lk888_media_task_parsing.py` 会把它的 AST 单独抽出来 exec,引用模块级 helper 会 `NameError`。
+- Caveat: 未能抓到原始任务状态响应(直连 `api.lk888.ai` 503、走代理不稳、中心服反代需要客户端会话 token),「回显请求参数」是代码推断而非实测。修法在「响应回显」和「模型原样返回输入」两种成因下都成立。
+- Note: 修复后同类情况会变成生成超时报错,而不是静默返回原图。排查时先看 `data_dir()/logs/client-*.log`。
+
 ## 2026-08-01 Same-style replacement first video shows `media_invalid_duration`
 - Symptom: the first comic same-style replacement video cell shows an internal-looking `media_invalid...` error. In the observed job `a02c87b91aae497d8861041298302524`, project `314`, storyboard `314001`, segment 1 failed with `comic_segment_invalid:media_invalid_duration`.
 - Root cause: the video submit request timed out, so the local client entered remote recovery. The remote storyboard had only generated image frames; `endFrameUrl` and generic `resultUrl/url` pointed to a `.png`. The old recovery code accepted that image as `videoUrl`, downloaded it as MP4, and failed local video validation because duration was zero.
@@ -2982,3 +3150,37 @@ Windows 本地导出包的完整 `tests.test_video_replacement_v2 -v` 受环境�
 - 排查：当前阶段下载按钮必须为禁用状态，页面源码不应包含 `/MatrixShipAgent-Setup.exe`。运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest -v` 验证。
 - 验证：本地访问 `http://127.0.0.1:9080/download` 应返回 HTML，包含“云灵星图 AI 爆款复刻平台 Windows 客户端下载”和“Windows 客户端即将开放下载”，且不包含安装包直链。
 - 回滚：删除 `/download` 路由和页面渲染函数；不需要改动安装包直链接口、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
+## 2026-08-07 漫剧项目模式片段时长虚高、单条成本偏贵
+- 现象：同款替换选择漫剧项目模式后，一句约 11 秒的口播被排成 15 秒视频，整条片子时长和费用明显高于预期。
+- 根因一：口播时长估算默认按 `4.2` 字/秒，比真实中文广告口播语速（约 5.5~6.5 字/秒）慢约 25%，59 字的台词被估成 14.89 秒。
+- 根因二：`_comic_video_duration_slot()` 只有 `4/8/12/15` 四个粗档位，估算值一旦越过 12 就直接跳到 15，无法申请中间秒数。
+- 修复：估算默认语速改为 `5.5` 字/秒；漫剧档位默认改为 `4..15` 每个整数秒并预留 `0.5` 秒余量；排期阶段先跑一遍 TTS 用 `_probe_media_duration()` 探测真实音频时长，测到就用真实值定视频秒数，测不到自动回落到字数估算。
+- 排查：查看任务 JSON 的片段字段 `speechDurationSource`（`measured` 表示用了真实 TTS 时长，`estimated` 表示回落到估算）、`speechDurationSec`、`speechEstimatedSec`、`videoDurationSec`。若出现 `speechOverflowSec`，说明该段真实口播已超过最大 15 秒档位，需要缩短口播稿。
+- 注意：探测用的是本地 `lk888_tts_voice()`，漫剧服务端生成成品时用的是自己的 TTS 引擎，两者语速可能有差异，因此仍保留 `0.5` 秒余量。
+- 回滚：`VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15` 恢复旧档位，`VIDEO_REPLACE_TTS_CHARS_PER_SEC=4.2` 恢复旧估算语速，`VIDEO_REPLACE_COMIC_MEASURE_TTS=0` 关闭真实时长探测；三个开关互相独立，不需要改代码。
+- 未验证项：漫剧服务端（120.26.194.174）对任意整数秒 `video_duration` 的支持尚未实测，首次启用请先跑单段冒烟；`_comic_project_create_payload()` 的 `duration_per_shot` 取的是全片最大段时长，服务端在 `video_duration_control=auto` 下是否会用它覆盖每段 `video_duration` 也需要另行确认。
+
+## 2026-08-04 `/replacement` returns 404 or local replacement job does not start
+- Symptom: opening `http://127.0.0.1:9081/replacement` returns `replacement_web_disabled`; direct browser submits show "请从本地客户端打开替换网页" or `agent_token_required`; submitting the video/image-note form returns `replacement_invalid_source_url`, `replacement_video_missing_character_image`, or `replacement_note_missing_images`; or saving an image-note preview returns `xhs_note_replacement_missing_images`.
+- Root cause: the MVP is disabled by default through `MATRIX_REPLACEMENT_WEB_ENABLED=0`; the page shell can open locally, but `/api/replacement/*` still requires the local agent token when token auth is enabled. Customer sessions used to start from the native "打开网页版替换" button so the local executor token and redacted user context were passed through the URL hash and immediately stored in `sessionStorage`; that button no longer exists on either page as of 2026-08-07. Phase 0 accepts only `http/https` source links without userinfo credentials and requires the video character image or at least one note replacement image. Saving a note draft also requires every preview slot to point to a real readable uploaded image before copying files into the local material library.
+- Fix: set `MATRIX_REPLACEMENT_WEB_ENABLED=1` only for the intended dev/staging/local rollout and restart the local executor. **Since 2026-08-07 there is no native entry button on either page**, so the only remaining way in is the manual `/replacement#token=...` local troubleshooting fallback below; the previous "同款替换 / 图文同款 -> 打开网页版替换" step no longer exists. Manual `/replacement#token=...` / `/replacement#agentToken=...` remains a local troubleshooting fallback; never send this token to customers or logs. Use public-looking `http/https` test URLs and fake local image files for the Phase 0 smoke. If video submit succeeds, the page should clearly state that the local task was created but the current customer preview does not execute real video generation.
+- Diagnostics: check structured logs for `replacement_web_page_opened`, `replacement_web_job_started`, and `replacement_note_draft_saved`; they must not contain Cookie, Token, Authorization, Bearer, signed URL query strings, data URLs, or raw file bytes. If old behavior remains after changing the flag, confirm port `9081` belongs to the restarted executor and not a stale process. For draft failures, inspect `replacement_web_uploads/note/<jobId>/` and `xhs_note_replacements/<jobId>/replacement_job.json` under the local data directory.
+- Verification: run `.\.venv-win\Scripts\python.exe -m unittest tests.test_replacement_web_mvp -v`, `.\.venv-win\Scripts\python.exe -m unittest tests.test_openapi_contract -v`, and `.\.venv-win\Scripts\python.exe -m py_compile backend\api_server.py backend\replacement_web.py backend\platform_features.py backend\matrix_native_client.py tests\test_replacement_web_mvp.py`.
+- Rollback: set `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restart the local executor; restart or roll back the native client to remove the entry button. Source rollback restores `backend/matrix_native_client.py`, `backend/api_server.py`, `backend/replacement_web.py`, `backend/platform_features.py`, `tests/test_replacement_web_mvp.py`, `docs/openapi.yaml`, `docs/API_REFERENCE.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/IMPLEMENTATION.md`, `CHANGELOG.md`, `migration.sql`, and this entry. No database, Docker image, LK888, remote AI Canvas, publishing, or billing side effect is expected.
+
+## 2026-08-04 Windows 安装包不能选择安装位置
+- 现象：运行 `MatrixShipAgent-Setup.exe` 后，软件直接安装到 `C:\Users\<user>\AppData\Local\MatrixShipAgent\app`，安装向导没有“选择安装位置”页面。
+- 根因：Inno Setup 脚本 `backend/installer/MatrixShipAgent.iss#L18-L25` 默认安装到 `{localappdata}\MatrixShipAgent\app`，旧配置 `DisableDirPage=yes` 隐藏了目录选择页。
+- 修复：`backend/installer/MatrixShipAgent.iss#L18-L25` 保留默认用户态目录和 `PrivilegesRequired=lowest`，但把 `DisableDirPage` 改为 `no`，允许用户在安装向导中选择 D 盘/E 盘等目录。
+- 相关排查：如果 `backend\build_matrix_agent.ps1` 提示找不到 Inno Setup，先确认 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`、`C:\Program Files\Inno Setup 6\ISCC.exe` 或 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` 是否存在；脚本会按这三个位置查找。
+- 验证：运行 `.\.venv-win\Scripts\python.exe -m unittest tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory tests.test_web_surface_removed.WebSurfaceRemovedTest.test_build_stays_native_only -v`，再重新构建安装包并在 Windows 安装向导中确认出现目录选择页。
+- 回滚：把 `backend/installer/MatrixShipAgent.iss` 的 `DisableDirPage` 改回 `yes`，必要时回滚 `backend/build_matrix_agent.ps1` 的用户级 Inno 查找路径，重新运行 `backend\build_matrix_agent.ps1` 打包并发布上一稳定安装包；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量、密钥或 `migration.sql`。
+
+## 2026-08-04 `/replacement` video handoff is missing
+- Symptom: `/replacement` opens, but video replacement still looks like a disconnected Phase 0 form, or `GET /api/replacement/video/handoff` returns `replacement_video_handoff_not_found`.
+- Root cause: the page was opened without a valid `handoffId`, the handoff expired, the native same-style replacement page had not loaded a video breakdown source, or the running local executor is stale and does not include the handoff route.
+- Fix: restart the updated local executor with `MATRIX_REPLACEMENT_WEB_ENABLED=1`, restart the native client, enter same-style replacement from a completed video breakdown, then click "打开网页版替换" from that page. The URL hash should contain `handoffId=...`, but must not contain local paths, center tokens, phone numbers, cookies, or signed media URLs. **Obsolete since 2026-08-07**: both native "打开网页版替换" buttons and `open_replacement_web_page()` were removed, so no UI path produces a video handoff. `create_replacement_web_handoff()`, `replacement_web_launch_url()` and `GET /api/replacement/video/handoff` still exist and are still covered by tests; reaching them now requires restoring a button or calling the API directly.
+- Checks: `GET /api/replacement/video/handoff?handoffId=<rwh...>` should return `source.host`, `sourceVideo.available`, `analysis.duration`, and no `sourceVideoPath`; a subsequent `POST /api/replacement/video/start` with the same `handoffId` should create an `rvw_...` job whose response has `sourceContext.hasBreakdownAnalysis=true`.
+- Boundary: this handoff only proves the web page is bound to the native local breakdown context. It still does not submit LK888, remote AI Canvas, provider video generation, publishing, center sync, or billing.
+- Rollback: set `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restart the local executor, or restore `backend/matrix_native_client.py`, `backend/replacement_web.py`, `backend/api_server.py`, `tests/test_replacement_web_mvp.py`, OpenAPI/API docs, `CHANGELOG.md`, `migration.sql`, and this entry.
+

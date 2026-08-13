@@ -1,5 +1,458 @@
 ﻿# Changelog
 
+## 2026-08-10 分解视频修复 `下载未完成 [WinError 267] 目录名称无效`
+### Fixed
+- `backend/utils/data_util.py#L328-L340` 现在把抖音 `user_id`、`work_id` 和 `title`、`nickname` 一起经 `norm_str` 清洗后再拼下载目录，避免作者抖音号或作品 id 里的英文冒号 `:` 让 Windows 把路径当成 NTFS 数据流、`os.makedirs` 抛 `NotADirectoryError [WinError 267] 目录名称无效`，导致“分解视频”下载阶段直接失败并把原始异常文案回显给用户。
+- `backend/utils/data_util.py#L74-L86` 的 `norm_str` 额外剥除控制字符（`\t`、`\n`、`\r`、`\x00-\x1f`、`\x7f`），顺带修掉标题/昵称里混入控制字符时的 `[WinError 123] 文件名、目录名或卷标语法不正确` 兄弟问题；对合法标题（如“夏日穿搭分享”）的目录名保持不变。
+- 兜底加固：`backend/api_server.py#L8313-L8332`（抖音）和 `backend/api_server.py#L8385-L8401`（小红书）下载分支新增 `except OSError`，把意外的文件系统异常统一成稳定契约码 `download_exception`（502 + 脱敏 errorId，不回显 `str(e)`/traceback），避免以后任何新异常再把原始 `[WinError …]` 文案漏给用户；只捕获 `OSError`，不影响抖音鉴权错误的 `needLogin` 分支。`backend/matrix_native_client.py#L22130-L22131` 把 `download_exception` 本地化为“视频下载失败，请稍后重试。”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_download_work_path_sanitization.DownloadWorkPathSanitizationTest`（冒号 user_id/work_id、控制字符标题、全非法字符、正常标题共 5 例，修复前 4 例复现 `[WinError 267]`/`[WinError 123]`，修复后全绿）；`tests.test_api_download_contract.ApiDownloadContractTest.test_douyin_download_normalizes_unexpected_oserror_to_contract_code`、`test_xhs_download_normalizes_unexpected_oserror_to_contract_code`（断言不泄漏 `WinError 267`/traceback）；`tests.test_video_breakdown.VideoBreakdownHelpersTest.test_unexpected_download_error_is_localized_for_breakdown_status`。
+- 回归 `.\.venv-win\Scripts\python.exe -m unittest tests.test_api_download_contract tests.test_authenticated_download tests.test_download_work_path_sanitization tests.test_video_breakdown`（105 通过），`py_compile` 通过。
+- 本次改动本地执行器下载落盘目录清洗、下载分支异常兜底、客户端下载错误文案与测试文档；不涉及中心服 API、OpenAPI、数据库、Docker、环境变量密钥或 `migration.sql`。重启本地执行器后生效；回滚 `backend/utils/data_util.py`、`backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_download_work_path_sanitization.py`、`tests/test_api_download_contract.py`、`tests/test_video_breakdown.py`、`CHANGELOG.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
+## 2026-08-10 Agent 模式视频/音频上传做成顶部显眼槽位
+### Fixed
+- Agent.模式选到必须传视频的模型（如 HappyHorse 视频编辑 `happyhorse-video-edit`）时，顶部只有「参考图」槽，而视频/音频上传藏在右下角一排小圆钮里（窄窗口会被挤出屏幕），用户反馈「必选视频却找不到上传入口」。现按模型契约在参考图旁边给出显眼的带标签槽位：必选标「（必选）」橙色、可选标「（可选）」、已选变青色打勾；`happyhorse-video-edit` 给「待编辑参考视频（必选）」，全能参考家族给「参考视频＋参考音频」，纯文生视频模型不出现、免添乱。右下角圆钮保留作次入口（现有测试仍依赖它）。
+- `_rebuild_ref_slots` 新增 `_make_media_cell(kind)` 并按 `_media_limit(kind)>0` 渲染；选/清后 `pick_media_files`/`clear_media_files`/`_clear_all_media` 触发 `_style_ref_slot()` 重建，槽位实时反映已选态。
+
+### Verification And Operations
+- 补 `tests/test_agent_video_upload_contract.py`：①新增断言——happyhorse-video-edit 出现视频槽、全能参考出现视频＋音频槽、纯文生视频（kling-v2-6）不出现；②修正 `test_hand_written_overrides_still_win_over_the_schema`：它此前把 `wan2.7-cankaosheng` 的 `video_field` 锁成 `video`——那正是 `3a57710` 修掉的 bug（参考视频发到 `video`，模型收不到），当时只改了 `test_agent_video_duration` 漏了本文件，现补齐为真实字段 `reference_video`。
+- `.venv-win` + offscreen Qt 跑 137 项 agent 相关测试全绿；`py_compile` 通过。仅改本地原生客户端 Agent.模式 UI，不动中心服 API / OpenAPI / 数据库 / Docker / 密钥 / `migration.sql`。退出后 `start-visible-client.bat` 重启生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_upload_contract.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 可还原。
+
+## 2026-08-10 同款替换移除 SD 2.0 全能参考，标签对齐漫剧生成器
+### Fixed
+- 同款替换下拉框删除 `SD 2.0 全能参考`（真实模型标识 `kwvideo-v2-quannengcankao`）。它此前是同款替换内置备选，但漫剧生成器的视频模型目录本就用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧长期不一致；删除后同款替换成为漫剧生成器视频目录的干净子集。
+- 从 `_LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS`、`_LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS` 和标签表移除该模型；删除 `_replacement_is_sd20_all_reference_row` 及其在 `_replacement_supported_model_rows` 里的回填循环（否则会从实时 LK888 目录把它重新加回下拉框）；`_replacement_configured_model_is_allowed` 去掉 SD2.0 模糊分支。非主角模式若把任务级 `model` 指向它会被拒绝并提示改用 `viduq3-turbo-cankaosheng`。
+- 顺带把 4 个模型的同款替换显示名对齐漫剧生成器：`happyhorse-video-edit`→“HappyHorse 视频编辑”、`happyhorse-r2v`→“HappyHorse 参考生视频”、`happyhorse-1.1-r2v`→“HappyHorse 1.1 参考生视频”、`wan2.7-cankaosheng`→“Wanxiang 2.7 参考生视频”。海螺 H3 全能参考（`hailuo-h3-quannengcankao`）不受影响，仍是内置多模态全能参考选项。
+
+### Verification And Operations
+- 测试：把 `test_replacement_supported_model_rows_include_sd20_all_purpose_from_catalog` 和 `..._include_known_sd20_all_purpose_model` 两条**断言 SD 2.0 全能参考存在**的用例反转为排除用例，并新增 `test_replacement_configured_model_rejects_sd20_all_purpose_model`。旧断言固化的正是本次要删除的行为（同款替换应提供 SD 2.0 全能参考），故一并更新。`tests.test_video_replacement_v2`/`test_video_replacement`/`test_agent_video_duration` 合计 495 条通过，`py_compile` 通过。
+- 仅本地客户端 UI/模型目录变更，不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/DEPLOYMENT.md`、`docs/ARCHITECTURE.md` 和 `docs/API_REFERENCE.md` 可恢复。
+
+## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
+### Fixed
+- Agent.模式选万相 2.7 参考生（`wan2.7-cankaosheng`）时，参考图此前写进 `images/image_urls/reference_images`、参考视频写进 `video`，而该模型真实 LK888 字段是 `reference_urls` 与 `reference_video`，导致上游收不到参考素材、退化为纯文生视频。现按真实字段提交（`_agent_video_payload` 增加该模型的精确分支，只写 `reference_urls`/`reference_video`，不带多余别名；契约 `video_field` 同步改为 `reference_video`）。
+
+### Verification And Operations
+- 更新 `tests/test_agent_video_duration.py` 三处旧断言：它们与实现同源、把该模型字段锁成了错误的 `images`/`video`（名为 `match_lk888` 却并不匹配真实 LK888 契约），现按实测字段 `reference_urls`/`reference_video` 断言。
+- `.venv-win` 下 `tests.test_agent_video_duration`、`tests.test_agent_regen_keeps_params` 全绿；`py_compile` 通过。运行时 `wan2.7-cankaosheng` 现输出 `{reference_urls:[...], reference_video:...}`，无 `images`/`video` 残留。
+- 仅影响本地原生客户端 Agent.模式该模型的 payload;不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。退出后 `start-visible-client.bat` 重启生效。回滚 `backend/matrix_native_client.py`、`tests/test_agent_video_duration.py`、`CHANGELOG.md` 可恢复旧行为。
+- 本次为并行分支 `claude/agent-model-params-ui-e46b0b`（已用 -s ours 记录合并）中唯一目标分支尚缺的修复,单独移植过来;该分支其余 Agent 上传框工作与本分支已有实现重复,故不取其内容。
+
+## 2026-08-08 内容采集页恢复"图文同款"按钮
+### Fixed
+- 内容采集页重新加入"图文同款"按钮（在"下载"和"分解"之间），并恢复 `note_replace()` 方法。小红书笔记大部分是图文，此前只剩"分解"（视频专用），对图文笔记点分解会因找不到视频文件报"分解失败:未找到可分析的视频文件"。
+- 该入口在 2026-08-03 的 `5e3c052` 被删除（只留下孤儿处理器 `c_note_replace`），是有意隐藏，但导致图文笔记在内容采集页无可用出口。现按用户要求恢复。
+- "图文同款"按钮下载笔记后经现有 `c_note_replace` 处理器解析图片素材并跳转"🧩 图文同款"页；"分解"按钮仍只处理视频，两个入口并存。
+
+### Verification And Operations
+- RED/GREEN：`tests.test_xhs_note_replacement` 的 `test_content_page_shows_note_replacement_button`（按钮存在）和 `test_native_collection_has_note_replace_button_and_handoff_handler`（源码含按钮+方法+处理器），由原来锁定"隐藏"的两条测试反转而来。全套 62/62 通过；相邻套件合计 177/177；`py_compile` 通过。
+- 仅本地客户端 UI 变更；不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。重启本地客户端后生效。回滚 `backend/matrix_native_client.py`、`tests/test_xhs_note_replacement.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复隐藏行为。
+
+## 2026-08-08 小红书搜索后立即下载被 xhs_safety_interval 误拦
+### Fixed
+- 小红书安全间隔冷却改为**按动作类型分别计算**：`search` / `download` / `comment` / `publish` 各自独立 `lastActionAt`。此前全账号共享一个时间戳，一次搜索会让紧随其后的下载/分解在 `minInterval`（默认 45s）内被 `xhs_safety_interval` 拦，而“搜索→点结果→下载”正是内容采集的自然顺序流。
+- 同类型动作之间仍保留 `minInterval` 限速（连续两次下载仍会被拦），防风控意图不变；只是不再跨动作类型互相阻塞。
+- 平台风险暂停 `xhs_safety_paused` 仍是全局的（一次风控信号暂停所有动作），未改动。
+
+### Verification And Operations
+- RED/GREEN：`tests.test_xhs_safety_mode.test_search_does_not_block_immediate_download`（搜索后下载放行）、`test_min_interval_still_throttles_repeated_download`（连续下载仍限速）。原 `test_min_interval_blocks_xhs_download_endpoint` 固化了“搜索拦下载”的错误行为，已替换。相邻套件 `tests.test_douyin_comment_cooldown` 的间隔逻辑是另一套函数（`minIntervalCooldownLeft`），未受影响；该文件仅有的 1 条 `playwright` 报错是环境未装 playwright 所致，基线同样存在，与本次无关。`py_compile` 通过。
+- 状态文件向后兼容：旧 `xhs_safety_state.json` 无 `lastActionAtBy` 字段，读取时补空 dict；升级后首次下载不再被历史 `search` 时间戳阻塞。
+- 只改本地执行器安全间隔逻辑和测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。回滚 `backend/api_server.py`、`tests/test_xhs_safety_mode.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
+## 2026-08-08 小红书账号矩阵登录成功却显示 0 个授权账号
+### Fixed
+- `run_xhs_login()`（账号矩阵 `/api/xhs/login` 的执行体）登录成功后现在写入 `xhs_auth_state.json{loggedIn,cookieCount}`，与云登录路径 `_read_login_state()` 对齐。此前该路径只组 job、不写 marker。
+- 影响：账号列表就绪判定 `xhs_profile_ready()` 在无 marker 时只认强 cookie（`id_token` / `customerClientId` / `galaxy_creator_session_id` / `access-token-creator.xiaohongshu.com`）。而 `xhs_login()` 的登录判定还接受 DOM 登录态和主站 `web_session`——两套标准不一致，主站/DOM 登录成功但 profile 缺强 cookie 时，`current_accounts()` 返回 0 个小红书账号，卡片显示“暂无授权账号”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_account_online_status.test_run_xhs_login_marks_profile_ready_on_success`：mock `platform_adapters.xhs_login` 返回登录成功但 profile 无强 cookie，断言修复前 `xhs_profile_ready` 为假、账号数 0，修复后为真、账号数 1。相邻套件合计 193/193 通过；`py_compile` 通过。
+- 运行现场说明：排查时线上 9080/9081 由 codex-runtime 老客户端占用（token 与 `backend/datas/agent_token.txt` 不一致，无法直接内省其账号列表），本 bug 通过 `run_xhs_login` 接缝在代码级复现，不依赖具体运行实例。要看到修复效果必须重启加载本仓库代码的本地执行器。
+- 只改本地执行器登录持久化和新增测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
+## 2026-08-08 中心服小红书恢复开关未接线导致内容采集搜索固定失败
+### Fixed
+- 中心服三个小红书路由闸门（`create_task()`、`local_browser_create_task()`、POST 分发器）此前**无条件**返回 `platform_disabled`，从不检查 `MATRIX_XHS_ENABLED`。新增 `_xhs_route_blocked()`，开关打开时返回 `None` 放行，关闭时仍返回原有脱敏的 `platform_disabled` 契约。
+- 影响：文档承诺的「设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服」在中心服这一侧从未生效。本地客户端和本地执行器都放行，只有中心服拦死，内容采集选小红书搜索固定失败在 `搜索失败:platform_disabled`。
+- `_xhs_disabled()` 里原有的 `_ = XHS_ENABLED_ENV` 是个空引用，只是把开关名字提了一下，没有任何判断逻辑。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_platform_disable` 新增的 `test_central_restores_xhs_task_routing_when_flag_is_set` 和 `test_central_local_browser_channel_accepts_xhs_task_when_flag_is_set`；原 `test_local_browser_xhs_task_type_is_disabled` 从「grep 源码字符串」改为真正调用 `local_browser_create_task()` 断言 404。相邻套件共 162/162 通过；`py_compile` 通过。
+- 生产默认行为不变：未设 `MATRIX_XHS_ENABLED` 时中心服仍返回 404 `platform_disabled`，已单独验证。
+- `LOCAL_BROWSER_ALLOWED_TYPES` 仍在 import 期由 `filter_xhs_capabilities()` 计算，所以开关必须在中心服**启动前**设置，与既有「重启三个运行单元」的操作说明一致。
+- 只改中心服路由闸门和测试，不涉及 OpenAPI 路径、JSON Schema、数据库、Docker 镜像结构或 `migration.sql`。连接远程中心服的客户端要等该中心服同时部署本修复并带 `MATRIX_XHS_ENABLED=1` 重启后才会生效；本地测试请把 `start-visible-client.bat` 的 `START_LOCAL_CENTRAL` 设为 `1`。回滚 `backend/central_server.py`、`tests/test_xhs_platform_disable.py` 和本条记录即可。
+
+## 2026-08-08 小红书登录成功后账号矩阵仍显示离线
+### Fixed
+- 本地执行器 `/api/accounts` 返回小红书 `xhs-self` 时补写 `online` / `status` / `needLogin`，与抖音账号行对齐。该分支的前置条件已经是 `xhs_profile_ready()`，即本机登录态可用，所以直接置为在线；登录态消失时整行不再返回，账号矩阵仍按离线处理。
+- 这是 2026-08-03「账号矩阵登录直连本机执行器」的回归：登录不再经中心服 `/api/local-browser/task`，`local_browser_upsert_account()` 不再被触发，而中心服账号记录是小红书 `online` 的唯一来源。抖音本地行自带 `online`，因此未受影响。
+- 同一根因还导致内容采集、获客寻客和素材发布的账号下拉把已登录的小红书账号过滤掉（`clean_accounts(ready_only=True)` 依赖 `online`），并误报“账号已存在，但登录态已失效”。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_xhs_account_online_status`（4 条，含本机登录态消失后不显示账号的对照项）；相邻套件 `tests.test_douyin_multi_account tests.test_native_publish tests.test_account_matrix_metrics tests.test_xhs_platform_disable tests.test_api_download_contract tests.test_xhs_safety_mode` 通过；`py_compile` 通过。
+- 本次只改本地执行器账号列表和新增回归测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。需退出后用 `start-visible-client.bat` 重启本地客户端和本地执行器生效。中心服若未设置 `MATRIX_XHS_ENABLED=1`，账号资产总览仍不会收录小红书账号，三个运行单元的开关需一致。回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
+## 2026-08-08 同款替换 / 图文同款界面改版
+
+### Changed
+- 「同款替换」「图文同款」改为“换位台账”布局：每个可替换位显示 原片槽位 → 你的素材，状态由连接线本身表达（虚线=保留原片，主色实线箭头=已替换，琥珀箭头指向空槽=待补），不再散落在别处的说明文字里。
+- 图文同款把「原笔记图片」和「替换图片」两条缩略图带按同一列距上下叠放并联动滚动，第 N 张原图正对第 N 个替换槽。改版前两条带子分处两张卡片，多图时需要人工数位置对应。
+- 同款替换的 7 个平铺按钮收敛为行动条 2 个（生成替换方案 / 执行替换生成），其余按钮移到各自操作对象旁：重生/重试贴片段表，打开成片/加入待发布贴成片，取消任务贴进度。
+- 「纯产品视频（无人物）」从人物行移到分区标题栏——它是关闭整个人物槽位的模式开关，不是人物槽位的一个属性。
+- 两个页面新增行动条，进入生成前即显示还缺哪些素材和必填项；判断口径与 `start_generation` 的拦截条件一致，避免界面说可以、点下去被拦。
+- 图文同款底部原先直接摞在页面背景上的文案输入框收进「生成结果 · 文案方案」分区，`保存草稿` 移到它所保存的内容旁边。
+
+### Fixed
+- 亮色主题下主色按钮几乎不可见：页面容器使用无类型选择器 `setStyleSheet("background:transparent")`，该选择器会沿继承作用到子控件，把 `#primary` 的主色底刷成透明（暗色下不明显，亮色下变成白底白字）。改为使用 QSS 既有的 `QWidget#page` 规则。
+- 亮色主题下 `QCheckBox` 勾选框不可见：白描边 + 半透明白底压在白卡上。该问题影响「我确认已获得该人物素材授权」等授权确认项。勾选框配色改为 token 驱动。
+- 亮色主题下禁用按钮白字压浅灰读不出来。这两个页面为闸门式流程，多数按钮初始即为禁用态，影响尤其明显。
+- 补充横向滚动条样式（此前 QSS 只定义了纵向滚动条）。
+
+### Notes
+- 上述三条 Fixed 通过全局主题 token 与 QSS 修复，作用于所有页面，不限于本次改版的两个页面。
+- 纯本地客户端展示层改动。不涉及中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；不涉及任何远程部署。退出后重启本地客户端生效。
+
+## 2026-08-07 音频上传接通，视频支持多文件
+### Added
+- 新增音频上传按钮 `ref_audio_btn` 与统一的 `pick_media_files(media)` / `clear_media_files(media)`,按模型 schema 的 `*_limit` 显隐。`kling-avatar-image2video`(`sound_file` 必填)、`vidu-mv`(`audio_url` 必填)、`wan2.6-shouzheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao` 从「完全用不了」变成可用。
+- 新增 `_prodgen_media_reference_urls(paths, media, title)`,视频/音频共用一条上传通道;`_prodgen_run_video()` 现在会上传音频并把 `reference_audio_url` 传进 payload —— 此前 `_agent_video_payload()` 早就接受这个参数,但**调用方从来没传过**,音频端到端不通。
+- 视频/音频都支持多文件:`self._media_files = {"video": [], "audio": []}`,条目新增 `referenceVideos` / `referenceAudios`。`referenceVideo` 保留为取首个的属性别名,历史条目与老代码不受影响。
+- 输入框下方新增媒体行,列出已选文件名与配额(`参考视频 2/3：a.mp4、b.mp4　参考音频 1/3：voice.mp3`);必填未传时显示「该模型必须上传参考音频」。右键该行清空全部媒体。
+- 换到不收该类素材的模型时自动清掉已选文件,不会偷偷带着走。
+
+### Fixed
+- `is_array` 判定补上「上限 >1 也必须是数组」。`hailuo-h3-quannengcankao` 的 `video_url` 是**单数名却收 3 个**,3 个 URL 塞不进一个字符串。
+- 上传数量解析补上量词「段」「条」。音频描述写的是「参考音频最多 3 段」「上传0~3段参考音频」,此前一律解析失败退回 1。
+- 描述里没写数量时,视频/音频不再拿上限当默认值。`wan2.7-xuxie` 的 `clips` 描述是「上传首段视频」,此前因为是复数名直接取 `_AGENT_REF_SLOT_CAP=10`,界面上能选 10 个视频。图片路径不变(仍被 legacy 硬顶压回)。
+- `_agent_video_payload()` 的 `reference_video_url` / `reference_audio_url` 同时接受单个字符串与列表,并按各自 `*_limit` 截断。
+
+### Notes
+- **未做真实生成验证**(按约定不跑模型)。本次让这些模型多发视频/音频字段,若上游拒绝,回滚粒度是 `_agent_schema_media_defaults()` 那一行 `requirements.update(...)`。
+- 图片参考图仍被 `MAX_REFS = 4` 封顶:`hailuo-h3-quannengcankao` 的提示语写着「参考图片 ≤9 张」,实际只能传 4 张。这是既有的 UI 上限,本次没动。
+- `wan2.7-cankaosheng` 的 `video_field` 仍以覆盖表的 `video` 为准(schema 说 `reference_video`),两边都没有实跑证据。
+
+### Verification And Operations
+- `tests` 全量 **1599 通过 / 1 失败**,失败的是与本次无关、已知顺序依赖的 `test_douyin_comment_cooldown`(同一份代码上时绿时红)。
+- `tests/test_agent_video_upload_contract.py` 增至 14 条:音频按 schema 字段名进 payload、多视频成数组、单数名但上限 >1 也成数组、「段」量词解析、无数量描述默认 1 个、单字符串仍可读、超限截断、必填缺失阻断提交、音视频按钮显隐、换模型清空。
+- 离屏核对:`hailuo-h3-quannengcankao` 三个上传口齐全 + 媒体行显示 `参考视频 2/3`、`参考音频 1/3`;`vidu-mv` 只出音频口并提示必填。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 声明了视频上传的模型终于能传视频
+### Fixed
+- 新增 `_agent_schema_media_defaults()`,`_agent_video_media_requirements()` 现在按模型自己的 schema 推导视频/音频上传契约(`*_limit` / `*_field` / `*_required` / `*_is_array`),手写的 `_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES` 仍然**优先**(那些是线上验证过的)。
+- 症状:13 个视频模型在 schema 里声明了非图片上传,客户端的手写契约只覆盖 3 个,其余 **10 个连上传按钮都不出现**。现在 `kling-motion-control`、`wan2.2-animate-mix`、`wan2.7-xuxie`、`kling-v3-omni-videoref`、`hailuo-h3-zaishengcheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao` 的视频上传入口都回来了。
+- `_agent_video_payload()`:复数名字段按 LK888 自己的约定传数组。`wan2.7-xuxie` 的 `clips` 现在发 `["https://..."]` 而不是裸字符串。
+
+### Notes
+- **音频上传仍然不可用**,这次没做。5 个模型声明了音频上传(`kling-avatar-image2video` 的 `sound_file` 必填、`vidu-mv` 的 `audio_url` 必填、`wan2.6-shouzheng`、`hailuo-h3-quannengcankao`、`kwvideo-v2-quannengcankao`)。契约层已经能算出 `audio_limit`/`audio_field`,`_agent_video_payload()` 也早就接受 `reference_audio_url`,但**界面上没有音频上传控件**,且 `_prodgen_run_video()` 从不把音频 URL 传下去。要做需要:新增上传按钮 + 条目字段 + 上传通道 + 生成卡展示。
+- `wan2.7-cankaosheng` 的 `video_field`:schema 说 `reference_video`,覆盖表说 `video`,按规则覆盖表赢。这一条**两边都没有实跑证据**,先保持现状不动。
+- 多文件视频上传暂未支持:界面只有一个 `self._reference_video` 单值,所以 `wan2.7-xuxie`(schema 上限 10)、`hailuo-h3-quannengcankao`(3)实际只能传 1 个。
+- 本次改动会让这些模型**多发一个视频字段**,未做真实生成验证(按约定不跑模型)。回滚:删掉 `_agent_schema_media_defaults()` 那一行 `requirements.update(...)`。
+
+### Verification And Operations
+- `tests` 全量 **1589 通过**。
+- 新增 `tests/test_agent_video_upload_contract.py`(7 条):遍历全部 67 个模型断言「声明了 video/audio 上传就必须有非零上限」、字段名取自 schema、覆盖表优先、无视频上传的模型保持 0、复数名传数组、单数名传字符串、以及离屏断言上传按钮的显隐。
+- 排查时注意:目录没同步时 `_sync_model_ui()` 会把不在列表里的模型**静默换回第一个**并 early return。用离屏脚本核对前必须先灌好 `_video_models`,否则测的是另一个模型。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 grok-video-3 恢复首帧图上传
+### Fixed
+- `_AGENT_VIDEO_REFERENCE_LIMITS["grok-video-3"]` 由 `0` 改为 `1`,界面上重新出现参考图槽位。此前写 `0` 导致这个模型在客户端里**根本不给传图**,而它的 schema 明确写着 `images` 可选、1 张作首帧、「不传则为文生视频」,lk888 自己的表单也是可以传的。
+- `_agent_video_payload()` 把 `grok-video-3` 并入 `grok-imagine-video-1.5-preview` 那条分支:有图时只发 schema 声明的 `params.images`(1 张),不发顶层那一堆别名。`size` / `duration` / `pop(aspect_ratio, resolution)` 的处理完全不动 —— 那部分是线上验证过的(`docs/TROUBLESHOOTING.md` 2026-08-03)。
+- 不传图时行为不变,仍是文生视频,不会塞一个空 `images`。
+
+### Notes
+- 这个 `0` 没有任何排查记录支撑。仓库里唯一的 grok-video-3 事故记录讲的是 5 秒时长没有可用渠道分组,与参考图无关。测试里那条 `assertNotIn("images", ...)` 和上限表的 `0` 是同一个猜测的两半,一起改掉了。
+- 顺带确认 `grok-imagine-video-1.5-preview`(展示名 **grok-video-3.5**)本来就能传图且 `required=True`。菜单里两个名字很像,选错容易误判成「传不了」。
+- **未做**:schema 说 `grok-video-3` 的 duration 有 `6` 和 `10` 两档,客户端目前只暴露 `10`。那是 2026-08-03 因「5 秒找不到可用渠道分组」收窄的,`6` 秒从未验证过,没有证据就不动。
+- 本次是**请求内容的变更**(多发一个 `params.images`),但未做真实生成验证 —— 按之前的约定不跑模型。若上游拒绝,回滚只需把上限改回 `0`。
+
+### Verification And Operations
+- `tests` 全量 **1582 通过**,唯一失败是与本次无关的 `test_douyin_comment_cooldown`(顺序依赖,上一轮全量跑为绿)。
+- `tests/test_agent_video_duration.py`:`test_agent_grok_video3_payload_matches_lk888` 改为断言首帧图进入 `params.images` 且不发顶层别名;新增 `test_agent_grok_video3_without_a_reference_stays_text_to_video`。
+- 离屏核对:`grok-video-3` 上传槽位由 0 变 1,`grok-imagine-video-1.5-preview` 与 `kling-v2-6` 不受影响。
+- 需重启本地客户端生效。未重新打包、未上传服务器。
+
+## 2026-08-07 已生成但没下载下来的成品可以恢复，不再白扣
+### Fixed
+- 事故:Agent.模式视频生成成功(成品 4.55MB 确实在 `cos.lingkeai.vip` 上,实测 HTTP 200 可下载),下载时 TLS 被掐断抛 `SSLEOFError`,整条被标记为「失败」,用户界面上还直接显示了 `HTTPSConnectionPool(host='cos.lingkeai.vip'...` 这样的原始报错。
+- **钱是白扣的**:扣费发生在 lk888 返回结果那一刻(中心服反代按实际用量结算,`central_server.py` `settle_lk888_actual_charge`),比下载早;而 `product_video` 在 `_SERVER_CHARGED_CAPS` 里,`_start` 那行 `refund_cap` 对这类能力**一行网络请求都不发、直接返回成功**。远程任务是成功的,中心服的失败退款分支也永远不会命中。此前 Agent.模式只继承了漫剧的「不退款」,没继承它的「可恢复」。
+- `_prodgen_remember_result()` + `lk888_media_task(..., on_result=)`:在**下载之前**就把结果 URL 与 task_id 落进条目的 `pendingDownloadRecovery`。同时存 task_id 是因为签名 URL 会过期,过期后只能拿 task_id 重新换一条新鲜链接。
+- `_start` 区分「下载失败」与「生成失败」:前者状态为 `下载失败`、文案是「已生成成功，本地下载失败，可点『恢复下载』重试（不再扣费）」,并累计 `downloadAttempts`。
+- 新增 `ProductGenPage.recover_download()` 与生成卡上的「恢复下载」按钮:**只重新拉文件,不碰 `_prodgen_generate` / `try_charge` / `_start`**。走那条路等于再开一个 LK888 任务、再花一次钱。
+- `_wf_download()` 加固:2 次退避重试(仅限 `SSLError`/`ConnectionError`/`Timeout`/`ChunkedEncodingError` 与 408/429/5xx)、`stream=True` + `.part` + `os.replace`、`trust_env=False`、可选 `cancel_check`。**403 一次就死** —— 那是签名过期,手里只有死 URL,重试一百次还是 403,而且会掩盖真实原因。
+- `_prodgen_download_error_text()`:不再把 host、路径和 SSL 栈甩给用户;链接过期时引导「重新生成」而不是让用户对着死链反复点「恢复下载」。
+
+### Notes
+- **`_PRODGEN_RUNTIME_KEYS` 必须包含 `pendingDownloadRecovery`**,已加。`regen` 是黑名单复制,漏掉它「再次生成」出来的新卡片会带着上一条的结果 URL,用户点「恢复下载」拿到的是上一次的视频 —— 静默的错误结果,比报错难查得多。已有专门测试守住。
+- 图片模式一次出 2 张时,`targets` 记的是「已下好的 + 本次这张」,避免第 2 张失败时把第 1 张一并丢掉。
+- `_wf_download` 有 12 个调用方(数字人 ×2、同款替换 ×6、Agent ×2、资产库 ×1)。核实过没有任何一个依赖它快速失败、没有一个在轮询循环里调它、没有一个按它的异常文本做语义分支;漫剧走的是另一条 `download_media`,不受影响。下载本身不计费,重试不会重复扣费 —— 反而今天的快速失败逼用户点「再次生成」,那才是真的再扣一次。
+- 未改中心服、未重新打包、未上传。
+
+### Verification And Operations
+- `tests` 全量 **1581 通过 / 0 失败**。
+- 新增 `tests/test_agent_download_recovery.py`(12 条):403 绝不重试、瞬时故障必重试、本地磁盘错误不算网络重试、断一次后重试成功仍能拿到文件、失败后不留半截文件、结果 URL 与 task_id 在下载前落盘、`on_result` 在 `return url` 之前调用、恢复下载不调用任何计费/生成函数、用户看不到原始 SSL 栈、链接过期给的是「重新生成」。
+- 需重启本地客户端生效。回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_download_recovery.py`、`tests/test_agent_mode_defaults.py`、`docs/` 和本条目。
+
+## 2026-08-07 生成结果不能是本次上传的参考图
+### Fixed
+- `_extract_lk888_media_url()` 新增 `exclude` 参数,`lk888_media_task()` 新增 `exclude_urls`,`_prodgen_run_image` / `_prodgen_run_video` 把本次上传的参考图/参考视频 URL 传下去。命中输入 URL 时跳过继续找,找不到就让轮询继续、最终按超时报错。
+- 症状:Agent.模式改图(`人物变成短发`,Nano Banana 2,带待修改图),页面上两张「生成结果」与上传的原图 **sha1 完全相同**(`23cc0878ab075ba0`,3452447 字节)。模型不可能生成出与输入逐字节相同的 PNG,所以下载到的就是输入本身。
+- 机制:`_extract_lk888_media_url` 遍历任务状态,**遇到第一个 `.png` 结尾的 URL 就当成结果返回**,它不知道哪些 URL 是本次传进去的。而 `_agent_image_payload` 把参考图 URL 塞进 7 个字段(顶层 `image_urls`/`images`/`reference_images`/`referenceImages` + `params` 里三个),只要任务状态回显请求参数,回显的参考图就排在成品前面被选中。`images`/`image_urls`/`reference_images` 都不在优先键名表里,走的正是「遍历所有键、第一个 `.png` 就返回」那条路。
+- 这个失败形态比报错更糟:**不报错、照常扣费、用户拿回自己的图**。本次两笔各扣 0.1584(task 97267053 / 97267189)。
+- 顺带修掉生成卡上写死的「图片质量: 自适应」—— 那是个字面量,不管实际发的是什么都这么显示(本次实际发的是 `imageSize=1K`,而 Nano Banana 2 根本没有 `quality` 参数)。现在按 `paramsMeta` 显示本次真正发出去的参数。同时删掉没有任何点击行为的「设置分组」死 chip。
+
+### Notes
+- **未能抓到原始响应**:直连 `api.lk888.ai` 返回 503、走代理不稳、中心服反代需要客户端会话 token。所以「任务状态回显请求参数」是**依据代码推断**,不是实测确认。但这个修法在两种成因下都成立 —— 无论是响应回显导致挑错,还是模型真的把输入原样返回,排除输入 URL 都是对的。
+- 修完之后如果这类情况再发生,行为从「静默返回原图」变成「生成超时报错」。报错至少看得见;要拿回那笔钱仍需按实际计费规则处理。
+
+### Verification And Operations
+- `tests` 全量 **1569 通过**(上一轮 1568,本轮新增 1)。唯一间歇失败的 `test_douyin_comment_cooldown` 与本次无关,是已记录的测试间状态污染(同一份代码上时绿时红)。
+- 新增 `tests/test_agent_result_not_input_echo.py`(9 条):回显的参考图不被当成结果、签名变化后仍能匹配、只有输入时宁可返回空也不返回用户自己的图、参考视频同样排除、没有 exclude 时行为不变、优先键名场景不被破坏。
+- 修复过程中撞到 `tests/test_lk888_media_task_parsing.py` 的隔离方式:它把 `_extract_lk888_media_url` 的 AST 单独抽出来 exec,所以该函数**必须自包含**,不能引用模块级 helper。归一化逻辑因此内嵌成闭包。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_result_not_input_echo.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式「更多参数」抽屉
+### Added
+- 胶囊行新增「更多参数 N 项 ▾」,打开 `AgentMoreParamsDialog`:按当前模型 schema 逐个渲染它自己的参数(比例/时长以外的全部)。选项型给下拉、文本型给输入框、必填标 `*必填`,**每个字段的说明文字放在控件下方页面内可见** —— 客户端全局禁用 `setToolTip`,而且像「错峰模式:开启后价格减半,任务将在 1-5 小时内完成」这种正是用户填表的依据,藏进悬停框等于没搬过来。
+- 抽屉里改过的参数**真的会发给模型**:`_agent_apply_entry_params()` 在 `_prodgen_run_image` / `_prodgen_run_video` 组装完 payload 后把它们合并进 `params`。上一版这些参数只是一行只读文字,现在是能点且生效的控件。
+- 参数被改过时「更多参数」胶囊变金色并显示改动条数,输入框下方列出「已改动的模型参数：图片质量=高清」。
+
+### Notes
+- **没改过就等于没有**:只有与该模型默认值不同的项才会进条目的 `params`,进而进请求。抽屉一次没开过时,请求与上一版逐字节相同。这是本次能在不逐模型开闸的前提下让控件「真生效」的原因 —— 爆炸半径就是用户自己点的那几个键。
+- 每个值发出前都要过该模型 schema 的校验:字段必须存在、值必须在它的 `options` 里,否则丢弃并记日志,绝不把模型没声明过的键值发上去。
+- 语义重复的字段既不做胶囊、也不进抽屉:`happyhorse-r2v` 的 `aspect_ratio` 与 `ratio` 同为比例,两个一起发会 400(见 `docs/TROUBLESHOOTING.md`),现在标 `duplicate_role` 后被彻底挡住,不可能从抽屉里溜进请求。
+- 本次仍**未跑任何真实生成**。`_AGENT_SCHEMA_MODELS` 还是空集,payload 主体仍由既有的两个 builder 组装。
+
+### Verification And Operations
+- `tests` 全量 **1560 通过 / 1 失败**,唯一失败仍是与本次无关的 `test_douyin_comment_cooldown`(已单独记录,在未改动代码上同样失败)。
+- `tests/test_agent_page_offscreen.py` 增至 15 条,新增四条守住抽屉的核心契约:抽屉不与胶囊重复;重复语义字段进不了抽屉;**没碰过抽屉时请求逐字节不变**;抽屉里点的值确实出现在请求里;模型没声明过的键值被丢弃。
+- 离屏渲染核对:`mj_imagine` 抽屉 5 项(模型风格/质量/风格化/混乱度/风格)、`gpt-image-2` 1 项(图片质量)、`viduq3-turbo-cankaosheng` 3 项(分辨率/水印/错峰模式)。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_page_offscreen.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式输入框按模型 schema 渲染(UI 接线)
+### Changed
+- 提示语改用模型自己的 `input_hint`。`gpt-image-2` 现在显示它自己的「温馨提示：本模型性价比高，选择 2K/4K 出图时分辨率、比例偶尔无法精准命中…」,`happyhorse-video-edit` 显示「本模型按 [输入视频时长 + 输出视频时长] 合计扣费」。拿不到 schema 才回落 `BASE_HINT`。
+- 比例/时长胶囊由「固定档位」改成**按角色绑定当前模型的字段**:模型没有这个参数,整条胶囊消失。实测 `wan2.7-shouweizhen` 没有比例胶囊、`happyhorse-video-edit` 两条都没有;选项数也随模型变(`gpt-image-2` 的 size 有 34 项、`gemini-3-pro-image-preview` 的 aspectRatio 有 10 项、`kling-v2-6` 的 duration 有 2 项)。
+- 可选参数的菜单顶部多一项「默认(不指定)」。选它就整个不发这个参数,等于 lk888 上没碰过这个控件。
+- 参考图槽的数量上限、槽位标签、以及是否有视频/音频上传口,改由模型声明的 upload 参数决定(`wan2.7-shouweizhen` 显示「首帧/尾帧」上限 2,`happyhorse-video-edit` 出现视频上传口)。
+- 换模型时同语义的选择会沿用(在 `kling-v2-6` 选了 9:16,切到 `vidu-jieshuoman` 还是 9:16);目标模型不支持该值就回到它自己的默认值。
+- 修 `_agent_aspect_from_size` 的像素档位表,改为模块级 `_AGENT_SIZE_TO_ASPECT` 并由它推出反向表 `_AGENT_ASPECT_TO_SIZE`。图片模式的请求只由 `size` 决定,两个方向同源之后不会再出现「界面显示 16:9、上游收到 3:2」。
+
+### Notes
+- **请求的形状一点没变**:仍然是 `_agent_image_payload` / `_agent_video_payload` 组装,条目字段仍是 `size`/`aspect_ratio`/`duration`。变的只是「可选的值来自模型自己」。`_AGENT_SCHEMA_MODELS` 仍是空集,schema 装配器没有接到任何模型上。
+- 已知副作用:图片模式选 16:9 之前实际发的是 `1536x1024`(= 3:2),现在发 `1920x1088`(= 真 16:9)。这是修 bug,但它会改变每一张图的实际尺寸,单独列在这里以便回滚定位。
+- 接不进请求的参数**不画成能点的假控件**,而是在输入框下方列成一行只读说明(「该模型另有参数：图片质量 —— 尚未接入请求，暂用模型默认值。」)。渲染出来的控件一定是会被发出去的。
+- 本次**未跑任何真实生成**,没有花算力。逐模型开闸仍待安排。
+
+### Verification And Operations
+- `tests` 全量 **1556 通过 / 1 失败**。唯一失败 `tests/test_douyin_comment_cooldown.py::test_platform_risk_response_writes_pause_even_when_safe_mode_disabled` 与本次改动无关:它在 `git stash` 后的未改动代码上同样失败,且本次会话早先三轮全量(1520/1533/1545)都通过,属测试间共享 agent 数据目录导致的顺序/状态依赖,已单独记录待修。
+- 新增 `tests/test_agent_page_offscreen.py`(11 条),断言的是**渲染结果**而不是源码字符串:胶囊可见性、选项数随模型不同、提示语来自 input_hint、上传槽媒体类型与上限、跨模型迁移、以及「界面显示的比例 == 会发出去的比例」。测试会把页面真正 show 出来 —— 不显示的话 `isVisible()` 恒为 False,「胶囊消失了」的断言会假绿。
+- 离屏渲染核对 7 个模型的输入框,参数区确实各不相同。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_page_offscreen.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式参数按模型 schema 动态化(引擎部分)
+### Added
+- `backend/lk888_schema_snapshot.py`(新增,28KB,由 `tools/gen_lk888_schema_snapshot.py` 生成):67 个模型的表单 schema 随包快照。首次冷启动、断网、LK888 不可用时参数区仍按各模型真实字段渲染,不会退回「所有模型一个样」。
+- 单模型 schema 取用层:`_lk888_model_schema()`(后台线程,发网络)与 `_lk888_model_schema_cached()`(UI 线程,只读)。降级链 内存 → 网络 → 内存(过期 stale) → 磁盘 → 随包快照 → 空,任何一级失败都不抛异常。失败走 120 秒负缓存,不会被一次 502 冻住;成功缓存 24 小时并落盘。
+- 表单模型 `_agent_schema_form()`:schema → FORM/FIELD 规范化结构(name/kind/role/required/options/default/placement/limit/is_array…)。实测 67 个模型全部产出有效表单,零异常、零未知控件。
+- 请求装配 `_agent_dynamic_payload()` + `_agent_payload_gate()` + `_agent_validate_form()`,三条规则:必填一定发;可选且用户没设过整个不发;值恒取自该字段 options 且恒为字符串。
+- `_AGENT_MODEL_OVERRIDES`:schema 表达不了或与线上验证冲突的少数条目,每条必须写 `why`。目前只有 2 条(`veo3.1` 两个开关线上是 true、`wan2.7-shouweizhen` 首尾帧顺序)。
+
+### Fixed
+- `regen()` 复制条目由 12 字段白名单改成只剔除运行态字段的黑名单。旧实现让视频「再次生成」每次都丢掉 `duration` 和 `referenceVideo` —— 这是本次之前就存在的 bug,与 schema 改造无关。
+
+### Notes
+- 本次是**引擎**,尚未接到 UI 和真实请求上:`_AGENT_SCHEMA_MODELS` 是空集,所有模型仍走既有的 `_agent_image_payload`/`_agent_video_payload`,线上行为逐字节未变。逐模型开闸需要先拿 schema 与今天发的值逐条比对、并真跑一次生成确认(尤其带参考图的模型要肉眼确认参考图生效 —— 参考图被静默忽略不报错)。
+- 已知 schema 与生产记录冲突一例:`grok-video-3` 的 schema 说 `size` 唯一合法值 `720P`、`aspect_ratio` 必填,而 `docs/TROUBLESHOOTING.md` 2026-08-01 那条踩过 400 之后的记录说要发 `horizontal_hd/vertical_hd` 并省略 `aspect_ratio`。**在 A/B 实跑给出结论之前这个模型不开闸。**
+- `kling-v2-6` 的 `sound` 现在从 options 取字符串 `on`/`off`,不再可能发出 Python `False` —— 那条已记录的 400 从类型上就不可能再发生。
+
+### Verification And Operations
+- `py_compile` 通过;`tests` 全量 **1545/1545** 通过(基线 1520 + 新增 25)。
+- 新增 `tests/test_agent_schema_fetch.py`(9)、`tests/test_agent_payload_contract.py`(12)、`tests/test_agent_regen_keeps_params.py`(4)。契约测试对**全部 67 个模型**跑不变式:顶层只有 prompt/params、params 键必属该模型 schema、无 Python 布尔、无 None、值必在 options 内、上传只落一个规范键。
+- 实测 `https://api.lk888.ai/v1/skills/models/{name}` 与 `/api/v1/...` 同源同结果,中心服 `lk888_proxy` 已透传 `/lk888/*`,**未改 `backend/central_server.py`**。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及 OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚:`git checkout` 恢复 `backend/matrix_native_client.py`、`backend/lk888_schema_snapshot.py`、`tools/gen_lk888_schema_snapshot.py`、`tests/fixtures/lk888_model_schemas.json`、三个新测试文件、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 Agent.模式输入框改成 lk888 版式
+### Changed
+- 参考图槽由 112×56 横条改成 84×84 方形缩略图，并从「独占一整行」挪到提示词左侧与之并排（`body` 行：左 `ref_strip`、右 `prompt_col`），对齐 lk888 模型输入框的排布。参考图用法说明不再作为一个胶囊塞进参考图行，改为按当前模式追加到提示语后面（`_ref_hint_text()` / `_apply_ref_hint()`）。
+- 综合最优 / 条数 / 比例 / 时长 / 模型五个胶囊由「点一下切到下一项」改成点击展开下拉菜单（`_menu_choice()` + `_pick_style/_pick_count/_pick_aspect/_pick_video_duration/_pick_model`），文案尾部统一补 `▾`，菜单弹在胶囊正下方。8 种风格此前只能盲目轮换，现在可直接选。
+- 胶囊按参数着色（风格紫、条数金、比例青、时长蓝、模型天蓝，`_prod_menu_pill_style()`），发送键改成 lk888 的青绿圆形按钮。
+- 输入框右上角新增工具条：清空输入（✕）、清空参考图（🗑）、计费徽章、计费说明（ⓘ）。原先挤在底部胶囊行右侧的「清空输入」垃圾桶按钮移到这里。
+- 输入框随内容在 78~138px 之间自适应长高（`_autosize_input()`），不再一上来就撑满，composer 整体从 ~311px 收到 ~264px。
+- 新增 `bolt` / `info` / `close` / `chevron` 四个手绘矢量图标。
+
+### Notes
+- 计费徽章显示的是**云豆余额**，不是 lk888 截图里的「0.08~0.24/次」价格区间。Agent.模式的 `product_image` / `product_video` 属于 `_SERVER_CHARGED_CAPS`，由中心服按 LK888 实际用量后付费，客户端在提交前拿不到确定单价；写一个预估价会误导用户。点徽章或 ⓘ 弹出计费说明，逐笔明细仍在『账户中心』。
+
+### Verification And Operations
+- `py_compile` 通过；`tests` 全量 1520/1520 通过。
+- offscreen + 真字体两次渲染核对版式：composer 1232×268，参考图槽 84×109，槽下「点击替换 / 右键删除」单行不折行，发送键 46×46，五个下拉胶囊 `▾` 正常显示。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚：`git checkout` 恢复 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`tests/test_agent_video_duration.py`、`docs/IMPLEMENTATION.md` 和本条目。
+
+## 2026-08-07 同款替换只走客户端 + 本地启动脚本可选中心服
+### Changed
+- 原生「同款替换」和「图文同款」两页都移除「打开网页版替换」按钮和它上方的一整行 `web_row`，同时删除 `VideoReplacementPage.open_replacement_web()` 和模块级 `open_replacement_web_page()`。两种同款替换都只在客户端内完成，客户端不再有任何跳转网页的入口。
+- 网页版本身（`backend/replacement_web.py`、`/replacement`、`/api/replacement/*`、`MATRIX_REPLACEMENT_WEB_ENABLED`）未改动，仍然存在，但只剩手工 `/replacement#token=...` 这条本地排查兜底路径可进入。
+- 模块级 `replacement_web_user_context()`、`create_replacement_web_handoff()`、`replacement_web_launch_url()` 保留：它们是交接与脱敏契约且有测试覆盖。副作用是三者目前都没有 UI 调用方，视频交接 `rwh_...` 没有 UI 触发路径。
+- `start-visible-client.bat` 新增 `START_LOCAL_CENTRAL` 开关：`1` 保持原来的本机中心服流程，`0`（新默认）跳过本机中心服直连 `https://central.yunlingai.net`。本机没有漫剧主库 MySQL，`maindb.ping()` 失败会让 `find_login_user()` 降级到本地 JSON 用户表，所以 `1` 只能用 `admin`/`test123456` 登录，漫剧账号登录必须用 `0`。
+- `start-visible-client.bat` 增设 `MATRIX_VIDEO_REPLACEMENT_ENABLED=1` 与 `MATRIX_XHS_ENABLED=1`。客户端不加载 `backend/.env`，这两个开关只认进程环境变量；前者仅客户端检查，后者客户端/中心服/本地执行器三层都检查，连线上中心服时中心服那一层由服务器配置决定，本地设 1 管不到。
+
+### Verification And Operations
+- `py_compile` 通过；`tests.test_replacement_web_mvp`、`tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service`、`tests.test_xhs_note_replacement` 合计 561/561 通过。
+- offscreen 构造两页：`VideoReplacementPage` 14 个按钮、`XhsNoteReplacementPage` 2 个按钮，均无「网页」字样，`b_open_replacement_web` 属性都不存在；模块级 `open_replacement_web_page` 已消失，`replacement_web_launch_url` 与 `create_replacement_web_handoff` 仍在。`MATRIX_VIDEO_REPLACEMENT_ENABLED=1` 下 `nav_feature_enabled("同款替换")` 为 `True`。
+- `start-visible-client.bat` 两种模式各跑了一次副本干跑（`taskkill` 与客户端启动替换为 echo，未触碰真实进程），分别输出 `https://central.yunlingai.net` 与 `http://127.0.0.1:9080`，`VIDEO=1 XHS=1`；文件仍为纯 ASCII、无 BOM。
+- 需重启本地客户端生效。**未重新打包、未上传服务器**，已发布的 `MatrixShipAgent-Setup.exe` 不含本次改动。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+- 回滚：`git checkout` 恢复 `backend/matrix_native_client.py`、`start-visible-client.bat`、`docs/API_REFERENCE.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和本条目。
+
+## 2026-08-07 同款替换首尾帧提示词不再混入视觉分析报错
+### Fixed
+- 视觉模型分析失败时不再把异常文本写进 `breakdownAnalysis.visual`。失败改为记录在新的 `visualStatus`（`status/errorId/code/message`）里，`visual` 保持为空，异常原文只留在结构化日志中，避免上游主机名、端点和抽帧文件名随分析结果流入任务负载。
+- 同款替换的镜头约束和拆解证据在进入提示词前统一经过 `_replacement_strip_diagnostic_noise()`，丢弃报错文本、URL、`host=/port=`、接口路径和 `[1.24s] frame_01.jpg` 这类抽帧清单；漫剧模式的画面描述再经白名单校验，只保留含中文描述且不含技术噪声的行。历史任务里已被污染的分析结果同样被过滤。
+- 分解报告“来源”区新增 `- 视觉分析:` 一行，失败时显示错误编号；同款替换点击“开始替换生成”前，若源视频视觉分析未成功会弹窗确认，默认取消。
+- `HybridReplacementPipeline.build_plan()` 在任务上记录 `visualAnalysisFailure`，并写出 `video_replace_visual_analysis_unavailable` 结构化日志。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service.ReplacementServiceContractTests.test_visual_analysis_failure_is_recorded_instead_of_becoming_visual_text`、`tests.test_video_replacement.VideoReplacementHelpersTest.test_failed_visual_analysis_text_never_reaches_replacement_prompts`、`test_comic_visual_prompt_keeps_only_describable_chinese_lines`、`tests.test_video_replacement_v2.VideoReplacementV2Test.test_hybrid_pipeline_build_plan_records_failed_visual_analysis_on_job` 和 `tests.test_video_breakdown.VideoBreakdownHelpersTest.test_breakdown_markdown_reports_visual_analysis_failure_with_error_id`。
+- 引用 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py` 的 38 个测试模块共 974 条用例，除两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）外全部通过；`py_compile` 通过。
+- 本次只影响本地客户端与本地服务层；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `_expand_comic_storyboard_image_submit_kwargs()` 在首尾帧路径上仍拼接“七帧中的每一帧”前缀，属于远端文案问题，本次未改。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`backend/replacement_analysis.py`、`backend/replacement_pipeline.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧行为。
+
+## 2026-08-07 漫剧项目模式按真实口播时长排期，压缩片段秒数
+### Changed
+- 同款替换口播时长估算默认语速由约 `4.2` 字/秒改为 `5.5` 字/秒，更接近真实中文口播语速；`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 覆盖行为不变。
+- 漫剧项目模式每段可申请的视频秒数由 `4/8/12/15` 四个粗档位改为 `4..15` 每个整数秒，并在口播时长之上预留 `0.5` 秒余量。原先估算值只要越过 12 秒就跳到 15 秒，现在按整秒申请。
+- 漫剧项目模式排期时先生成一遍 TTS 并探测真实音频时长来定每段视频秒数，测不到时自动回落到字数估算。片段新增 `speechDurationSource`、`speechEstimatedSec`、`speechOverflowSec` 字段便于排查。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_video_replacement.VideoReplacementHelpersTest` 新增 7 条用例：整秒档位与余量、环境变量回退粗档位、已排期时长重复调用幂等、真实 TTS 时长排期、TTS 失败回落估算、无 job 时不触发探测、默认语速 `5.5` 字/秒。
+- `tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service` 共 395 条通过。全量 1374 条中 `tests.test_ui_feature_visibility`（缺 `backend/.env.dev`）和 playwright 相关用例失败，改动前即存在，与本次无关。
+- 新增环境变量 `VIDEO_REPLACE_COMIC_DURATION_SLOTS`、`VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC`、`VIDEO_REPLACE_COMIC_MEASURE_TTS`、`VIDEO_REPLACE_COMIC_MEASURE_TTS_PARALLELISM`，均有默认值，不需要改部署配置即可生效。不涉及中心服 API、OpenAPI、数据库、Docker 或 `migration.sql`；需重启本地客户端生效。
+- 待实测：漫剧服务端（120.26.194.174）对任意整数秒 `video_duration` 的支持未验证，首次启用请先跑单段冒烟；如被拒绝，设 `VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15` 即可回到旧档位。
+- 回滚：三个环境变量可分别关闭三项改动；或回滚 `backend/matrix_native_client.py`、`backend/replacement_pipeline.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md`。
+
+## 2026-08-06 矩阵侧扣费与漫剧侧对齐
+### Fixed
+- `MAINDB_YUAN_TO_POWER` 由 10 改为 1。线上 `recharge_packages` 本就是 1 元 ≈ 1 算力（50元档=50算力），此前按 10 倍扣费属十倍超收。该常量同时决定扣费与微信充值入账，**必须共用一个值**。
+- 矩阵侧扣费不再只写中心服 JSON 账本。新增 `maindb.charge_actual_cost()`，在同一事务内完成余额扣减、`model_usage_logs` 与 `computing_power_records` 写入，漫剧的消费账单界面因此能看到矩阵侧消费。
+- 幂等改由 `model_usage_logs.request_id` 唯一索引保证。旧实现扫描会被截断到 8000 条的 JSON 账本，且查重与扣款不在同一把锁内，并发结算可重复扣费。
+
+### Changed
+- `charge_user_allow_arrears()` 更名 `charge_user_actual_cost()`：余额不足直接拒绝（`insufficient_balance`），不再允许扣成负数。
+- 漫剧账号的模型扣费不再写 JSON 账本，MySQL 为唯一权威，避免账户中心与漫剧账单出现双份来源。
+- `tests/test_billing_unified.py` 中把 10 倍汇率断言成正确行为的用例已修正——正是它让这个超收长期未被发现。
+
+### Verification And Operations
+- 计费相关套件 181/181 通过；新增 `tests/test_billing_parity.py` 11 条，已对旧代码 RED 验证。
+- 无需数据迁移：矩阵侧微信支付从未启用（0 订单），10 倍只作用于扣费；线上未设该环境变量，改默认值即生效。线上 `ix_model_usage_logs_request_id` 已是唯一索引且无重复，无需 ALTER。
+- 需重建中心服镜像并重启。不涉及数据库结构变更、客户端或安装包。
+
+## 2026-08-06 客户端改用 HTTPS 独立子域中心服
+### Fixed
+- 客户端默认中心服由明文 `http://120.26.194.174:9080` 改为 `https://central.yunlingai.net`。明文会让登录密码与会话 token 过公网，并被 `validate_service_url()` 拒绝而使"分解视频"的音频转写失败。
+- 音频转写失败不再中断整个分解。`_transcribe_breakdown_audio()` 捕获服务地址校验的 `ValueError` 并降级，画面与 OCR 分析继续产出报告。
+- 清理三处硬编码的明文旧中心服 `http://39.105.120.104`（`local_browser_worker.py` 两处、`local_login.py` 一处）；`agent_launcher.py` 不再沿用配置文件里的陈旧 central，并修正了那句"这是 MatrixShipAgent.exe 的入口"的失真 docstring。
+
+### Changed
+- 新增 `central_library_file_prefix()`，把两处判断"URL 是否属于中心服素材库"的 path 比较收敛为一处并锚定到 `CENTRAL` 的 path。独立子域下与原字面量完全等价，仅用于免疫将来改成带前缀地址时的静默失配。
+- 分解报告在转写失败时增加"转写失败原因/代码"两行，避免配置错误被一个 `failed` 盖掉。
+- `backend/.env.example` 与 `docs/DEPLOYMENT.md` 同步新默认值与三条约束（HTTPS、公网、独立子域）。
+
+### Verification And Operations
+- 新增 `tests/test_video_breakdown_transcribe_degrade.py`；相关套件 209/209 通过，新增用例已对旧代码做 RED 验证。
+- 服务端：nginx 新增 `central.yunlingai.net` 的 80/443 两个 server 块（净新增 60 行、删除 0 行），Let's Encrypt 证书有效期至 2026-11-04。**自动续期尚未配置。**
+- 客户端改动需重新打包并重传安装包才对下载用户生效；已装旧包的用户需重装。不涉及中心服 API、数据库、`migration.sql` 或密钥。
+
+## 2026-08-05 客户端默认连接公网中心服
+### Fixed
+- 本地客户端 `CENTRAL` 默认值由 `http://127.0.0.1:9080` 改为公网生产中心服 `http://120.26.194.174:9080`。公网下载安装的客户端所在机器没有中心服进程，旧默认值会让登录页直接报 `WinError 10061` / `NewConnectionError`。本机开发调试改为显式设置 `MATRIX_CENTRAL`。
+
+### Changed
+- `backend/.env.example` 与 `docs/DEPLOYMENT.md` 的 `MATRIX_CENTRAL` 默认值与说明同步。
+- `tests/test_video_breakdown.py` 的两条用例改回断言公网默认值；旧用例 `test_central_defaults_to_local_loopback` 把回环默认值当成正确行为，正是这个回归一直没被发现的原因。
+
+### Verification And Operations
+- `tests.test_video_breakdown tests.test_agent_mode_defaults tests.test_start_visible_client_script tests.test_auth_login_modes` 91/91 通过，`py_compile` 通过。
+- 仅改源码不生效，必须重新打包 `MatrixShipAgent-Setup.exe` 并重传到服务器；已装旧包的用户需重装或临时设置 `MATRIX_CENTRAL`。不涉及中心服 API、OpenAPI、数据库或 `migration.sql`。
+
+## 2026-08-04 视频替换共享服务熔断、可观测事件与契约
+### Added
+- 本地终态任务度量与共享模式熔断：`backend/replacement_service.py` 新增 `record_terminal_result`、`circuit_breaker_state`、`shared_mode_allowed`，在 agent 数据目录持久化最近至多 500 条终态任务（仅存 job 哈希）。累计至少 100 个终态任务且失败率严格大于 1%（`failed/total > 0.01`）时新任务切回 `legacy`；正好 1% 不熔断，取消不计为失败，运行中的任务绝不中断。
+- 脱敏结构化边界事件：`build_replacement_event`/`emit_replacement_event` 输出 `prepare_started`、`analysis_completed`、`provider_submitted`、`provider_recovered`、`billing_settled`、`video_completed`、`video_failed`、`shared_mode_circuit_opened`、`rollback_requested`，只含 job id、stage、model、provider-task 哈希、status、media-URL 形状和 cost/ref。
+### Changed
+- `backend/matrix_native_client.py` 的 `replacement_mode_for_new_job()` 现在同时校验 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 与 `shared_mode_allowed()`：熔断打开时发出 `shared_mode_circuit_opened`/`rollback_requested` 并回退 `legacy`。
+- `backend/replacement_web.py::build_video_service` 传入共享 metrics 目录与本地日志器，使网页与 Qt 共用一致的失败率统计；`public_job` 脱敏扩展为丢弃并清洗 provider task id / 媒体 URL 字段，API 响应永不暴露原始 provider task id 或签名 URL。
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_service`（含 `ReplacementCircuitBreakerTests` 100/2⇒legacy、100/1⇒shared、<100⇒shared、cancelled 不计失败、活动任务不中断、窗口有界；`ReplacementEventRedactionTests` provider 哈希与签名 URL 脱敏）和 `tests.test_replacement_web_mvp`、`tests.test_openapi_contract`。
+- 仅本地执行端生效，无中心服/远程/Docker/数据库变更；`migration.sql` 记为无迁移。切换 `VIDEO_REPLACEMENT_SERVICE_MODE` 需重启本地执行端；回滚设为 `legacy` 并重启，保留 job 文件与生成媒体，不删除数据、不重复提交已完成 provider task、不重复结算。发布侧保留上一稳定安装包/Tag 以决定客户端版本回滚。
+
+## 2026-08-04 客户端默认连接公网中心服
+### Fixed
+- Windows 客户端无 `MATRIX_CENTRAL` / `CENTRAL_URL` 环境变量时，默认中心服从 `http://127.0.0.1:9080` 改为 `http://120.26.194.174:9080`，避免用户从浏览器下载安装后登录请求打到本机空端口并显示 `WinError 10061`。
+- 中心服地址改用独立校验，允许生产 HTTP 中心服地址；远程素材和模型服务 URL 仍保留原有 HTTPS/loopback 限制。
+- `backend/.env.example` 和部署文档同步公网默认值；本地开发仍可显式设置 `MATRIX_CENTRAL=http://127.0.0.1:9080` 覆盖。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_defaults_to_public_production_server` 和 `test_central_env_override_still_supports_local_development`。
+- 生效需要重新构建 `MatrixShipAgent-Setup.exe` 并替换远程 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`；回滚时恢复 `backend/matrix_native_client.py` 默认值和上一版安装包备份。不涉及中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。
+
+## 2026-08-04 登录页只保留漫剧账号登录
+### Changed
+- 本地客户端登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”，不再展示“加入企业”入口或登录页顶部模式切换。
+- 注册和邀请码加入企业控件仅保留为隐藏兼容对象，不加入首页布局；企业中心的邀请提示同步改为建议管理员使用“添加成员”或“重置密码”交付新成员账号。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_native_enterprise_invite.NativeEnterpriseInviteTest.test_login_home_shows_only_account_login_entry`、`test_enterprise_invite_copy_does_not_point_to_login_page` 和 `tests.test_login_centered_layout.LoginCenteredLayoutTest.test_marketing_copy_is_restored_outside_login_card`。
+- 本次只影响本地客户端 UI 和测试文档；不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端或重新打包安装包后生效；回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 可恢复旧入口。
+- 安装包已刷新到远程 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`：旧包备份为 `.bak-20260804_160000`，新包 SHA-256 `b7bf94a1f2d6ded8fbaade9b613bf091cacfb4deab1d90835b82f17cd58df096`，公网 `http://120.26.194.174/MatrixShipAgent-Setup.exe` 返回 `Content-Length: 181371458`。
+
+## 2026-08-04 Installer directory selection
+### Fixed
+- Windows 安装包不再隐藏安装目录选择页；运行 `MatrixShipAgent-Setup.exe` 时，用户可以在安装向导中修改安装位置。
+- 默认安装目录仍保持 `{localappdata}\MatrixShipAgent\app`，默认不需要管理员权限，避免影响普通用户安装。
+- 打包脚本会同时查找用户级 Inno Setup 路径 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`，本机用户安装版也能直接生成安装包。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory` 和 `test_build_stays_native_only`，锁定目录选择页开启、默认目录、用户态权限和用户级 Inno Setup 编译器路径。
+- 本次只影响 Inno Setup 安装脚本、测试和文档；不改变安装包下载路由、中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+- 生效需要重新运行 `backend\build_matrix_agent.ps1` 生成新的 `backend\dist\installer\MatrixShipAgent-Setup.exe` 并重新发布；回滚把 `backend\installer\MatrixShipAgent.iss` 的 `DisableDirPage` 改回 `yes` 后重新打包即可。
+
+## 2026-08-04 Local replacement web MVP
+### Added
+- 本地执行端新增 `/replacement` 网页 MVP，默认由 `MATRIX_REPLACEMENT_WEB_ENABLED=0` 关闭；开启后提供“视频替换”和“图文替换”两个页签，直接通过本机 `/api/replacement/*` 创建本地任务。
+- 新增本地 Phase 0 job skeleton：视频替换创建 `rvw_...` queued JSON job；图文替换创建 `xnr_...` preview JSON job，并复用既有图文同款 smoke helper 生成候选文案。
+- 新增 OpenAPI/API_REFERENCE 契约，覆盖 `/replacement`、`/api/replacement/video/start`、`/api/replacement/video/job`、`/api/replacement/note/start` 和 `/api/replacement/note/job`。
+- `/replacement` 页面外壳支持直接打开链接；真正提交 `/api/replacement/*` 时仍使用本机 agent token，并通过页面输入或 URL hash 写入 `sessionStorage` 后发送 `X-Matrix-Agent-Token`。job 查询响应补齐脱敏 `source/files/createdAt/updatedAt`，图文 `copyCandidates` 保持对象数组结构。
+- 原生“同款替换”和“图文同款”页面新增“打开网页版替换”入口，由本地客户端生成 `/replacement#token=...&user=...` 跳转链接；hash 只包含本机执行端 token 和脱敏用户上下文，页面读取后清理地址栏。页面现在会把缺 token、401、校验失败、非 JSON 和网络错误显示为中文提示；视频提交成功时明确提示当前客户预览版只创建本地任务，不执行真实视频生成。
+- 原生“同款替换”视频页在已载入分解结果后会写入短期 `rwh_...` 本地 handoff，并打开 `/replacement#token=...&user=...&handoffId=...`；网页通过 token 保护的 `/api/replacement/video/handoff` 读取脱敏摘要，提交视频替换时可用 `handoffId` 绑定真实本地分解上下文。
+- handoff 响应和视频 job 只暴露 `source.host/pathHash`、`sourceVideo.available/pathHash`、`analysis.duration/transcriptSegmentCount` 与 `sourceContext` 摘要，不返回本地 `sourceVideoPath`、来源链接查询串、中心 token、手机号、Cookie、签名 URL 或平台授权。
+- 图文替换预览现在可通过 `/api/replacement/note/save-draft` 保存为本机 `image_note` 草稿素材；该流程复用既有图文同款草稿保存逻辑，只复制已校验上传图片到本地素材库，不发布、不中心同步、不调用 LK888、不计费。
+- `/replacement` 图文页新增本地可视化预览编辑区：生成后展示图片槽位和 3 套候选文案，用户可选择候选、编辑标题/正文/标签，再保存本地草稿。
+- 图文替换上传图片现在通过 `/api/replacement/file` 安全加载本地缩略图：job 响应只返回 `files[].previewUrl` 和 `slotMappings[].hasFile`，不暴露本地 `filePath`；页面用带 `X-Matrix-Agent-Token` 的 fetch 转成 blob URL 显示。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_replacement_web_mvp` 的 feature gate、页面 HTML、客户化错误提示、客户端跳转 URL 脱敏、图文预览编辑控件、本地 job 创建/脱敏、图文预览保存本地草稿、API route 和文档契约。
+- 本次只影响本地客户端入口、本地执行端、OpenAPI/API 文档、四级文档、CHANGELOG 和 no-op `migration.sql`；`/api/replacement/file` 与 `/api/replacement/video/handoff` 仍受功能开关和本机 token 保护，不触发真实 LK888、远程 AI Canvas、发布、扣费、数据库 DDL/DML、Docker 镜像或密钥配置。
+- 生效需要设置 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 并重启本地执行器，同时重启本地客户端以显示“打开网页版替换”按钮；回滚优先把开关恢复为 `0` 并重启。代码级回滚恢复 `backend/matrix_native_client.py`、`backend/api_server.py`、`backend/replacement_web.py`、`backend/platform_features.py`、`tests/test_replacement_web_mvp.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、四级文档、`CHANGELOG.md` 和 `migration.sql`。
+
+## 2026-08-04 Comic tool Windows client download card
+### Added
+- 远程 AI Canvas `/comic-tool` 创作工具页现在会注入第 4 个「Windows 客户端」工具卡片，按钮直连同源 `/MatrixShipAgent-Setup.exe`，点击后真实下载安装包，不再停留在“即将开放”状态。
+- 远程 AI Canvas 新增公开安装包下载路由 `GET/HEAD /MatrixShipAgent-Setup.exe`，响应为 attachment，文件名固定为 `MatrixShipAgent-Setup.exe`；安装包默认从 `AICANVAS_AGENT_INSTALLER`、`MATRIXSHIP_AGENT_INSTALLER` 或项目内 `backend/dist/installer/MatrixShipAgent-Setup.exe` 解析。
+
+### Verification And Operations
+- RED/GREEN 覆盖 `tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest`，验证第 4 个工具卡片注入、幂等注入、环境变量安装包路径、无鉴权下载和 attachment 响应头。
+- 本次影响远程 AI Canvas 镜像与测试/文档；不改变中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。
+- 已部署到远程 `/root/AI-CanvasPro/server.py`，备份为 `/root/AI-CanvasPro/server.py.bak.download-card-test-20260804_094216`；新 `server.py` SHA-256 为 `f086408ce1ad2682fd2ad4133683a02a080441744d7f9e75d3a65bb02e992796`。安装包 `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe` SHA-256 为 `89c52a2f24c082e128ce989d3912a89067540ae5040565a04e2b6378a946a41f`，大小 `181360180` 字节。`ai-canvas.service` 重启后 active，公网 `/comic-tool` 已包含下载卡片注入脚本，公网 `/MatrixShipAgent-Setup.exe` 返回 attachment。
+- 二次修复：线上发现“漫剧Agent / Windows客户端 / 漫剧画布”顺序异常和重复风险后，下载卡片注入不再克隆或插入到现有 Agent 卡片后面，改为寻找工具容器并追加独立 Windows 卡片。修复版部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-append-fix-20260804_101249`；新 `server.py` SHA-256 为 `b3ecc6ebe22e10e7e88a06e4e9a67f26a88bebc9b0415a50acc54703d215540e`。
+- 文案修复：Windows 卡片说明改为“云灵星图桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”，避免用户误以为下载的是整个漫剧项目。文案修复备份为 `/root/AI-CanvasPro/server.py.bak.download-card-copy-fix-20260804_102740`；新 `server.py` SHA-256 为 `e8644cbc79429d0fbd8fbfacb58c0037a7f4d8572e39c58e22ab763672ce5cc8`。
+- 产品定位文案更新：Windows 卡片说明调整为“云灵星图 AI爆款复刻平台 Windows 桌面客户端，用于连接本机执行器、账号矩阵和素材任务；下载的是客户端安装包，不包含漫剧项目文件。”。部署备份为 `/root/AI-CanvasPro/server.py.bak.download-card-platform-copy-20260804_103700`；新 `server.py` SHA-256 为 `ebe4cd1f4810257985c81bc3641b7a870b2d4721f818019b60fc3613d1ec3306`。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。
@@ -1329,7 +1782,6 @@
 - 小红书笔记下载现在只保留作品主体媒体，过滤 `data:image`、`fe-platform`、`picasso-static` 等页面静态资源和小图标；过滤后没有正文图片或视频时返回 `xhs_no_note_media`，不再把页面装饰图当作素材下载成功。
 - 资产库顶部隐藏“漫剧共享库”切换按钮，标题说明同步改为仅展示本地收藏入口；底层共享库逻辑保留，后续可最小回滚恢复。
 
-
 - 素材发布页“打开素材”现在会区分单文件和多文件素材：单文件继续打开文件，多个本机文件时打开素材所在文件夹，避免只打开第一个视频或图片。
 - 数字人口播生成视频后默认按用户口播文案本地生成并烧录中文字幕；提交给 LK888/可灵数字人模型的 prompt 同步禁止画面内生成字幕、文字、标题、贴纸文字或水印，减少模型直接把乱码中文字画进视频。
 
@@ -1345,7 +1797,6 @@
 - 本次余额刷新和 LK888 失败退款修复修改 `backend/matrix_native_client.py`、`backend/central_server.py`、`tests/test_role_permissions.py`、`tests/test_billing_unified.py` 及文档；不涉及 OpenAPI、数据库结构或 `migration.sql`。代码生效需要重启本地客户端和中心服；回滚上述文件即可恢复旧行为。
 - 本次同款替换口播稿提示词修复只修改本地客户端、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；按用户要求本次修改后不自动重启本地客户端。回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md` 和 `docs/IMPLEMENTATION.md` 即可。
 - 本次小红书采集图片过滤只修改本地平台适配器、下载契约测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；回滚 `backend/platform_adapters.py`、`tests/test_api_download_contract.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
-
 
 - 本次素材发布打开目录修复只修改本地客户端、测试和文档；回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 即可，不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 - 本次数字人口播字幕修复只修改本地客户端、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`；回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可。临时规避可设置 `DIGITAL_HUMAN_BURN_SUBTITLES=0` 并重启本地客户端，恢复为旧的无本地字幕后处理流程。
@@ -1912,11 +2363,6 @@
 - Real compose startup was verified with image `matrix-ship-central:prod-smoke-20260720`, container `clean_20260710_150252-matrix-central-1`, Docker health status `healthy`, and `/api/health` returning `ok=true`.
 - No database schema or data migration is required for this release; `migration.sql` remains a no-op traceability marker.
 - Rollback unit is the previous stable image tag for Docker deployment, plus source-level rollback of the touched backend/docs/tests files if running outside containers.
-
-
-
-
-
 
 ## 2026-07-28 小红书创作服务平台刷新循环修复
 - 修复小红书发布登录等待期间反复刷新创作服务平台的问题：等待函数不再用残留 cookie 触发循环跳转，登录完成后最多重新进入一次发布页。新增发布回归测试；本次只修改本地发布适配器、测试和文档，不涉及中心服、数据库、OpenAPI 或 `migration.sql`。回滚相关文件即可恢复旧行为。

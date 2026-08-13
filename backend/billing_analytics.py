@@ -180,9 +180,21 @@ def normalize_billing_records(user_id, ledger_rows, model_usage_rows, recharge_o
         amount = abs(_amount(row.get("amount")))
         base = dict(model_id=row.get("model_id") or row.get("modelId"), task_id=row.get("task_id") or row.get("taskId"), request_id=row.get("request_id") or row.get("requestId"), detail=row.get("detail") or row.get("reason") or "模型调用", balance_after=(_amount(row["balance_after"]) if row.get("balance_after") is not None else None))
         row_type = _type_for(row)
-        records.append(_record("usage-" + str(row.get("id", ref)), _timestamp(row.get("created_at") or row.get("createdAt")), row_type, -amount, "charged", **base))
-        if str(row.get("status", "")).lower() == "refunded" and not (ref and str(ref) in refund_refs):
-            records.append(_record("usage-refund-" + str(row.get("id", ref)), _timestamp(row.get("refunded_at") or row.get("created_at")), "refund", amount, "refunded", **base))
+        # 优先用主库直接给出的 epoch(created_ts / refunded_ts)。
+        # 退回裸 datetime 时 _timestamp() 会按北京时间解释,而库里存 UTC,记录会早 8 小时,
+        # 与 JSON 账本的真实 epoch 混排后新扣费排到旧记录下面。
+        # 已退款的扣费要如实标成 refunded,不能一律写 charged。_consumption() 只统计
+        # status == "charged" 的记录,写死 charged 会把退掉的钱也算进"期间总消耗",
+        # 与漫剧账单(剔除已退款)对不上。明细列表仍会显示这条,带"已退款"标记。
+        usage_refunded = str(row.get("status", "")).lower() == "refunded"
+        records.append(_record("usage-" + str(row.get("id", ref)), _timestamp(
+            row.get("created_ts") or row.get("created_at") or row.get("createdAt")
+        ), row_type, -amount, "refunded" if usage_refunded else "charged", **base))
+        if usage_refunded and not (ref and str(ref) in refund_refs):
+            records.append(_record("usage-refund-" + str(row.get("id", ref)), _timestamp(
+                row.get("refunded_ts") or row.get("refunded_at")
+                or row.get("created_ts") or row.get("created_at")
+            ), "refund", amount, "refunded", **base))
     for source, source_kind, used_status in (
         (recharge_orders or [], "wxpay", ("paid", "success", "completed")),
         (redeem_codes or [], "redeem", ("used",)),

@@ -1,10 +1,16 @@
 # coding: utf-8
-"""Commercial local-agent entrypoint.
+"""Headless local-agent entrypoint (source / ops deployments).
 
-This is the executable entry used by MatrixShipAgent.exe.  It forces safe local
-defaults so the native client always drives the user's own machine:
+NOTE: this is NOT what MatrixShipAgent.exe runs.  The shipped exe is built from
+matrix_native_client.py (see MatrixShipAgent.spec and build_matrix_agent.ps1);
+this module is only reachable through start-matrix-agent.bat and similar
+source-tree launchers.  The old docstring claimed otherwise and misled a
+2026-08-05 investigation.
 
-    native client -> http://127.0.0.1:9080 -> local engine -> Douyin
+It forces safe local defaults so the agent always drives the operator's own
+machine:
+
+    native client -> central server -> local engine (127.0.0.1:9081) -> Douyin
 
 No LAN bind is used unless the operator explicitly overrides API_HOST.
 """
@@ -49,6 +55,14 @@ def main() -> int:
         import threading
         from local_browser_worker import LocalBrowserWorker, load_config, ensure_paired
         wcfg = load_config()
+        # load_config() 会沿用配置文件里存着的旧 central。GUI 客户端每次登录都会
+        # 覆盖它,这条无头入口不会 —— 结果就是老机器一直往一个早已废弃的明文地址
+        # 发请求(含配对码这种凭据)。这里让环境变量和当前默认值优先。
+        wcfg["central"] = (
+            os.getenv("MATRIX_CENTRAL")
+            or os.getenv("CENTRAL_URL")
+            or "https://central.yunlingai.net"
+        ).rstrip("/")
         if not wcfg.get("token"):
             print("首次使用：需要把本客户端与中心服账号配对。")
             print("请在本地客户端的账号配置中输入中心服提供的 6 位配对码。")

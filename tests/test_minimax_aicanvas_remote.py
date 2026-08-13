@@ -1,4 +1,6 @@
 import importlib.util
+import io
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -285,6 +287,288 @@ class MiniMaxH3RemoteComicTest(unittest.TestCase):
                         )
 
         request.assert_not_called()
+
+
+class AiCanvasComicToolDownloadEntryTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def test_comic_tool_download_card_script_links_installer_as_fourth_tool(self):
+        script = self.remote._comic_tool_download_card_script()
+
+        self.assertIn("Windows 客户端", script)
+        self.assertIn("AI爆款复刻平台", script)
+        self.assertIn("下载客户端", script)
+        self.assertIn("下载的是客户端安装包", script)
+        self.assertIn("不包含漫剧项目文件", script)
+        self.assertIn("/MatrixShipAgent-Setup.exe", script)
+        self.assertIn("MutationObserver", script)
+        self.assertIn("data-yunling-download-card", script)
+
+    def test_comic_tool_download_card_does_not_clone_or_reorder_existing_tools(self):
+        script = self.remote._comic_tool_download_card_script()
+
+        self.assertNotIn("cloneNode", script)
+        self.assertNotIn("insertBefore", script)
+        self.assertIn("findToolContainer", script)
+
+    def test_comic_tool_index_html_is_injected_idempotently(self):
+        html = "<!doctype html><html><body><main>创作工具</main></body></html>"
+
+        injected = self.remote._inject_comic_tool_download_card_html(html)
+        reinjected = self.remote._inject_comic_tool_download_card_html(injected)
+
+        self.assertIn("yunling-download-card-injector", injected)
+        self.assertIn("Windows 客户端", injected)
+        self.assertEqual(injected, reinjected)
+
+    def test_installer_path_resolver_honors_environment_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installer = Path(tmp) / "MatrixShipAgent-Setup.exe"
+            installer.write_bytes(b"installer")
+            previous = os.environ.get("AICANVAS_AGENT_INSTALLER")
+            os.environ["AICANVAS_AGENT_INSTALLER"] = str(installer)
+            try:
+                self.assertEqual(
+                    self.remote._resolve_agent_installer_path(),
+                    str(installer.resolve()),
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("AICANVAS_AGENT_INSTALLER", None)
+                else:
+                    os.environ["AICANVAS_AGENT_INSTALLER"] = previous
+
+    def test_handler_serves_installer_without_auth_gate(self):
+        source = SERVER_PATH.read_text(encoding="utf-8")
+        route_index = source.index('if path == "/MatrixShipAgent-Setup.exe":')
+        auth_index = source.index(
+            "if not _prepare_request_storage_context(self, path):",
+            route_index,
+        )
+
+        self.assertLess(route_index, auth_index)
+
+    def test_installer_response_is_attachment(self):
+        handler = object.__new__(self.remote.Handler)
+        handler.wfile = io.BytesIO()
+        handler.headers = {}
+        sent = []
+
+        def send_response(status):
+            sent.append(("status", status))
+
+        def send_header(name, value):
+            sent.append(("header", name, value))
+
+        handler.send_response = send_response
+        handler.send_header = send_header
+        handler.end_headers = lambda: sent.append(("end",))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            installer = Path(tmp) / "MatrixShipAgent-Setup.exe"
+            installer.write_bytes(b"installer")
+            with patch.object(
+                self.remote,
+                "_resolve_agent_installer_path",
+                return_value=str(installer),
+            ):
+                self.remote.Handler.serve_agent_installer(handler)
+
+        self.assertIn(("status", 200), sent)
+        self.assertIn(("header", "Content-Type", "application/octet-stream"), sent)
+        self.assertIn(
+            ("header", "Content-Disposition", 'attachment; filename="MatrixShipAgent-Setup.exe"'),
+            sent,
+        )
+        self.assertEqual(handler.wfile.getvalue(), b"installer")
+
+
+class LK888VersionedPathJoinTest(unittest.TestCase):
+    """Regression for /v1/v1/... double-versioning that caused hailuo H3
+    schema fetch to 404, which cascaded into 'please upload at least 1
+    reference image' errors even when references were uploaded.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def test_join_dedupes_v1_when_base_already_ends_with_v1(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v1",
+            "/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_join_preserves_v1_when_base_has_no_version(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai",
+            "/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_join_dedupes_v2_the_same_way(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v2",
+            "/v2/query/video_generation/abc",
+        )
+        self.assertEqual(joined, "https://api.lk888.ai/v2/query/video_generation/abc")
+
+    def test_join_leaves_non_versioned_paths_alone(self):
+        joined = self.remote._join_versioned_api_path(
+            "https://api.lk888.ai/v1",
+            "/skills/models/hailuo-h3-quannengcankao",
+        )
+        # No de-dup when path lacks its own version prefix — pure concatenation.
+        self.assertEqual(
+            joined,
+            "https://api.lk888.ai/v1/skills/models/hailuo-h3-quannengcankao",
+        )
+
+    def test_apimart_json_request_uses_joined_url_not_raw_concat(self):
+        """When base=.../v1 and path=/v1/..., the request URL must NOT have /v1/v1/."""
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"models": []}'
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            return FakeResponse()
+
+        with patch.object(self.remote.urllib.request, "urlopen", fake_urlopen):
+            self.remote._apimart_json_request(
+                "https://api.lk888.ai/v1",
+                "sk-thisisalongenoughapikeyfortest",
+                "/v1/skills/models?type=video",
+                None,
+                30,
+            )
+        self.assertEqual(
+            captured["url"],
+            "https://api.lk888.ai/v1/skills/models?type=video",
+        )
+        # Explicit anti-regression: NO /v1/v1/ substring anywhere.
+        self.assertNotIn("/v1/v1/", captured["url"])
+
+
+class ComicFallbackTtsDegradeTest(unittest.TestCase):
+    """Regression for trap D failure #12 variant: a post-video TTS-mix step
+    used to hard-fail with comic_storyboard_tts_missing and discard an
+    already-paid provider video. Fix degrades to skipped_missing_tts and
+    keeps provider_result_url as the surfaced result_url.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.remote = load_remote_server()
+
+    def _matrix_replacement_completed_task(self, audio_mode):
+        # source_mode on the task itself satisfies _is_matrix_video_replacement_project(task);
+        # no LOCAL_COMIC_PROJECTS entry required.
+        task = {
+            "id": "ai-99999999",
+            "remote_task_id": "99999999",
+            "task_type": "generate_video",
+            "target_type": "storyboard",
+            "target_id": 999001,
+            "project_id": 0,
+            "status": "completed",
+            "state": "completed",
+            "progress_percent": 100,
+            "provider": "ai",
+            "provider_result_url": "https://lk888.example/paid-video.mp4",
+            "result_url": "https://lk888.example/paid-video.mp4",
+            "source_mode": "matrix_video_replacement",
+            "audio_mode": audio_mode,
+            "fallback_applied": True,
+        }
+        return task
+
+    def test_missing_tts_no_longer_raises_and_preserves_provider_video(self):
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertIs(returned, task)
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+        self.assertEqual(
+            returned["provider_result_url"], "https://lk888.example/paid-video.mp4"
+        )
+        self.assertEqual(returned["audio_mix_status"], "skipped_missing_tts")
+        self.assertEqual(returned["audioMixStatus"], "skipped_missing_tts")
+        self.assertEqual(returned["audio_source"], "provider_generated")
+        self.assertEqual(returned["audio_mix_error"], "comic_storyboard_tts_missing")
+        # Explicit anti-regression: status stays "completed", never gets flipped
+        # to "failed" by the outer caller because we didn't raise.
+        self.assertEqual(returned["status"], "completed")
+
+    def test_missing_tts_with_empty_audio_mode_also_degrades(self):
+        # audio_mode not set at all used to fall through to the raise branch too.
+        task = self._matrix_replacement_completed_task(audio_mode="")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(returned["audio_mix_status"], "skipped_missing_tts")
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+
+    def test_auto_audio_mode_still_short_circuits_without_touching_tts(self):
+        # Regression guard: the pre-existing auto branch must not regress.
+        task = self._matrix_replacement_completed_task(audio_mode="auto")
+        with patch.object(self.remote, "_save_local_comic_state"):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(returned["audio_mix_status"], "not_requested")
+        self.assertEqual(returned["result_url"], "https://lk888.example/paid-video.mp4")
+
+    def test_tts_url_present_still_triggers_real_mux(self):
+        # When a TTS URL IS attached, we must still call the mux — the degrade
+        # path must not swallow it silently.
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        task["storyboard_tts_url"] = "https://lk888.example/tts.mp3"
+
+        mux_calls = []
+
+        def fake_mux(video_url, tts_url, project_id, storyboard_id):
+            mux_calls.append((video_url, tts_url, project_id, storyboard_id))
+            return {
+                "url": "https://lk888.example/muxed.mp4",
+                "video_duration_seconds": 8,
+                "audio_duration_seconds": 8,
+                "final_duration_seconds": 8,
+            }
+
+        with patch.object(self.remote, "_save_local_comic_state"), patch.object(
+            self.remote, "_comic_remux_video_with_storyboard_tts", fake_mux
+        ):
+            returned = self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertEqual(len(mux_calls), 1)
+        self.assertEqual(returned["audio_mix_status"], "completed")
+        self.assertEqual(returned["result_url"], "https://lk888.example/muxed.mp4")
+        self.assertEqual(returned["audio_source"], "storyboard_tts")
+
+    def test_missing_provider_url_still_hard_fails(self):
+        # If the provider video really is missing, we still can't fabricate one.
+        # Hard fail is correct here (no paid content to lose).
+        task = self._matrix_replacement_completed_task(audio_mode="tts")
+        task["provider_result_url"] = ""
+        task["result_url"] = ""
+        with patch.object(self.remote, "_save_local_comic_state"):
+            with self.assertRaises(RuntimeError) as cm:
+                self.remote._finalize_ai_comic_fallback_video_audio(task)
+        self.assertIn("comic_fallback_video_url_missing", str(cm.exception))
 
 
 if __name__ == "__main__":

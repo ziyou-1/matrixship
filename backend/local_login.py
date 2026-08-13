@@ -24,7 +24,7 @@ import sys
 import requests
 from playwright.async_api import async_playwright
 
-SERVER = os.getenv('MATRIX_CENTRAL', os.getenv('JUZHEN_API', 'http://39.105.120.104')).rstrip('/')
+SERVER = os.getenv('MATRIX_CENTRAL', os.getenv('JUZHEN_API', 'https://central.yunlingai.net')).rstrip('/')
 EDGE = os.getenv('DY_EDGE_PATH', r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe')
 LOGIN_TIMEOUT = int(os.getenv('DY_LOGIN_TIMEOUT', '300'))
 ACCOUNT_ID = os.getenv('DY_ACCOUNT_ID', '')

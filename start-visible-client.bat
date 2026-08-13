@@ -5,7 +5,20 @@ set "BACKEND=%ROOT%backend"
 set "AGENT_DATA=%BACKEND%\datas"
 set "PYTHON=%ROOT%\.venv-win\Scripts\python.exe"
 set "PYTHONW=%ROOT%\.venv-win\Scripts\pythonw.exe"
-set "MATRIX_CENTRAL=http://127.0.0.1:9080"
+
+REM Central server selection.
+REM   1 = start central_server.py on this machine. There is no comic main DB
+REM       (MySQL) here, so maindb.ping() fails, find_login_user() falls back to
+REM       the local JSON user table, and only admin / test123456 can log in.
+REM   0 = use the public central server. Comic accounts can log in, but balance,
+REM       charges and tasks are then real production data.
+set "START_LOCAL_CENTRAL=1"
+if "%START_LOCAL_CENTRAL%"=="1" (
+  set "MATRIX_CENTRAL=http://127.0.0.1:9080"
+) else (
+  set "MATRIX_CENTRAL=https://central.yunlingai.net"
+)
+
 set "CENTRAL_HOST=127.0.0.1"
 set "CENTRAL_PORT=9080"
 set "LOCAL_API_PORT=9081"
@@ -15,6 +28,16 @@ set "CENTRAL_ADMIN_PASSWORD=test123456"
 set "MATRIX_AGENT_DATA_DIR=%AGENT_DATA%"
 set "DY_DATA_DIR=%AGENT_DATA%"
 set "DY_PROFILE_DIR=%AGENT_DATA%\dy_profile"
+
+REM Feature gates. The client never loads backend\.env, so these must be set in
+REM the process environment; putting them in .env has no effect on the client.
+REM   MATRIX_VIDEO_REPLACEMENT_ENABLED is checked by the client only; 1 enables
+REM   the same-style replacement navigation entry.
+REM   MATRIX_XHS_ENABLED is checked by the client, the central server and the
+REM   local executor. Against the public central server the central-side value
+REM   comes from that host, so setting 1 here does not change it.
+set "MATRIX_VIDEO_REPLACEMENT_ENABLED=1"
+set "MATRIX_XHS_ENABLED=1"
 
 if not exist "%PYTHON%" (
   echo Missing Python virtual environment: %PYTHON%
@@ -29,6 +52,11 @@ if not exist "%PYTHONW%" (
 )
 
 cd /d "%BACKEND%"
+
+if not "%START_LOCAL_CENTRAL%"=="1" (
+  echo Using remote central server: %MATRIX_CENTRAL%
+  goto central_ready
+)
 
 call :restart_central
 
@@ -78,5 +106,13 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R /C:":%LOCAL_API_PORT% .*LI
     taskkill /F /PID %%P >nul 2>nul
   )
 )
+REM Killing by port is not enough. The engine is a thread inside the client
+REM process, so only the client that WON port 9081 dies above. A client that
+REM lost the race keeps running with its embedded local-browser worker still
+REM polling central, forwarding tasks to whoever owns 9081 -- the same task then
+REM executes twice and browsers pop up repeatedly. Clear every stale client.
+REM The name filter is required: without it the powershell.exe running this line
+REM matches its own command line and kills itself. $PID exclusion is a backstop.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'python' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*matrix_native_client.py*' } | ForEach-Object { Write-Host ('Stopping stale client PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 1 /nobreak >nul
 exit /b 0

@@ -1,4 +1,183 @@
-﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+﻿## 2026-08-10 Agent 模式视频/音频上传做成顶部显眼槽位
+- `backend/matrix_native_client.py#L29228-L29246` `_rebuild_ref_slots`：视频模式下按 `_media_limit(kind)>0` 在参考图行追加视频/音频槽位；重建时重置 `self._media_slot_buttons`。
+- `backend/matrix_native_client.py#L29247-L29291` 新增 `_make_media_cell(kind)`：带标签的 84×84 上传槽，必选橙框「（必选）」、可选灰框「（可选）」、已选青框打勾；点击→`pick_media_files`，右键→`clear_media_files`；按钮存入 `_media_slot_buttons[kind]` 供测试断言。
+- `pick_media_files`/`clear_media_files`/`_clear_all_media` 增加 `self._style_ref_slot()`，选/清后顶部槽位实时重建；`__init__` 增 `self._media_slot_buttons={}`。右下角 `ref_video_btn`/`ref_audio_btn` 圆钮保留作次入口。
+- `tests/test_agent_video_upload_contract.py`：新增顶部槽位出现/消失断言；修正 `test_hand_written_overrides_still_win_over_the_schema` 里 `wan2.7-cankaosheng` 的 `video_field` 断言（旧值 `video` 是 `3a57710` 修掉的 bug，本文件当时漏改，现补为 `reference_video`）。
+- 验证：`.venv-win`+offscreen Qt 跑 137 项 agent 测试全绿、`py_compile` 通过；仅本地客户端 Agent.模式 UI，不动中心服/OpenAPI/DB/Docker/密钥/migration；退出后 `start-visible-client.bat` 重启生效。
+
+## 2026-08-10 同款替换移除 SD 2.0 全能参考并对齐标签
+- `backend/matrix_native_client.py` `_LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS`/`_LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS`/`_LK888_REPLACEMENT_MODEL_LABELS`：删除 `kwvideo-v2-quannengcankao`（“SD 2.0 全能参考”）。它此前是同款替换内置备选，但漫剧生成器视频目录用 `_is_comic_sd_video_model` 过滤掉全部 SD/kwvideo 模型，两侧不一致；删除后同款替换是漫剧生成器视频目录的子集。
+- `backend/matrix_native_client.py`：删除 `_replacement_is_sd20_all_reference_row` 及其在 `_replacement_supported_model_rows` 里遍历实时 LK888 目录的回填循环（否则会把 SD 2.0 全能参考从目录重新加回下拉框）；`_replacement_configured_model_is_allowed` 去掉 `sd20/seedance20` 模糊分支，仅保留主角模型和显式参考模型白名单。
+- `backend/matrix_native_client.py` `_LK888_REPLACEMENT_MODEL_LABELS`：4 个模型显示名对齐漫剧生成器——`happyhorse-video-edit`=“HappyHorse 视频编辑”、`happyhorse-r2v`=“HappyHorse 参考生视频”、`happyhorse-1.1-r2v`=“HappyHorse 1.1 参考生视频”、`wan2.7-cankaosheng`=“Wanxiang 2.7 参考生视频”。
+- `tests/test_video_replacement_v2.py`：两条 SD 2.0 全能参考“存在”用例反转为排除用例，新增 `test_replacement_configured_model_rejects_sd20_all_purpose_model`；`hailuo-h3-quannengcankao` 相关用例保持不变。
+- 注：漫剧流程的 `_comic_model_is_seedance()` 仍名义识别 `kwvideo-v2-quannengcankao`（隐藏彩铅链路），以及远程镜像 `tools/aicanvas_remote/server_current.py` 的静态目录/`API_GATEWAY_VIDEO_MODEL_IDS`/`AIC_SUBJECT_*` 仍保留该 ID，均在本次同款替换范围之外，未改动。
+- 验证：`.venv-win\Scripts\python.exe -m unittest tests.test_video_replacement_v2 tests.test_video_replacement tests.test_agent_video_duration` 共 495 条通过，`py_compile` 通过。
+- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_video_replacement_v2.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/ARCHITECTURE.md`、`docs/API_REFERENCE.md` 和本文档即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。代码改动需重启本地客户端后进入运行进程。
+
+## 2026-08-10 修复 wan2.7-cankaosheng 参考图/参考视频字段名
+- `backend/matrix_native_client.py#L2712-L2716`：`_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES["wan2.7-cankaosheng"]` 的 `video_field` 由 `video` 改为真实字段 `reference_video`。
+- `backend/matrix_native_client.py#L3039-L3047`：`_agent_video_payload()` 为 `wan2.7-cankaosheng` 增加精确分支——参考图写 `reference_urls`、参考视频写 `reference_video`，直接 return，不再走通用别名块（此前误写 `images/image_urls/reference_images` 和 `video`，模型收不到参考素材、退化为纯文生视频）。
+- `tests/test_agent_video_duration.py#L553-L558`、`#L753-L756`、`#L874-L878`：修正三处与实现同源、把该模型字段锁成 `images`/`video` 的旧断言，改按实测 `reference_urls`/`reference_video`。
+- 验证与影响：`tests.test_agent_video_duration`、`tests.test_agent_regen_keeps_params` 全绿、`py_compile` 通过；仅影响该模型 payload，不改中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。退出后 `start-visible-client.bat` 重启生效。来源:并行分支 `claude/agent-model-params-ui-e46b0b`（已 -s ours 记录合并）中唯一目标分支尚缺的修复。
+
+## 2026-08-08 内容采集页恢复图文同款按钮
+- `backend/matrix_native_client.py` `ContentPage.__init__`：在"下载"和"分解"之间重新创建 `self.b_note_replace = QtWidgets.QPushButton("图文同款")` 并 `addWidget`；恢复 `note_replace()` 方法（校验小红书链接→下载→emit `c_note_replace`）。
+- `_set_xhs_retry_busy` 和 `c_note_replace` 结果处理器改为对 `b_note_replace` 做 `setEnabled`（此前删按钮后只操作 `b_dl`）。孤儿处理器 `c_note_replace`（解析图片素材→跳转"🧩 图文同款"页）本来就在，现在重新接上按钮。
+- 背景：`5e3c052`（2026-08-03）有意删除该按钮，但小红书大部分是图文笔记，"分解"只处理视频，图文笔记因此在内容采集页无出口，点分解报"未找到可分析的视频文件"。按用户要求恢复。
+- `tests/test_xhs_note_replacement.py`：`test_content_page_hides_note_replacement_button`→`test_content_page_shows_note_replacement_button`；`test_native_collection_hides_note_replace_button_but_keeps_handoff_handler`→`test_native_collection_has_note_replace_button_and_handoff_handler`。
+- 验证与影响：`tests.test_xhs_note_replacement` 62/62，相邻套件 177/177，`py_compile` 通过。仅本地客户端 UI，不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书安全间隔按动作类型分别计冷却
+- `backend/api_server.py` `_xhs_safety_usage()` 新增 `lastActionAtBy` dict；`xhs_safety_record()` 除了写全局 `lastActionAt`（保留给展示/兼容），额外写 `lastActionAtBy[action]=ts`。
+- `_xhs_safety_snapshot()` 新增 `action` 形参：传入时用 `lastActionAtBy[action]` 算 `cooldownLeft`，为空时回退全局 `lastActionAt`（兼容旧调用）。`xhs_safety_preflight()` 和 `xhs_safety_record()` 的 snapshot 调用都带上 `action`。
+- 根因：旧实现全账号共享一个 `lastActionAt`，`search` 的 `xhs_safety_record("search")` 写的时间戳会让 `download` 的 `xhs_collection_account_gate("download")→xhs_safety_preflight("download")` 在 `minInterval` 默认 45s 内命中 `cooldownLeft>0` → `xhs_safety_interval`。
+- `tests/test_xhs_safety_mode.py`：新增 `test_search_does_not_block_immediate_download`、`test_min_interval_still_throttles_repeated_download`，替换固化错误行为的 `test_min_interval_blocks_xhs_download_endpoint`。
+- 边界：平台风险暂停 `xhs_safety_paused` 仍为全局；douyin 评论冷却是独立函数（`minIntervalCooldownLeft`），不受影响。旧状态文件无 `lastActionAtBy` 时读取补空 dict。
+- 验证与影响：`tests.test_xhs_safety_mode` 7/7，相邻套件除 1 条环境性 `playwright` 缺失外全过，`py_compile` 通过。不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书登录成功写入就绪 marker
+- `backend/api_server.py` `run_xhs_login()` 登录成功分支新增 `_save_json(DATA_DIR/xhs_auth_state.json, {loggedIn, cookieCount, profileDir, savedAt})`，与云登录路径 `_read_login_state()` 写 marker 的行为对齐。
+- 根因：`platform_adapters.xhs_login()` 的登录判定接受强 cookie `XHS_STRONG_LOGIN_COOKIES` 或 DOM 登录态；而就绪判定 `xhs_profile_ready()` 无 marker 时只调 `_xhs_profile_has_login_cookie()` 找强 cookie。DOM/主站 `web_session` 登录成功但缺强 cookie 时两者分歧，`current_accounts()` 不返回 xhs 行，卡片显示 0 个授权账号。
+- `tests/test_xhs_account_online_status.py`：mock `xhs_login` 返回 `logged_in=True` 但 profile 无强 cookie、无 marker，先断言就绪为假/账号 0（复现），修复后断言就绪为真/账号 1。测点选在 `run_xhs_login` 接缝，不需要 playwright。
+- 运行现场：排查时 9080/9081 由 codex-runtime 老客户端占用，其 agent token 与 `backend/datas/agent_token.txt` 不一致，无法直接读其账号列表；故用代码级接缝复现，与具体运行实例解耦。
+- 验证与影响：`tests.test_xhs_account_online_status` 5/5，相邻套件合计 193/193，`py_compile` 通过。不涉及中心服 API、OpenAPI、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 中心服小红书恢复开关接线
+- `backend/central_server.py#L161-L172`：新增 `_xhs_route_blocked()`，`xhs_enabled()` 为真时返回 `None`，否则复用 `_xhs_disabled()` 生成脱敏的 `platform_disabled` 结果。原 `_xhs_disabled()` 里的 `_ = XHS_ENABLED_ENV` 只是空引用，不构成任何判断。
+- `backend/central_server.py` 三个闸门改为先取 `_xhs_route_blocked()` 再决定是否 404：`create_task()`（`/api/xhs*` 与 `payload_uses_xhs()`）、`local_browser_create_task()`（`xhs.*` 任务类型）、POST 分发器（路径与 payload 双重判断）。
+- 同文件 `sync_node_accounts_locked()`、账号资产过滤和 `local_browser_upsert_account()` 早已正确调用 `xhs_enabled()`，此次只补齐漏掉的三处路由闸门。
+- `LOCAL_BROWSER_ALLOWED_TYPES` 仍由 `filter_xhs_capabilities()` 在 import 期计算，开关需在中心服启动前设置，符合既有「重启三个运行单元」的操作契约。
+- `tests/test_xhs_platform_disable.py`：新增 `test_central_restores_xhs_task_routing_when_flag_is_set`、`test_central_local_browser_channel_accepts_xhs_task_when_flag_is_set` 覆盖「打开后放行」方向；`test_local_browser_xhs_task_type_is_disabled` 由源码字符串 grep 改为真正调用 `local_browser_create_task()` 断言 404。旧测试只覆盖关闭方向，是本 bug 长期未被发现的直接原因。
+- 验证与影响：`tests.test_xhs_platform_disable` 13/13，相邻套件合计 162/162，`py_compile` 通过；未设开关时中心服仍返回 404 `platform_disabled`，已单独验证。不涉及 OpenAPI 路径、JSON Schema、数据库、Docker 镜像结构或 `migration.sql`。
+
+## 2026-08-08 小红书账号在线状态补齐
+- `backend/api_server.py#L1218-L1235`：`current_accounts()` 的小红书行补写 `online: True` / `status: 'online'` / `needLogin: False`。该分支入口条件是 `xhs_enabled() and xhs_profile_ready(DATA_DIR)`，本机登录态失效时整行不返回，因此置为在线不会误报。
+- 回归来源 `backend/matrix_native_client.py` 的 `submit_account_login_direct()`（2026-08-03 引入）：账号矩阵登录直连本机执行器，不再经中心服本地浏览器任务通道，`backend/central_server.py` 的 `local_browser_upsert_account()` 因此不再被触发。
+- 受影响的消费点：`merge_account_sources()` 合并时 `online` 回落到中心服记录；账号矩阵徽标渲染；`clean_accounts(ready_only=True)` 过滤发布/采集账号下拉；`account_option_label()` 标注“登录态失效”。
+- `tests/test_xhs_account_online_status.py`：跨 `api_server` 与 `matrix_native_client` 的回归，覆盖本地执行器字段、账号矩阵徽标为“在线”、发布/采集下拉保留该账号，以及本机登录态消失后不再显示账号的对照项。只测其中一端会漏掉本 bug。
+- 验证与影响：`tests.test_xhs_account_online_status` 4/4，相邻套件通过，`py_compile` 通过。只改本地执行器账号列表和新增测试，不涉及中心服 API、OpenAPI、数据库、Docker、密钥配置或 `migration.sql`。重启本地客户端和本地执行器生效；回滚 `backend/api_server.py`、`tests/test_xhs_account_online_status.py`、`CHANGELOG.md`、本条记录和 `docs/TROUBLESHOOTING.md` 即可恢复旧行为。
+
+## 2026-08-08 同款替换 / 图文同款换位台账布局
+- 定位方式说明：`docs/IMPLEMENTATION.md` 存在广播式重复（同一 `#L` 引用最多重复 67 次，`matrix_native_client.py#L4733-L4804` 等），行号引用整体不可信，故本条只用符号名定位，不写行号。
+- `backend/matrix_native_client.py` `THEMES`：dark / light 各新增换位台账状态色 `stKeep`/`stSwap`/`stOwe`/`stDone`/`stFail`，以及禁用态与勾选框 token `disBg`/`disBorder`/`checkBg`/`checkBorder`/`checkDisBg`/`checkDisBorder`。亮色下状态色统一压深以保证白卡上的对比度。
+- `backend/matrix_native_client.py` `build_qss()`：新增统一字阶与分区样式（`#eyebrow` 10.5/800、`#zoneTitle` 13.5/750、`#fieldValue` 12.5/600、`#meta` 11/500、`#slotIndex` 等宽数字），新增 `#zone`/`#readyBar`/`#hline`/`#quiet` 与 `QProgressBar` 样式；`QPushButton:disabled`、`QLineEdit:disabled` 系列与 `QCheckBox::indicator` 改为读取上述 token；补充 `QScrollBar:horizontal`。
+- `backend/matrix_native_client.py` 新增共用构件：`_state_color()`/`_style_state_pill()`/`state_pill()`、`zone_card()`、`field_label()`/`field_grid()`/`button_cell()`、`SwapRail`（横向连接线，QPainter）、`SwapSlotRow`（竖向状态脊线）、`ReadyBar`（行动条 + 还差什么）。
+- `backend/matrix_native_client.py` `XhsNoteReplacementPage.__init__`：重排为 原片 / 你的信息 / 换位台账 / 行动条 / 生成结果 五个分区；两条缩略图带共用列距并通过 `_on_swap_scrolled()` 联动滚动，中间插入 `SwapRail`；新增 `_sync_swap_state()` 汇总缺图与必填项，并在 `_render_replacement_slots()`、`_fill_replacement_paths()`、`_start_from_collection()` 调用。
+- `backend/matrix_native_client.py` `VideoReplacementPage.__init__`：重排为 原片 / 替换素材 / 声音与模型 / 行动条 / 生成 / 审核 / 核对 七个分区；人物、产品、场景各为一条 `SwapSlotRow`；新增 `_sync_swap_ledger()`，并在 `pick_products()`/`pick_face()`/`pick_scene()`/`pick_replacement_audio()`/`_sync_person_controls()`/`load_source()`、方案就绪与虚拟模特就绪分支调用。
+- 未改动任何构件的构造语句文本（`self.b_face`、`self.face_authorized`、`self.person_full_body`、`self.b_virtual`、`self.b_retry_failed`、`self.no_person_mode` 等），仅改变其所属布局，以满足既有的源码子串断言。未新增任何非空 tooltip，说明文字一律改为页面内可见的 hint / meta 行。
+- 遗留问题（本次未处理，需单独决定）：本次改动使 `matrix_native_client.py` 净增约 504 行，`docs/IMPLEMENTATION.md` 中指向该文件的 `#L` 引用共 1017 处（去重后 808 处），其中 533 处因本次改动整体下移，另有 144 处在本次改动前即已失准。考虑到该文档存在 67 倍广播式重复、且主目录同一文件另有大量未提交改动，未对这些行号做批量重写。
+- 验证与影响：全量 `unittest` 1367 项无新增失败（2 项 error 为环境缺失 `playwright` 与 `backend/.env.dev`，已在干净树复现）；`py_compile` 通过；暗色 / 亮色双主题离屏截图核对。纯本地客户端展示层，不改中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。重启本地客户端后生效；回滚 `backend/matrix_native_client.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧界面。
+
+## 2026-08-07 下载失败的成品可恢复
+- `backend/matrix_native_client.py`(`_PRODGEN_RUNTIME_KEYS`):新增 `pendingDownloadRecovery`。`regen` 是黑名单复制,不加会把上一条的结果 URL 带进新条目。
+- `backend/matrix_native_client.py`(`_prodgen_entry_by_id` / `_prodgen_download_recovery` / `_prodgen_download_error_text`):按 id 取条目、判定是否可恢复(必须有 `resultUrl`)、把网络错误翻成不含 host 与 SSL 栈的中文文案(403 引导「重新生成」而非「恢复下载」)。
+- `backend/matrix_native_client.py`(`_prodgen_remember_result`):下载前写入 `pendingDownloadRecovery = {status, createdAt, taskId, resultUrl, model, mode, targets, downloadAttempts, lastError}`。字段名与漫剧的 `pendingComicVideoRecovery` 同构,便于日后合并。
+- `backend/matrix_native_client.py`(`lk888_media_task`):新增 `on_result(url, task_id)`,在 `return url` **之前**回调,回调异常只记日志不外抛(落盘失败不能反过来把已生成的结果弄丢)。`_prodgen_run_image` 传 `files + [p]`,保住部分成功的那几张。
+- `backend/matrix_native_client.py`(`_wf_download` / `_wf_download_should_retry` / `_WF_DOWNLOAD_RETRY_STATUS`):退避重试仅限连接层瞬时故障与 408/429/5xx。`HTTPError` 是 `RequestException` 的子类,所以必须先按异常类分流再看状态码,否则会把 403 也重试掉,正好踩爆 `raise_for_status` 那条注释守的不变量。流式下载 + `.part` + `os.replace`,避免半截文件骗过调用方「已存在就跳过」的判断。`trust_env=False` 绕开系统代理。
+- `backend/matrix_native_client.py`(`ProductGenPage._start`):异常分支先查 `pendingDownloadRecovery`,命中则写 `status="下载失败"` 并累计 `downloadAttempts`,否则维持原「失败」路径。
+- `backend/matrix_native_client.py`(`ProductGenPage.recover_download` + `GenCard` 的 `下载失败` 分支与「恢复下载」按钮):只调 `_wf_download`,不调 `_prodgen_generate` / `try_charge` / `_start` / `lk888_media_task`。成功后清空 `pendingDownloadRecovery`。
+- `tests/test_agent_download_recovery.py`:12 条。`test_recovering_a_download_never_starts_a_new_paid_generation` 用 AST 取实际被调用的函数名(不看注释),避免文档措辞误伤。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式「更多参数」抽屉
+- `backend/matrix_native_client.py`(`_agent_schema_field`):新增 `duplicate_role` 字段。同一模型内同角色的第二个字段除了不当胶囊,还会被置 `hidden=True`,因此 `_agent_form_drawer_fields` 也拿不到它。`happyhorse-r2v` 的 `aspect_ratio` 由此彻底进不了请求 —— 它和 `ratio` 同时出现会 400。
+- `backend/matrix_native_client.py`(`_agent_form_visible_fields` / `_agent_form_drawer_fields`):前者收敛为「会渲染且一定会被发出去的字段」,后者是它里面 role 不属于 aspect/duration 的部分,即抽屉内容。
+- `backend/matrix_native_client.py`(`_agent_entry_extra_params` / `_agent_apply_entry_params`):把条目里用户显式改过的参数合并进已组装好的 payload。合并前逐个过该模型 schema:字段不存在、是上传/未知类型、值不在 `options` 里,一律丢弃并 `log`。`_prodgen_run_image` 与 `_prodgen_run_video` 在 `lk888_media_task` 之前各调一次。
+- `backend/matrix_native_client.py`(`class AgentMoreParamsDialog`):抽屉对话框。choice/toggle → `QComboBox`(可选项在最前面插「默认(不指定)」)、textarea → `QPlainTextEdit`、input/number → `QLineEdit`;必填标 `*必填`;单选项字段渲染但禁用。`description` 一律落成控件下方的灰色可见文案 —— `tests/test_native_tooltips.py` 用 AST 扫全文件禁止任何非空 `setToolTip`。`values()` 只返回与默认值不同的项。
+- `backend/matrix_native_client.py`(`ProductGenPage._changed_extra_params` / `_open_more_params`、`b_more` 胶囊):抽屉是这批参数的唯一来源,确认时先清掉旧值再写入,避免残留。改动条数反映在胶囊文案与配色上,并在 `param_note` 列出「已改动的模型参数：…」。
+- `backend/matrix_native_client.py`(`_send_confirmed`):条目新增 `params`(只含改过的项)与 `paramsMeta`(给生成卡显示的快照)。`regen` 已是黑名单复制,这两个字段会自动跟着重跑。
+- 设计取舍:让抽屉「真生效」而不必逐模型开闸,靠的是**只发用户显式改过的键**。没开过抽屉 → `params` 为空 → 请求与上一版逐字节相同;开过 → 增量就是用户自己点的那几个键,且值必来自模型自己的 options。这样既不留假控件,也没有把 67 个模型的装配权一次性交给 schema。
+- `tests/test_agent_page_offscreen.py`:新增 `test_the_drawer_holds_every_parameter_that_is_not_already_a_pill`、`test_a_duplicate_role_field_is_hidden_from_the_drawer_too`、`test_untouched_drawer_leaves_the_request_byte_for_byte_unchanged`、`test_a_value_picked_in_the_drawer_actually_reaches_the_request`、`test_a_value_the_model_never_declared_is_dropped_instead_of_sent`。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式输入框按模型 schema 渲染(UI 接线)
+- `backend/matrix_native_client.py#L2796-L2820`:`_agent_aspect_from_size` 里的局部 mapping 提为模块级 `_AGENT_SIZE_TO_ASPECT`,并由它推出反向表 `_AGENT_ASPECT_TO_SIZE`(每个比例取 1K 档)与新函数 `_agent_size_from_aspect()`。图片模式的请求只由 `size` 决定(`_prodgen_run_image` 只把 size 传下去),两个方向必须同源,否则界面说 16:9、上游收到 3:2。
+- `backend/matrix_native_client.py#L27352-L27470`:`ProductGenPage` 新增 `_current_form/_request_model_schema/_model_values/_field_value/_set_field_value/_field_label_for/_pick_field/_bind_role_pill/_sync_param_bar`。`_bind_role_pill` 把 `b_aspect`/`b_duration` 绑到当前模型的 aspect/duration 角色字段上,字段不存在就 `setVisible(False)`。`_pick_field` 对可选字段在菜单顶部插一项「默认(不指定)」,选中即 `AGENT_PARAM_UNSET`。
+- `backend/matrix_native_client.py#L27556-L27600`:`_pick_aspect`/`_pick_video_duration` 改为读表单字段弹菜单;`_select_aspect`/`_select_duration` 保留下标入口(没有 schema 时 `ASPECTS`/`duration_slots` 仍是兜底档位),但会把对应的 schema 取值一并写进 `_param_values`。`_current_video_duration` 优先读表单值。
+- `backend/matrix_native_client.py#L27380-L27400`:`_set_current_model` 换模型时清掉该 (model, mode) 的表单缓存并起后台取 schema;`_sync_model_ui` 末尾改调 `_sync_param_bar`;`_sync_duration_ui` 降为它的薄封装(名字保留,`tests/test_agent_video_duration.py` 以它为锚点)。
+- `backend/matrix_native_client.py#L27700-L27712`:新增 `_current_input_hint()`,提示语优先用模型自己的 `input_hint`(多行压成一行),`_apply_ref_hint` 以它为基准而不是 `BASE_HINT`。
+- `backend/matrix_native_client.py#L27810-L27832`:新增 `_aspect_entry_fields()` 适配器,把比例胶囊的取值折回条目既有的 `(aspectLabel, size, aspect_ratio)` 三个字段。字段名本身就是 `size`(gpt-image-2)或值形如 `1920x1088` 时原样透传,否则用 `_agent_size_from_aspect` 换算。**请求的形状一点没变**,`_send_confirmed` 里 `self.ASPECTS[self.aspect_i]` 换成这个方法的返回值。
+- `backend/matrix_native_client.py#L26560-L26566`、`#L26760-L26770`:`__init__` 新增 `_forms/_param_values/_role_values/_schema_pending` 四个状态与只读的 `param_note` 标签;`_on` 新增 `prodgen_model_schema` 分支;`on_show` 预取当前模型的 schema。
+- 假控件的处理口径:`_agent_form_visible_fields` 对未开闸模型只返回 role ∈ {aspect,duration} 的字段,其余参数由 `param_note` 列成一行只读文字(「该模型另有参数：… —— 尚未接入请求」)。**渲染出来的控件一定是会被发出去的**,不画点了不影响请求的控件。description 一律落成页面内可见文案 —— `tests/test_native_tooltips.py` 用 AST 扫全文件禁止任何非空 `setToolTip`。
+- `tests/test_agent_page_offscreen.py`(新增 11 条):断言渲染结果而非源码字符串。关键一点是 `setUpClass` 里必须把页面真正 `show()` 出来 —— 未显示的控件 `isVisible()` 恒为 False,「胶囊消失了」这类断言会假绿(第一版就踩了这个,`test_the_page_is_actually_visible_so_visibility_assertions_mean_something` 专门守住)。
+- 离屏实测(不发网络,全部走随包快照):`gpt-image-2` 比例 34 项无时长胶囊 / `gemini-3-pro-image-preview` 比例 10 项 / `mj_imagine` 另有 5 个未接入参数 / `kling-v2-6` 比例 3 项时长 2 项 / `wan2.7-shouweizhen` 无比例胶囊、上传槽「首帧 尾帧」上限 2 / `happyhorse-video-edit` 两条胶囊全无、多出视频上传口 / `vidu-jieshuoman` 比例 6 项时长 3 项。
+- 运行说明、已知副作用(16:9 由 `1536x1024` 改为 `1920x1088`)与回滚见 `CHANGELOG.md` 同日条目。
+
+## 2026-08-07 Agent.模式参数按模型 schema 动态化(引擎部分)
+- `backend/matrix_native_client.py#L2556-L2572`:新增单模型 schema 的缓存常量。与 `_LK888_MODEL_CACHE` 分开的原因是后者是裸 dict、且失败按成功 TTL 缓存 300 秒;schema 这边成功 24 小时、失败 120 秒负缓存,并且复合读改写全程持 `_LK888_SCHEMA_LOCK`(UI 线程读、后台线程写)。
+- `backend/matrix_native_client.py#L3243-L3290`:`_lk888_schema_disk_path/_load/_save` 磁盘缓存(`data_dir()/lk888_model_schemas.json`,`_atomic_write_json`,按 ts 淘汰到 200 条)。坏文件、版本不符一律当空,不让一份损坏缓存拖垮参数区。
+- `backend/matrix_native_client.py#L3292-L3345`:`_lk888_schema_snapshot()` 读随包快照;`_lk888_schema_normalize()` 把上游返回收敛成固定形状(params 恒 list、option 恒 `{value:str,label:str}`),对 `params` 非 list、option 缺 value、裸字符串 option 等敌意输入全部容错。
+- `backend/matrix_native_client.py#L3347-L3410`:`_lk888_model_schema_cached()`(只读,UI 线程用)与 `_lk888_model_schema()`(发网络,只在后台线程调)。后者失败时**保留上一次成功的结果**再落降级链,否则一次 502 会把 stale 兜底一起抹掉。
+- `backend/matrix_native_client.py#L3050-L3120`:`AGENT_PARAM_UNSET`、`_AGENT_SCHEMA_MODELS`(逐模型开闸集合,当前空集)、`AGENT_DYNAMIC_PARAMS` 总开关、角色字段名表、`_AGENT_UPLOAD_PLURAL`(直接抄 LK888 写在 77/78 条上传描述样板里的契约,不靠猜)、`_AGENT_MODEL_OVERRIDES` 与其闭合键集 `_AGENT_OVERRIDE_KEYS`。
+- `backend/matrix_native_client.py#L3122-L3260`:`_agent_param_kind/_agent_param_role/_agent_clean_description/_agent_desc_count_limit/_agent_upload_media/_agent_upload_is_array/_agent_upload_limit/_agent_param_default`。其中 `_agent_param_role` 对同一模型内同角色只认第一个字段 —— `happyhorse-r2v` 的 params 顺序是 `resolution, duration, ratio, aspect_ratio`,绑到 `ratio` 后 `aspect_ratio` 既不渲染也不发送,机械避开 `docs/TROUBLESHOOTING.md` 记录的那条互斥 400。
+- `backend/matrix_native_client.py#L3196-L3232`:`_agent_param_default` 的八级阶梯。关键取舍是规则 4:**可选 choice/toggle 一律返回 `AGENT_PARAM_UNSET`,不预填也不发送**。schema 里 356 个参数一个 `default` 都没有,若照抄 `options[0]` 会造成静默改档(实测 pixverse 全系 `options[0]` 是 `360P` 而今天发 `720p`,kwvideo 是 `480p`,`kling-v3.resolution` 是 `2k` 而今天发 `1k`)。
+- `backend/matrix_native_client.py#L3262-L3400`:`_agent_schema_field/_agent_schema_form/_agent_legacy_form/_agent_schema_form_for_ui/_agent_form_field/_agent_form_role_field/_agent_form_visible_fields`。`_agent_schema_form` 整体 try/except 退回 `_agent_legacy_form`,参数区绝不空白。`_agent_form_visible_fields` 对未开闸模型只返回 role ∈ {aspect,duration} 的字段 —— **渲染出来的一定是会被发出去的**,不画点了不影响请求的假控件。
+- `backend/matrix_native_client.py#L3402-L3520`:`_agent_serialize_value`(值恒取自 options 且恒为字符串,消灭 `sound=false` 与 `watermark=False` 两类)、`_agent_dynamic_payload`(R1 必填必发 / R2 可选未设不发 / R4 值域收敛)、`_agent_payload_gate`(params 键必属该模型 schema,被丢的只记键名不记值)、`_agent_validate_form`(扣费前拦截,choice/toggle 说「请选择」、自由文本说「请填写」)、`_agent_params_meta`。
+- `backend/matrix_native_client.py#L19800-L19806`、`#L27470-L27480`:`_PRODGEN_RUNTIME_KEYS` + `regen()` 白名单改黑名单。旧实现只抄 12 个字段,视频重跑丢 `duration`/`referenceVideo`;参数动态化后每个模型字段各不相同,白名单更不可能列全。
+- `tools/gen_lk888_schema_snapshot.py`(新增):抓全量 schema → 生成 `backend/lk888_schema_snapshot.py`(gzip+base64 单常量,PyInstaller 靠 import 自动收集,不用改打包配方)与 `tests/fixtures/lk888_model_schemas.json`。少于 20 个模型时拒绝覆盖快照。
+- 契约测试口径:`tests/test_agent_payload_contract.py` 对全部 67 个模型跑通用不变式,而不是逐模型钉死 payload —— 装配是通用的,守护也必须是通用的。踩过坑的模型(`kling-v2-6` sound、`happyhorse-r2v` 互斥、`veo3.1` 双开关、`vidu-jieshuoman` 主文本字段叫 `script_content`)另有具名用例。
+- 一个真实发现:`vidu-mv.duration`(number)与 `vidu-jieshuoman.script_name`(input)都是 required 但没有 options,客户端不能凭空编默认值,只能由 `_agent_validate_form` 在提交前拦住让用户填。这是契约测试跑出来的,不是设计时想到的。
+- 运行说明与回滚见 `CHANGELOG.md` 同日条目。`_AGENT_SCHEMA_MODELS` 为空集时线上行为逐字节未变。
+
+## 2026-08-07 Agent.模式输入框改成 lk888 版式
+- `backend/matrix_native_client.py#L4816`：`_draw_icon()` 新增 `bolt`（计费徽章闪电）、`info`（圆圈 i）、`close`（清空叉）、`chevron` 四种手绘图标。
+- `backend/matrix_native_client.py#L25971`、`#L25989`、`#L25997`、`#L26002`：新增 `_PROD_MENU_PILL_TPL` / `_prod_menu_pill_style(accent)`（按参数着色的下拉胶囊）、`_PROD_COST_CHIP`、`_PROD_SEND_BTN`（青绿圆形发送键）、`_menu_pill_label()`（文案尾部补 `▾`）、`_prod_menu(parent)`（统一深色菜单，`_pick_model` 也改用它）。
+- `backend/matrix_native_client.py#L25984`：`REF_SLOT_W/H` 由 112×56 改为 84×84，`REF_SLOT_RADIUS` 13→14。84 是让槽下「点击替换 / 右键删除」在 8.5px 字号下单行放得下的宽度。
+- `backend/matrix_native_client.py#L26575`：composer 重排为「工具条 → body（左参考图 / 右提示语+输入）→ 分隔线 → 胶囊行 → 模型元信息」。工具条含清空输入、清空参考图、计费徽章、计费说明；底部胶囊行去掉原来的清空输入垃圾桶。
+- `backend/matrix_native_client.py#L26806`、`#L26819`、`#L26827`：`_sync_cost_chip()` 读 `_SHARED["balance"]` 渲染云豆余额，`_refresh_cost_chip()` 在 `on_show` 起后台 `fetch_balance()` 并经 `BRIDGE` 的 `prodgen_balance` 回主线程刷新，`_show_billing_note()` 弹计费说明。徽章不显示单价：`product_image`/`product_video` 在 `_SERVER_CHARGED_CAPS` 里，由中心服按 LK888 实际用量后付费，提交前无确定单价。
+- `backend/matrix_native_client.py#L26859`：`_autosize_input()` 按文档高度把输入框钉在 78~138px，接 `textChanged`。此前 `QPlainTextEdit` 直接撑到 `maximumHeight`，composer 白占一截高度。
+- `backend/matrix_native_client.py#L26865`：`_menu_choice(button, options, current_index, on_pick)` 在胶囊正下方弹选项菜单；`_cycle_aspect/_cycle_count/_cycle_style/_cycle_video_duration` 全部替换为 `_pick_*` + `_select_*`。新增类常量 `COUNTS = (1, 2)`，发送时的 `count` 改读 `self.COUNTS[self.count_i]`。
+- `backend/matrix_native_client.py#L26524`、`#L27026`、`#L27038`：`BASE_HINT` 只留通用提示语；参考图用法由 `_ref_hint_text()` 按模式产出、`_apply_ref_hint()` 追加到 `self.hint`（`__init__` 里先建槽后建提示语，故做空值保护），不再作为一个 QLabel 塞进 `ref_strip`。
+- `tests/test_agent_mode_defaults.py`、`tests/test_agent_video_duration.py`：源码契约断言跟随更新（`body.addLayout(ref_strip)` / `prompt_col.addWidget(self.inp)` / `REF_SLOT_W = 84` / `def _pick_video_duration`），`_mode_set` 块的切分锚点由 `def _cycle_aspect(self):` 改为 `def _menu_choice(`。
+- 验证：`py_compile` 通过，`tests` 全量 1520/1520 通过；offscreen 与真字体各渲染一次 composer 核对版式（1232×268，参考图槽 84×109，胶囊 `▾` 正常）。需重启本地客户端生效，未打包、未上线。
+
+## 2026-08-07 视觉分析失败不再污染同款替换提示词
+- `backend/replacement_analysis.py#L35-L91`：新增 `_visual_status_ok/_visual_status_failed/_visual_status_empty/_visual_status_skipped` 和 `breakdown_visual_failure()`。失败记录只带 `status/errorId/code` 和一句固定中文，异常原文留在结构化日志，避免上游主机名和端点随分析结果进入任务负载；缺少 `visualStatus` 的历史分析按 ok 处理。
+- `backend/replacement_analysis.py#L242-L268`、`backend/replacement_analysis.py#L300-L307`、`backend/matrix_native_client.py#L8146-L8172`、`backend/matrix_native_client.py#L8199-L8206`：视觉模型失败、无可用关键帧和分解整体失败时 `visual` 一律置空，失败信息写进 `visualStatus`，不再拼 `视觉模型分析失败（errorId: ...）: <异常> + frameNotes`。
+- `backend/matrix_native_client.py#L21292-L21318`：新增 `_REPLACEMENT_DIAGNOSTIC_NOISE_RE` 和 `_replacement_strip_diagnostic_noise()`，按行丢弃报错文本、URL、域名、`host=/port=/timeout=`、`/v1/` 类接口路径和 `.jpg/.png/.mp4/.log` 文件名；`_replacement_current_shot_constraints()`（时间轴取材与 `visual` 兜底两处）和 `_replacement_safe_breakdown_evidence()` 都在拼提示词前调用它，历史任务里已被污染的分析结果同样被过滤。
+- `backend/matrix_native_client.py#L12916-L12931`：`_comic_visual_prompt_text()` 增加 `describable_visual_line()` 白名单校验，标注块和普通行两条路径都要求文本含中文描述且不含技术噪声，才允许进入 storyboard `description`。原有 `drop_markers` 黑名单保留，只作为第一层过滤。
+- `backend/matrix_native_client.py#L20894-L20907`、`backend/matrix_native_client.py#L20927`：新增 `_breakdown_visual_status_label()`，分解报告“来源”区输出 `- 视觉分析: ok` 或 `- 视觉分析: 失败（错误编号 err-xxxx）`。
+- `backend/matrix_native_client.py#L16675-L16696`、`backend/matrix_native_client.py#L15344`：`VideoReplacementPage._confirm_visual_analysis_failure()` 在 `start_generation()` 收集完片段编辑后拦截，视觉分析未成功时弹确认框并默认取消。
+- `backend/replacement_pipeline.py#L100-L111`：`build_plan()` 把 `breakdown_visual_failure()` 结果写进 `job["visualAnalysisFailure"]`，失败时输出 `video_replace_visual_analysis_unavailable` 结构化日志（只带 jobId、状态和错误编号）。
+- `tests/test_replacement_service.py#L160-L168`、`#L410-L462`：`_replacement_analysis()` 支持注入 `vision_runner`；新增视觉失败/成功两条契约用例，断言 `visual` 为空、`visualStatus` 完整，且序列化后的分析结果不含上游主机名和端点。
+- `tests/test_video_replacement.py#L2101-L2150`、`tests/test_video_replacement_v2.py#L1212-L1256`、`tests/test_video_breakdown.py#L244-L267`：回归覆盖被污染分析不进视频/关键帧/漫剧三类提示词、漫剧画面描述只保留中文描述行、`build_plan()` 记录视觉失败，以及报告显示视觉分析状态。
+- 验证与影响：上述用例先在旧实现下 RED；修复后引用这三个文件的 38 个测试模块共 974 条用例通过，仅剩两条与本次无关的既有失败（`tests.test_douyin_comment_cooldown` 的评论前检查、`tests.test_ui_feature_visibility` 缺少 `backend/.env.dev`）。本次只影响本地客户端与本地服务层，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。漫剧端 `tools/aicanvas_remote/server_current.py#L14554-L14566` 在首尾帧路径上仍拼“七帧中的每一帧”前缀，属于远端文案问题，本次未改。
+
+## 2026-08-05 网页替换按 job 模式选管线（漫剧/hybrid）+ 网页启动器
+- `backend/matrix_native_client.py#L11690`、`#L11727`：新增 `_ReplacementServicePipeline` / `_replacement_service_pipeline()`，为 `/replacement` 网页与 Qt 共享服务按 job 的 `replacementMode` 路由 hybrid 或 comic_project 管线（镜像 `_replacement_pipeline_for_job`）；缺模式的网页 job 在 `build_plan` 时补产品默认 `VIDEO_REPLACE_DEFAULT_MODE`（默认 `comic_project`）并持久化到 job.json，使后续 execute/retry/concat 路由一致；已有模式的 Qt 共享 job 不被覆盖。修复此前网页服务 `_build_pipeline` 写死 hybrid、忽略默认漫剧模式的 gap。
+- `backend/replacement_web.py` 的 `_build_pipeline()`：`build_video_service` 改用 `_replacement_service_pipeline()` 路由管线，取代只用 `_replacement_hybrid_pipeline()`。
+- `tests/test_video_replacement_v2.py`：新增 4 个路由测试（缺模式默认 comic、legacy 默认 hybrid、显式模式优先并路由 execute、`build_video_service` 使用路由管线）；并修复 `test_keyframe_references_migrate_existing_central_library_urls_in_memory` —— 该迁移仅对回环中心库 URL 适用，测试显式钉 `CENTRAL=http://127.0.0.1:9080`，不再依赖出厂默认（现为公网 `120.26.194.174`，见 d349f9c）。
+- `start-visible-client-web.bat`：出厂 `start-visible-client.bat` 的瘦包装，额外设 `MATRIX_REPLACEMENT_WEB_ENABLED=1` 与 `VIDEO_REPLACEMENT_SERVICE_MODE=shared`，便于本机跑网页版同款替换真实链路（原脚本保持默认关的安全默认）。
+
+## 2026-08-04 本地视频替换共享服务（Web 生命周期、Qt 适配器与熔断回滚）
+- `backend/replacement_service.py#L109`：模块级 `public_job()` 抽出集中脱敏（去除 `outDir/sourceVideoPath/videoPath/outputPath`、凭据、签名 URL），Web 与 Qt 复用同一份公开视图。
+- `backend/replacement_service.py#L458`：`ReplacementService.retry()` 仅在 `partial`/`awaiting_review` 状态转发 `pipeline.retry`，原子持久化并返回脱敏 job；缺失 job 抛 `replacement_job_not_found`。
+- `backend/replacement_service.py#L190`、`#L224`、`#L246`：`record_terminal_result()` 维护有界终态窗口（≤500，按 agent 数据目录持久化、只存 job id 哈希，cancelled 不计失败）；`circuit_breaker_state()` / `shared_mode_allowed()` 需至少 100 个终态样本，仅当 `failed/total > 0.01` 才回落 legacy（1% 严格不触发），且从不打断进行中的 job。
+- `backend/replacement_service.py#L285`、`#L329`：`build_replacement_event()` / `emit_replacement_event()` 产出脱敏事件（provider task id 走 sha256 前缀哈希、签名 URL 只保留 scheme+host），覆盖 `prepare_started/analysis_completed/provider_submitted/provider_recovered/billing_settled/video_completed/video_failed/shared_mode_circuit_opened/rollback_requested`。
+- `backend/replacement_web.py#L1083`、`#L1136`、`#L1166`、`#L1179`、`#L1194`、`#L1207`：`build_video_service()` 用真实 `SourceResolver`+`HybridReplacementPipeline` 构建服务并注入 `metrics_dir`；`prepare/execute/retry/concat/cancel_video_job()` 只编排服务，绝不直连 provider、不预扣费。
+- `backend/replacement_web.py#L1238`、`#L1268`：`video_job_response()` 字段白名单 + 复用 `public_job` 脱敏（download 只给 basename 与 available，绝不含内部路径/凭据）；`final_media_path()` 校验 job id、文件名 basename 与 data-dir sandbox 根，拒绝穿越。
+- `backend/api_server.py#L7186`、`#L7337`、`#L7367`、`#L7518`：新增 `POST /api/replacement/video/{prepare,execute,retry,concat,cancel}`（202）、`GET .../job`（200，走 `video_job_response`）、`GET .../download`（校验 task id/文件名/根后串流最终媒体）；`POST .../video/start` 保留为不能触发生成的 Phase 0 兼容别名；均保留 `MATRIX_REPLACEMENT_WEB_ENABLED` 开关与 agent token 鉴权，非法状态转移返回 HTTP 409。
+- `backend/matrix_native_client.py#L11691`、`#L11739`、`#L11743`：`replacement_mode_for_new_job()` 仅在 `VIDEO_REPLACEMENT_SERVICE_MODE=shared` 且 `shared_mode_allowed()` 同时成立时返回 shared，熔断开启时发 `shared_mode_circuit_opened`/`rollback_requested` 并回落 legacy；`video_replacement_service_shared()` 与 `ReplacementServiceAdapter`（prepare/execute/retry/concat/cancel）把 Qt 控件映射为服务请求、从 job.json 读回脱敏状态并发既有 BRIDGE 事件，绝不改动 provider task id 或计费 ref；legacy 默认路径逐字保留。
+- `backend/matrix_native_client.py#L17514`：`_replacement_web_download_source()` 复用既有分解下载/校验路径（`_wf_download` + `_breakdown_source_validation`），使生产直链替换的源下载可用（闭合 Task 5 遗留），非 2xx 或非法媒体拒绝并删除半成品文件。
+- `tests/test_replacement_web_mvp.py`、`tests/test_replacement_service.py`、`tests/test_video_replacement.py`、`tests/test_video_replacement_v2.py`：覆盖 handoff/直链 prepare、鉴权 execute/retry/concat/cancel、轮询、非法状态 409、下载与响应脱敏、页面视频 tab 控件、Qt legacy/shared 门控与 BRIDGE 事件形状、熔断边界（100/2→legacy、100/1→shared、cancelled 不计、active 不打断）与事件脱敏。
+- 功能开关与回滚：`MATRIX_REPLACEMENT_WEB_ENABLED`（默认关，关闭时 `/replacement` 与 `/api/replacement/*` 返回 404）、`VIDEO_REPLACEMENT_SERVICE_MODE=legacy|shared`（默认 legacy）。回滚只需将 `VIDEO_REPLACEMENT_SERVICE_MODE` 保持/切回 `legacy` 即恢复旧 Qt 生成路径；无远程部署、无数据库迁移、`migration.sql` 为无迁移说明。中心服默认 `CENTRAL` 恢复为 `http://127.0.0.1:9080`（与出厂 `start-visible-client.bat` 一致），远程中心服由 `MATRIX_CENTRAL` 显式覆盖。
+- 验证：`tests.test_replacement_service`、`tests.test_replacement_web_mvp`、`tests.test_openapi_contract`、`tests.test_video_replacement(_v2)`、`tests.test_video_breakdown`、`tests.test_web_surface_removed` 全绿（合并 526）；`py_compile` 所有改动模块通过。注意：本 `IMPLEMENTATION.md` 存量约 1399 处行号引用（其中约 1024 处指向 `matrix_native_client.py`）在本次及既往 `44bac87` 大重构后可能整体漂移，本次仅保证以上新增条目行号为当前值，未逐条重算历史引用。
+
+## 2026-08-04 Comic tool Windows client download card
+- `tools/aicanvas_remote/server_current.py#L359-L374`: `_agent_installer_candidates()` and `_resolve_agent_installer_path()` resolve the public Windows installer from `AICANVAS_AGENT_INSTALLER`, `MATRIXSHIP_AGENT_INSTALLER`, the remote AI Canvas root, or the local project installer output.
+- `tools/aicanvas_remote/server_current.py#L376-L450`: `_comic_tool_download_card_script()` and `_inject_comic_tool_download_card_html()` inject an idempotent `yunling-download-card-injector` script into `/comic-tool`; the script appends a standalone Windows client card that links to `/MatrixShipAgent-Setup.exe`.
+- `tools/aicanvas_remote/server_current.py#L392-L416`: append-fix removes cloning/reordering of existing cards. The script now finds the common tool container for `漫剧Agent` and `漫剧画布`, then appends a standalone Windows card; it no longer uses `cloneNode` or inserts immediately after Agent.
+- `tools/aicanvas_remote/server_current.py#L422-L422`: Windows card copy positions the product as `云灵星图 AI爆款复刻平台 Windows 桌面客户端` for the local executor, account matrix, and material tasks; it explicitly says the download is the client installer and does not include comic project files.
+- `tools/aicanvas_remote/server_current.py#L25793-L25798`: `Handler.send_head()` injects the download-card script into `platform-index.html` only for `/comic-tool` and `/comic-tool/agent` shell responses.
+- `tools/aicanvas_remote/server_current.py#L25867-L25883`: `Handler.serve_agent_installer()` serves the installer with attachment headers and supports HEAD without streaming the body.
+- `tools/aicanvas_remote/server_current.py#L25970-L25971` and `tools/aicanvas_remote/server_current.py#L25988-L25989`: `do_HEAD()` and `do_GET()` expose `/MatrixShipAgent-Setup.exe` before other routing.
+- `tests/test_minimax_aicanvas_remote.py#L292-L372`: `AiCanvasComicToolDownloadEntryTest` covers 4th-card script content, idempotent HTML injection, environment path resolution, unauthenticated route ordering, GET serving, and attachment headers.
+- `tests/test_minimax_aicanvas_remote.py#L306-L311`: regression coverage prevents the download-card script from cloning or reordering existing tool cards.
+- `tests/test_minimax_aicanvas_remote.py#L297-L305`: card-copy coverage requires `AI爆款复刻平台`, `下载的是客户端安装包`, and `不包含漫剧项目文件`.
+- Verification and rollback: focused RED/GREEN was run for `tests.test_minimax_aicanvas_remote.AiCanvasComicToolDownloadEntryTest`; final verification passed the focused test, full `tests.test_minimax_aicanvas_remote`, and `py_compile` for the touched remote mirror/test. Remote runtime was deployed to `/root/AI-CanvasPro/server.py`, installer copied to `/root/AI-CanvasPro/MatrixShipAgent-Setup.exe`, and `ai-canvas.service` restarted active; no OpenAPI, database, Docker, secret, or `migration.sql` impact. Roll back `tools/aicanvas_remote/server_current.py`, `tests/test_minimax_aicanvas_remote.py`, `CHANGELOG.md`, `docs/DEPLOYMENT.md`, `docs/TROUBLESHOOTING.md`, and this entry, plus restore `/root/AI-CanvasPro/server.py.bak.download-card-test-20260804_094216` to remote `server.py` and restart `ai-canvas.service`.
+
+
+## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
 - `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
 - `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。
@@ -29,7 +208,7 @@
 ## 2026-08-03 临时 UI 开关与 XHS 能力元数据过滤
 - `backend/platform_features.py#L11-L51`：统一解析 `1/true/yes/on`，新增同款替换、待发布队列、数字人 TTS 上传三个默认关闭开关，并提供可逆、保序的 `xhs.*` 能力过滤。
 - `backend/local_browser_worker.py#L36-L70`、`backend/local_browser_worker.py#L204-L221`：本地浏览器执行器注册与轮询动态上报当前允许能力；关闭 XHS 时不再传出 `xhs.*`，开启并重启后使用保留的原任务映射恢复。
-- `backend/central_server.py#L79-L87`、`backend/central_server.py#L14357-L14371`、`backend/central_server.py#L14406-L14424`、`backend/central_server.py#L14639-L14669`、`backend/central_server.py#L14759-L14791`：中心服过滤允许任务、新上报、内存存储、轮询匹配和公开响应中的 XHS 能力；历史记录读取时过滤，不做数据迁移。
+- `backend/central_server.py#L79-L87`、`backend/central_server.py#L14376-L14390`、`backend/central_server.py#L14425-L14443`、`backend/central_server.py#L14658-L14688`、`backend/central_server.py#L14778-L14810`：中心服过滤允许任务、新上报、内存存储、轮询匹配和公开响应中的 XHS 能力；历史记录读取时过滤，不做数据迁移。
 - `backend/matrix_native_client.py#L44-L88`、`backend/matrix_native_client.py#L6368-L6406`：账号矩阵默认只保留抖音账号、KPI 和平台卡片；`MATRIX_XHS_ENABLED=1` 后恢复 XHS 分组。
 - `backend/matrix_native_client.py#L7850-L7853`、`backend/matrix_native_client.py#L18638-L18648`、`backend/matrix_native_client.py#L27761-L27763`：分解视频、工作流助手和资产库的同款替换跳转按钮由 `MATRIX_VIDEO_REPLACEMENT_ENABLED` 控制可见性。
 - `backend/matrix_native_client.py#L10018-L10114`：数字人口播在 TTS 上传开关关闭时隐藏上传按钮和声音预览，调整可见说明；自动 TTS、已有上传处理器和持久化字段不变。
@@ -44,7 +223,7 @@
 - `backend/platform_features.py#L11-L111`：新增统一平台开关，`MATRIX_XHS_ENABLED` 默认关闭；`payload_uses_xhs()` 递归识别路由 payload、嵌套 `payload`、素材平台、账号和任务类型中的 XHS 标记；`platform_disabled_result()` 与 `log_platform_disabled()` 输出稳定且脱敏的 `platform_disabled` 契约。
 - `backend/platform_adapters.py#L60-L63`、`backend/platform_adapters.py#L243-L2000`：小红书登录、搜索、评论、获客、下载、评论发布和素材发布入口在浏览器导入/自动化前统一返回 `platform_disabled`。
 - `backend/api_server.py#L58-L72`、`backend/api_server.py#L1058-L1140`、`backend/api_server.py#L3852-L5558`、`backend/api_server.py#L7146-L7292`：本地执行器隐藏 XHS 账号，阻断 `/api/xhs/*`、`/api/xhs-note-replacement/*`、XHS publish/finder/outreach/login 服务入口和携带 XHS payload 的 POST 请求。
-- `backend/central_server.py#L79-L87`、`backend/central_server.py#L153-L158`、`backend/central_server.py#L5159-L5482`、`backend/central_server.py#L7224-L7260`、`backend/central_server.py#L14677-L14683`、`backend/central_server.py#L15251-L15854`：中心服过滤 XHS 账号汇总，阻断 XHS 路由、`xhs.*` 本地浏览器任务和嵌套 XHS payload，且在节点选择前返回 404。
+- `backend/central_server.py#L79-L87`、`backend/central_server.py#L161-L166`、`backend/central_server.py#L5178-L5501`、`backend/central_server.py#L7243-L7279`、`backend/central_server.py#L14696-L14702`、`backend/central_server.py#L15270-L15873`：中心服过滤 XHS 账号汇总，阻断 XHS 路由、`xhs.*` 本地浏览器任务和嵌套 XHS payload，且在节点选择前返回 404。
 - `backend/matrix_native_client.py#L44-L91`、`backend/matrix_native_client.py#L6368-L6406`、`backend/matrix_native_client.py#L8267-L8282`、`backend/matrix_native_client.py#L18965-L18971`、`backend/matrix_native_client.py#L20603-L20607`、`backend/matrix_native_client.py#L29682-L29699`：本地客户端平台下拉默认只展示抖音；发布页标题、工作流发布平台、视频链接平台识别和图文同款导航均由 `xhs_enabled()` 控制恢复。
 - `scripts/disable_xhs_accounts.py#L55-L106`：新增小红书账号状态清理脚本，支持 `--dry-run`，只删除 XHS profile/auth/safety state 和 JSON 账号行，保留抖音账号与素材。
 - `tests/test_xhs_platform_disable.py#L44-L176`、`tests/test_openapi_contract.py#L159-L176`：回归覆盖默认禁用/开关恢复、脱敏错误契约、本地/中心/适配器阻断、客户端入口隐藏、嵌套 payload 检测、清理脚本和 OpenAPI 文档门禁。
@@ -162,8 +341,8 @@
 - `backend/matrix_native_client.py#L1874-L1904`、`backend/matrix_native_client.py#L2199-L2228`: `lk888_chat()` 和 `lk888_vision()` 支持发送 `X-Matrix-Billing-Scenario/Stage/Detail` 脱敏业务标签；普通调用不传标签时保持旧行为。
 - `backend/matrix_native_client.py#L7449-L7454`、`backend/matrix_native_client.py#L19304-L19319`、`backend/matrix_native_client.py#L24088-L24146`: 分解视频关键帧画面理解标记为 `visual_analysis`，拆解报告生成标记为 `report_generation`，音频分片转写标记为 `audio_transcription`。OCR 仍为本地识别，不调用 LK888、不新增扣费。
 - `backend/utils/video_transcription.py#L312-L366`: `transcribe_audio_chunks()` 新增 `billing_context`，向中心服代理请求附加业务场景、阶段和简短说明；不记录或发送 Cookie、Token、Authorization 以外的敏感内容。
-- `backend/central_server.py#L1003-L1034`、`backend/central_server.py#L1269-L1297`、`backend/central_server.py#L1420-L1443`: 中心服读取本地业务标签，识别 `/v1beta/models/<model>:generateContent` 的模型名，并把这类音频转写请求登记为 `chat_usage_reconcile` 待对账。
-- `backend/central_server.py#L1511-L1512`、`backend/central_server.py#L3792-L3793`、`backend/central_server.py#L3851-L3861`: 异步任务状态结算和 LK888 usage 明细对账时，把 pending 里的 `billingScenario/billingStage/billingDetail` 透传到账单流水；金额仍完全来自 LK888 实际 `cost`，不恢复本地 token 估算。
+- `backend/central_server.py#L1011-L1042`、`backend/central_server.py#L1277-L1305`、`backend/central_server.py#L1428-L1451`: 中心服读取本地业务标签，识别 `/v1beta/models/<model>:generateContent` 的模型名，并把这类音频转写请求登记为 `chat_usage_reconcile` 待对账。
+- `backend/central_server.py#L1519-L1520`、`backend/central_server.py#L3800-L3801`、`backend/central_server.py#L3870-L3880`: 异步任务状态结算和 LK888 usage 明细对账时，把 pending 里的 `billingScenario/billingStage/billingDetail` 透传到账单流水；金额仍完全来自 LK888 实际 `cost`，不恢复本地 token 估算。
 - `tests/test_account_billing_dashboard.py#L124-L152`、`tests/test_video_transcription.py#L342-L383`、`tests/test_api_download_contract.py#L957-L1030`、`tests/test_api_download_contract.py#L1104-L1143`: 新增回归覆盖分解视频账单文案、音频转写请求标签、`generateContent` 待对账登记和对账后 meta 保留。
 - 验证与回滚：新增测试先在旧实现下失败，修复后 `tests.test_account_billing_dashboard` 18/18、`tests.test_video_transcription tests.test_video_breakdown` 64/64、`tests.test_api_download_contract` 42/42 通过，`py_compile` 通过。本次不新增 OpenAPI 路径、数据库字段、Docker 配置、环境变量或 `migration.sql`；重启中心服和本地客户端后生效。回滚上述代码、测试和文档即可恢复旧行为。
 
@@ -344,7 +523,7 @@
 - `backend/api_server.py#L406-L416`、`backend/api_server.py#L1504-L1556`：中心复合账号 ID 归一化成本机账号 ID；收件浏览器按账号加锁，并使用 `dy_dm_profile/accounts/<localAccountId>/current` 稳定隔离，默认账号保留 `dy_dm_profile/current` 兼容路径。
 - `backend/api_server.py#L1809-L1821`、`backend/api_server.py#L2908-L3181`：浏览器异常生成脱敏 `errorId` 和安全堆栈，不返回子进程标准输出/错误或客户链接；空会话返回 `ok=true/messages=[]/empty=true`。
 - `backend/api_server.py#L4360-L4387`、`backend/api_server.py#L7199-L7250`：私信发送/收件统一状态码为成功 200、无效目标 400、登录失效 401、内部浏览器异常 500，异常响应不再暴露原始堆栈。
-- `backend/central_server.py#L755-L810`、`backend/central_server.py#L842-L870`、`backend/central_server.py#L13498-L13530`、`backend/central_server.py#L13751-L13784`：中心兼容任务的发送目标、正文和发送结果只持久化/公开其指纹；只有领取排队任务的本地执行器可在内存中读取原始参数。
+- `backend/central_server.py#L763-L818`、`backend/central_server.py#L850-L878`、`backend/central_server.py#L13517-L13549`、`backend/central_server.py#L13770-L13803`：中心兼容任务的发送目标、正文和发送结果只持久化/公开其指纹；只有领取排队任务的本地执行器可在内存中读取原始参数。
 - `docs/openapi.yaml#L339-L374`、`docs/openapi.yaml#L1586-L1675` 与 `docs/API_REFERENCE.md#L670-L754`：记录目标别名、账号 profile 隔离、空会话成功、HTTP 状态和脱敏边界，删除 `dm_inbox_messages_not_found` 错误枚举。
 - `tests/test_douyin_dm_auto_reply.py#L157-L242`、`tests/test_douyin_dm_auto_reply.py#L385-L488`、`tests/test_douyin_dm_auto_reply.py#L816-L844`、`tests/test_finder_page_actions.py#L132-L140`、`tests/test_openapi_contract.py#L123-L151`：覆盖状态码、脱敏日志、账号目录、客户切换、迟到事件、本机直连、账号锁定、中心持久化、XHS 门禁和 OpenAPI 契约。
 - 验证：新增成功事件和空会话契约断言均先失败后通过；完整私信模块 72/72、获客页面 10/10、OpenAPI 契约 6/6 通过，三层源码与相关测试 `py_compile` 退出 0。既有 `utils/dy_util.py` 未关闭文件 `ResourceWarning` 和 `api_server.py` 两条无效转义 `SyntaxWarning` 仍存在，未由本次改动引入。
@@ -380,12 +559,12 @@
 
 # 2026-07-30 账户中心账单看板完整验证与回滚门禁
 - `backend/billing_analytics.py#L1-L300`：账单查询边界、来源归一化、analytics/ledger 计算与 Draft 2020-12 运行时响应 Schema；`backend/billing_analytics.py#L151-L213` 规范化 `wxpay:<orderNo>` / `redeem:<code>`、兼容 `paidAt/usedAt`，并把没有其他关联字段的账本 `ref` 保留到 `requestId`。
-- `backend/maindb.py#L162-L171`：`get_balance_strict()` 不吞查询异常；`backend/maindb.py#L321-L330`：`model_usage_logs` 按用户、时间范围和稳定降序键查询，`limit` 限制在 50,001 行。
-- `backend/central_server.py#L54-L65`、`backend/central_server.py#L2653-L2672`：`MAINDB_ENABLED` 默认启用，显式 `0` 才跳过导入；导入异常只记录进程内状态且不写日志，其他既有主库调用仍沿用健康探测。
-- `backend/central_server.py#L3097-L3164`：余额与参数化账单在主库默认启用时对导入、配置、健康、用量和严格余额读取失败统一失败关闭；`user-owner` 固定返回 `"inf"`，达到 50,001 行拒绝部分统计。
-- `backend/central_server.py#L3167-L3265`：查询/响应校验、结构化耗时日志和脱敏 400/500/503 错误响应；异常消息、凭据和连接细节不进入日志。
-- `backend/central_server.py#L3351-L3465`、`backend/central_server.py#L3656-L3749`：主库充值与退款同步写入可追溯正向 `STATE` 流水，保留既有返回签名和稳定 `wxpay/redeem` 引用。
-- `backend/central_server.py#L14313-L14349`：`/api/account/balance`、analytics 与参数化 ledger 共用运营方 `"inf"` 和主库失败关闭语义；鉴权失败返回 401，查询错误返回 400，来源错误返回 503，无参数 ledger 继续走原兼容响应。
+- `backend/maindb.py#L162-L171`：`get_balance_strict()` 不吞查询异常；`backend/maindb.py#L417-L426`：`model_usage_logs` 按用户、时间范围和稳定降序键查询，`limit` 限制在 50,001 行。
+- `backend/central_server.py#L54-L65`、`backend/central_server.py#L2661-L2680`：`MAINDB_ENABLED` 默认启用，显式 `0` 才跳过导入；导入异常只记录进程内状态且不写日志，其他既有主库调用仍沿用健康探测。
+- `backend/central_server.py#L3105-L3172`：余额与参数化账单在主库默认启用时对导入、配置、健康、用量和严格余额读取失败统一失败关闭；`user-owner` 固定返回 `"inf"`，达到 50,001 行拒绝部分统计。
+- `backend/central_server.py#L3175-L3273`：查询/响应校验、结构化耗时日志和脱敏 400/500/503 错误响应；异常消息、凭据和连接细节不进入日志。
+- `backend/central_server.py#L3359-L3473`、`backend/central_server.py#L3664-L3757`：主库充值与退款同步写入可追溯正向 `STATE` 流水，保留既有返回签名和稳定 `wxpay/redeem` 引用。
+- `backend/central_server.py#L14332-L14368`：`/api/account/balance`、analytics 与参数化 ledger 共用运营方 `"inf"` 和主库失败关闭语义；鉴权失败返回 401，查询错误返回 400，来源错误返回 503，无参数 ledger 继续走原兼容响应。
 - `backend/matrix_native_client.py#L3837-L4083`：金额/查询格式、固定高度趋势图和固定四行类型分布控件。
 - `backend/matrix_native_client.py#L25479-L26276`：账户中心四指标、独立筛选/分页、analytics/ledger 请求序列、迟到响应丢弃、成功 analytics 余额优先级、充值后刷新、错误保留与角色权限复核。
 - `docs/openapi.yaml#L457-L589` 与 `docs/openapi.yaml#L1009-L1134`：account balance/ledger/analytics 查询参数、数字或 `inf` 余额、成功/错误响应及账单 Schema，与运行时字段、枚举、范围和 nullability 一致。
@@ -404,7 +583,7 @@
 - `backend/matrix_native_client.py#L7716-L7731`: `dm_button_not_found` 提示改用 `saveLoginPrompt.finalPromptVisible` 判断弹窗最终状态；弹窗已关闭或未出现时不再提示“仍可见”，并给出对应排查文案。
 - `tests/test_douyin_dm_auto_reply.py#L90-L106`、`tests/test_douyin_dm_auto_reply.py#L221-L232`、`tests/test_douyin_dm_auto_reply.py#L326-L335`: 回归覆盖重复按钮标签、相邻操作拒绝、Cookie 注入排除 `msToken`、注入时序和最终弹窗状态提示。RED 阶段分别因缺少两个 helper、缺少注入调用和仍读取 `promptVisible` 失败。
 - 冒烟：先复现到 `rejectedButtons.label="私信 私信"`；修复标签后复现到临时浏览器未恢复登录导致 `dm_panel_not_open`；对比试验证实补充注入 60 个账号 Cookie 后页面稳定出现私信按钮。最终真实浏览器自动关闭弹窗、点击 Edge 私信按钮、打开会话并发送“你好”，`/v1/message/send` 返回 HTTP 200。
-- 验证：不依赖中心服务导入的私信发送、收信、客户端提示和脱敏日志测试通过 47/47；`backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_dm_auto_reply.py` 通过 `py_compile`，相关文件通过 `git diff --check`。完整测试文件另有 2 项被工作区既有 `backend/central_server.py#L10012` 缩进错误阻断，本次未修改该无关文件。
+- 验证：不依赖中心服务导入的私信发送、收信、客户端提示和脱敏日志测试通过 47/47；`backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_dm_auto_reply.py` 通过 `py_compile`，相关文件通过 `git diff --check`。完整测试文件另有 2 项被工作区既有 `backend/central_server.py#L10031` 缩进错误阻断，本次未修改该无关文件。
 - 回滚：回滚 `backend/api_server.py`、`backend/matrix_native_client.py`、`tests/test_douyin_dm_auto_reply.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 中本条变更即可。无中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql` 影响；本地客户端和本地执行引擎需重启后生效。
 
 # 2026-07-30 同款替换 Seedance 素材安全降级与视频参考图收敛
@@ -440,10 +619,10 @@
 # 2026-07-30 Task 3: authoritative billing analytics and filtered ledger APIs
 
 - `backend/central_server.py#L40-L52`: `_load_central_dotenv()` defaults to enabled and performs the two pre-existing dotenv loads in exact parent/backend order with `override=False` then `override=True`; `CENTRAL_LOAD_DOTENV=0` skips both.
-- `backend/central_server.py#L54-L65`、`backend/central_server.py#L3097-L3164`: `MAINDB_ENABLED=0` is the only intentional local-source mode. With the default enabled mode, import/configuration/readiness/usage/strict-balance failures are fatal; `user-owner` returns exact `"inf"`; the 50,001-row sentinel still raises `billing_record_limit_exceeded`.
-- `backend/central_server.py#L3167-L3226`: `_normalized_billing_query()` starts the query/payload helper range. Request schemas validate before parsing; `_validated_billing_response()` wraps only successful-response schema failures; `billing_dashboard_payload()` emits approved completion fields after successful validation.
-- `backend/central_server.py#L3229-L3265`: `_billing_api_error()` maps query `ValidationError` to redacted 400, response validation failures to redacted 500, and source failures to 503. Response and JSON log share one `errorId`; import exception text is never logged.
-- `backend/central_server.py#L14319-L14344`: authenticated analytics handling continues through the legacy/parameterized ledger route. Requests without `startDate/endDate/type/status/page/pageSize` retain the raw reverse latest-100 response.
+- `backend/central_server.py#L54-L65`、`backend/central_server.py#L3105-L3172`: `MAINDB_ENABLED=0` is the only intentional local-source mode. With the default enabled mode, import/configuration/readiness/usage/strict-balance failures are fatal; `user-owner` returns exact `"inf"`; the 50,001-row sentinel still raises `billing_record_limit_exceeded`.
+- `backend/central_server.py#L3175-L3234`: `_normalized_billing_query()` starts the query/payload helper range. Request schemas validate before parsing; `_validated_billing_response()` wraps only successful-response schema failures; `billing_dashboard_payload()` emits approved completion fields after successful validation.
+- `backend/central_server.py#L3237-L3273`: `_billing_api_error()` maps query `ValidationError` to redacted 400, response validation failures to redacted 500, and source failures to 503. Response and JSON log share one `errorId`; import exception text is never logged.
+- `backend/central_server.py#L14338-L14363`: authenticated analytics handling continues through the legacy/parameterized ledger route. Requests without `startDate/endDate/type/status/page/pageSize` retain the raw reverse latest-100 response.
 - `tests/test_billing_dashboard_api.py#L1-L758`: 29 tests cover explicit main-DB disable versus default fail-closed behavior, import tracking, strict balance, owner infinity through real routes, dependency locks, query/response validation, correlated redacted 400/500/503 errors, dotenv control, completion logs, and exact legacy compatibility.
 - Verification: remaining-findings RED ran 4 focused tests with `FAILED (failures=3)`; focused GREEN is 4/4. Final Task 3, unified/structured, compile, and diff-check evidence is recorded in `.tmp-validation/sdd/task-3-implementer-report.md`.
 - Rollback: revert only the Task 3 hunks in `backend/central_server.py`, remove `tests/test_billing_dashboard_api.py`, and remove these Task 3 documentation/report entries. No OpenAPI, database schema, migration, deployment, remote service, production request, process restart, or image tag changed; a later release must retain the previous stable image tag and roll back if the new endpoint error rate exceeds 1%.
@@ -452,7 +631,7 @@
 
 - `backend/billing_analytics.py#L52-L94`: `parse_period()` and `parse_ledger_filters()` are the authoritative optional date, `groupBy`, type, status, minimum-page, and `20/50/100` page-size contract.
 - `backend/billing_analytics.py#L286-L292`: Draft 2020-12 query and response schemas define the strict parameterized contract: exact dates, numeric-or-exact-`"inf"` balance, nullable historical `balanceAfter`, required pagination, and closed response objects.
-- `backend/central_server.py#L14319-L14344`: analytics is always validated; ledger selects strict pagination only when one of the six recognized dashboard parameters is present, leaving unrelated-query requests on the legacy raw latest-100 path.
+- `backend/central_server.py#L14338-L14363`: analytics is always validated; ledger selects strict pagination only when one of the six recognized dashboard parameters is present, leaving unrelated-query requests on the legacy raw latest-100 path.
 - `docs/openapi.yaml#L475-L583`: authenticated ledger and analytics routes document 400/401/500/503 `ErrorResponse` responses. Ledger 200 explicitly uses the legacy/strict response union and says unrelated parameters preserve legacy behavior.
 - `docs/openapi.yaml#L1012-L1125`: `LegacyBillingLedgerResponse` preserves arbitrary historical rows without pagination, while `BillingLedgerResponse` exactly represents the closed parameterized response; analytics, metrics, buckets, distribution, rows, and pagination remain explicit.
 - `tests/test_openapi_contract.py#L1-L335`: YAML parsing, component-reference resolution, strict runtime-surface/enums comparison, and representative analytics, strict-ledger, and legacy-ledger validation prevent contract drift.
@@ -472,12 +651,12 @@
 - Verification: 新增测试先在旧实现下失败；实现后 `.\.venv-win\Scripts\python.exe -m unittest tests.test_finder_page_actions.FinderAccountLoadingTest -v` 通过 2/2，`.\.venv-win\Scripts\python.exe -m unittest tests.test_douyin_multi_account.DouyinMultiAccountTest.test_load_douyin_accounts_recovers_from_profile_dirs_when_registry_json_is_corrupt -v` 通过 1/1。当前 `backend/datas/accounts/boss/douyin_accounts.json` 经 Python JSON 解析确认可读，本地账号接口返回 2 个在线抖音账号。
 - Rollback: 回滚 `backend/matrix_native_client.py`、`backend/api_server.py`、`tests/test_finder_page_actions.py`、`tests/test_douyin_multi_account.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服接口、数据库、OpenAPI、Docker、环境变量或 `migration.sql`。生效需要重启本地客户端。
 - `backend/maindb.py#L254-L289`: `refund_generation()` retains `(False, 0.0)` for no eligible or already-refunded rows, but rolls back and re-raises transactional/database exceptions so callers can distinguish a failed data source from idempotency.
-- `backend/maindb.py#L292-L306`: `topup()` requires `_exec()` to report exactly one affected user row before returning success; a zero-row update returns `ok=False` and cannot authorize a center-ledger entry.
-- `backend/maindb.py#L321-L330`: `list_model_usage_logs()` selects the exact usage fields for one user, applies `[start_at, end_at)`, orders by `created_at DESC, id DESC`, clamps `limit` to `1..50001`, and intentionally lets database errors propagate.
-- `backend/central_server.py#L3351-L3376`: successful main-DB `topup_user()` writes a positive ledger entry under `LOCK`, persists it, and uses the caller ref or an `admin-topup:<uuid>` fallback. Failed main-DB updates keep the existing return signature and write nothing.
-- `backend/central_server.py#L3379-L3465`: a successful non-zero model refund writes `退款:模型生成` with the original request ref. A false/zero result preserves the documented idempotent success tuple and cannot append another positive row.
-- `backend/central_server.py#L3656-L3705`: WeChat only marks an order credited and persists `wxpay:<order_no>` after concrete `maindb.topup()` success; failed balance writes remain eligible for later polling retry.
-- `backend/central_server.py#L3708-L3749`: redeem-code use is deferred until concrete main-DB topup success, then persists `redeem:<normalized-code>`; failures leave the code active.
+- `backend/maindb.py#L292-L402`: `topup()` requires `_exec()` to report exactly one affected user row before returning success; a zero-row update returns `ok=False` and cannot authorize a center-ledger entry.
+- `backend/maindb.py#L417-L426`: `list_model_usage_logs()` selects the exact usage fields for one user, applies `[start_at, end_at)`, orders by `created_at DESC, id DESC`, clamps `limit` to `1..50001`, and intentionally lets database errors propagate.
+- `backend/central_server.py#L3359-L3384`: successful main-DB `topup_user()` writes a positive ledger entry under `LOCK`, persists it, and uses the caller ref or an `admin-topup:<uuid>` fallback. Failed main-DB updates keep the existing return signature and write nothing.
+- `backend/central_server.py#L3387-L3473`: a successful non-zero model refund writes `退款:模型生成` with the original request ref. A false/zero result preserves the documented idempotent success tuple and cannot append another positive row.
+- `backend/central_server.py#L3664-L3713`: WeChat only marks an order credited and persists `wxpay:<order_no>` after concrete `maindb.topup()` success; failed balance writes remain eligible for later polling retry.
+- `backend/central_server.py#L3716-L3757`: redeem-code use is deferred until concrete main-DB topup success, then persists `redeem:<normalized-code>`; failures leave the code active.
 - `tests/test_billing_unified.py#L177-L289`、`tests/test_billing_unified.py#L338-L407`: focused regressions cover strict-balance propagation plus main-DB admin/refund/WeChat/redeem ledger rows, zero-row topups, repeated zero refunds, and the bounded query contract.
 - Verification: the review-fix RED run was 24 tests with 2 expected failures; GREEN was `24/24` with the specified unittest command. No schema, migration, deployment, remote service, or process restart was changed.
 
@@ -659,7 +838,7 @@
 - `backend/matrix_native_client.py#L685-L692`：客户端能力价格增加 `comic_keyframe_image=0.14`，保持 `1 云豆 = 1 元` 口径，并与 LK888 图片生成价格一致。
 - `backend/matrix_native_client.py#L780-L799`：新增同款替换首尾帧扣费和退款辅助函数，扣费 `ref` 包含 job、片段、尝试时间戳和 `frame:1/2`，便于流水追溯。
 - `backend/matrix_native_client.py#L11819-L11901`、`backend/matrix_native_client.py#L11959-L11961`：漫剧项目模式生成首尾帧前逐帧扣云豆；提交、等待、下载或结果缺失失败时退回已扣首尾帧费用，首尾帧保存成功后不再因后续视频失败退款。
-- `backend/central_server.py#L2928-L2939`：中心服能力价格表登记 `comic_keyframe_image=0.14`，避免客户端自报金额覆盖平台价格。
+- `backend/central_server.py#L2936-L2947`：中心服能力价格表登记 `comic_keyframe_image=0.14`，避免客户端自报金额覆盖平台价格。
 - `tests/test_video_replacement.py#L994-L1120`、`tests/test_billing_unified.py#L111-L117`：覆盖首尾帧提交前两笔扣费、图片阶段失败退款，以及中心服能力价格。
 - 验证：新增测试先在旧实现下失败，修复后通过；完整回归见本次交付验证。回滚：回退 `backend/matrix_native_client.py`、`backend/central_server.py`、`tests/test_video_replacement.py`、`tests/test_billing_unified.py`、`docs/API_REFERENCE.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及数据库结构、Docker、OpenAPI 路由或 `migration.sql`。
 
@@ -872,12 +1051,17 @@
 - 验证：先运行新增定向用例确认旧实现失败；修复后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_marks_xhs_account_violation_as_high_risk tests.test_agent_mode_defaults.AgentModeDefaultsTest.test_risk_summary_applies_persisted_xhs_task_risk_to_same_platform -v`，2/2 通过。完整回归与编译检查见本次最终回复。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_agent_mode_defaults.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复旧逻辑；如需清理本地风险缓存，可删除运行数据目录下的 `account_risk_events.json`。本次只涉及本地客户端，不涉及 Web 端、中心服、OpenAPI、数据库迁移或 `migration.sql`。
 
-## 2026-07-28 登录首页隐藏注册入口
-- `backend/matrix_native_client.py#L21258-L21279`：登录卡标题改为“登录 / 加入企业”，顶部切换只把 `登录` 和 `加入企业` 加入按钮行；`self.tab_reg` 继续创建并 `setVisible(False)`，保留内部注册兼容逻辑但不在首页暴露。
-- `tests/test_native_enterprise_invite.py#L64-L72`：新增回归测试，锁定首页不再执行 `tabrow.addWidget(self.tab_reg, 1)`，并确认登录与加入企业入口仍保留。
-- `tests/test_login_centered_layout.py#L37-L37`：同步登录卡标题断言，避免旧“登录 / 注册”文案回归。
-- 验证：先运行新增测试确认旧实现失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes -v`，19/19 通过；运行 `.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py tests\test_native_enterprise_invite.py tests\test_login_centered_layout.py tests\test_auth_login_modes.py` 通过；Qt 冒烟输出 `LOGIN_HOME_TABS True False True`。
-- 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_enterprise_invite.py`、`tests/test_login_centered_layout.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 即可恢复首页显示注册按钮；本次不涉及中心服、OpenAPI、数据库迁移或 `migration.sql`。
+## 2026-08-04 客户端默认连接公网中心服
+- `backend/matrix_native_client.py#L56-L66`：`CENTRAL` 保持优先读取 `MATRIX_CENTRAL` / `CENTRAL_URL`，无环境变量时默认使用 `http://127.0.0.1:9080`（与出厂 `start-visible-client.bat` 自启的本地中心服一致）；中心服地址使用独立校验 `validate_central_service_url`，允许 HTTP 中心服，但不放宽远程素材 URL 的 HTTPS 校验。
+- `backend/.env.example#L2-L2`、`docs/DEPLOYMENT.md#L310-L310`：示例配置和部署环境变量表将中心服默认对齐本地 `http://127.0.0.1:9080`；连接远程中心服时显式覆盖。
+- `tests/test_video_breakdown.py#L42-L58`：RED/GREEN 覆盖默认公网中心服和本地开发覆盖能力。
+- 验证与影响：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_defaults_to_public_production_server tests.test_video_breakdown.VideoBreakdownHelpersTest.test_central_env_override_still_supports_local_development`。本次只影响本地客户端默认配置、测试和文档；不改变中心服 API、OpenAPI、数据库、Docker、密钥或 `migration.sql`。生效需要重新打包并替换服务器安装包；回滚恢复默认值和上一版安装包。
+
+## 2026-08-04 登录页只保留漫剧账号登录
+- `backend/matrix_native_client.py#L30324-L30343`：登录卡标题改为“账号登录”，副文案改为“使用漫剧账号密码登录 AI爆款复刻”；`self.tab_login/self.tab_reg/self.tab_invite` 保留为隐藏兼容对象，但不再创建 `tabrow` 或加入登录页布局。
+- `backend/matrix_native_client.py#L5831-L5831`、`backend/matrix_native_client.py#L6004-L6004`：企业中心“邀请成员”的复制弹窗和提示文案不再引导用户到登录页选择“加入企业”，改为建议管理员用“添加成员”或“重置密码”交付成员账号。
+- `tests/test_native_enterprise_invite.py#L42-L84`、`tests/test_login_centered_layout.py#L26-L38`：覆盖登录页隐藏加入企业入口、企业邀请文案不再指向登录页，以及登录卡营销布局仍在卡片外。
+- 验证与影响：运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_enterprise_invite tests.test_login_centered_layout tests.test_auth_login_modes` 和 `.venv-win\Scripts\python.exe -m py_compile backend\matrix_native_client.py`。本次只影响本地客户端 UI 和测试文档，不改变中心服 API、OpenAPI、数据库、Docker、环境变量或 `migration.sql`；重启本地客户端或重新打包安装包后生效。回滚 `backend/matrix_native_client.py`、相关测试、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可恢复旧入口。
 
 ## 2026-07-28 同款替换漫剧画面描述与口播分离
 - `backend/matrix_native_client.py#L8466-L8496`：`_comic_visual_prompt_text()` 从旧 LK888 长提示词中剔除 `源视频锁定`、`原片拆解证据`、`字幕安全`、`人物参考图只用于`、`上传产品必须`、`口播对应`、`OCR/转写` 等控制语，去掉 `画面/镜头/动作/产品/场景` 前缀后只保留短视觉描述。
@@ -936,7 +1120,7 @@
 
 ## 2026-07-27 企业邀请免手机号邮箱与账户中心手机号隐藏
 
-- `backend/central_server.py#L7457-L7528`、`backend/central_server.py#L7531-L7611`、`backend/central_server.py#L14278-L14565`、`backend/central_server.py#L15471-L15479`：企业邀请创建继续兼容历史 `recipientPhone/recipientEmail` 字段，但接受邀请码时移除“手机号或邮箱必填”校验；新用户可仅凭邀请码、姓名和 8 位以上密码加入邀请码绑定的企业，成员关系仍写入 `orgId/userId/role`。
+- `backend/central_server.py#L7476-L7547`、`backend/central_server.py#L7550-L7630`、`backend/central_server.py#L14297-L14584`、`backend/central_server.py#L15490-L15498`：企业邀请创建继续兼容历史 `recipientPhone/recipientEmail` 字段，但接受邀请码时移除“手机号或邮箱必填”校验；新用户可仅凭邀请码、姓名和 8 位以上密码加入邀请码绑定的企业，成员关系仍写入 `orgId/userId/role`。
 - `backend/matrix_native_client.py#L3402-L3457`：团队成员页“邀请成员”弹窗改为先选择企业、再选择角色和有效期；手机号、邮箱字段和旧校验删除，平台管理员可切换目标企业，企业管理员固定当前企业。
 - `backend/matrix_native_client.py#L19935-L20021`：账户中心手机号绑定面板抽为 `phone_bind_panel`，初始化和 `on_show()` 均只在 `product_role()=="platform_admin"` 时显示；企业管理员和普通用户仍可看余额/流水，但不再看到手机号绑定入口。
 - `backend/matrix_native_client.py#L21216-L21428`：登录页“加入企业”模式隐藏并清空手机号和邮箱输入；校验邀请码后只显示企业、角色、有效期和姓名；接受请求体只提交 `token/name/password/currentPassword`，不再提交 `phone/email`。
@@ -952,7 +1136,7 @@
 - `backend/matrix_native_client.py#L8069-L8080`：图文同款的“标题（必填）”不再自动使用原始标题，进入页面后保持空白，要求用户手动输入；“卖点（可编辑）”仍可从原笔记正文辅助生成。
 - `backend/matrix_native_client.py#L980-L1016`、`backend/matrix_native_client.py#L4388-L4469`、`backend/matrix_native_client.py#L8187-L8225`：本地保存图文同款草稿成功后，把保存后的图片文件和 `sourceTitle/sourceBody/sourceTags/replacementJobId` 等追溯字段同步上传到中心素材库；同步失败时保留本机草稿并提示“同步到『素材发布』失败”，同时写结构化日志 `xhs_note_draft_central_sync_failed`。
 - `backend/api_server.py#L739-L768`、`backend/api_server.py#L903-L941`、`backend/api_server.py#L4751-L4751`：本地素材上传和中心素材下发保留图文草稿元数据，避免从中心素材库进入发布流程后标题、正文、标签、来源任务丢失。
-- `backend/central_server.py#L1353-L1382`、`backend/central_server.py#L1521-L1561`、`backend/central_server.py#L13646-L13646`：中心素材上传白名单接收图文同款元数据，素材发布 payload 继续携带 `platform/body/tags/sourceTitle/sourceBody/sourceTags/importedFromXhsNoteReplacement`。
+- `backend/central_server.py#L1361-L1390`、`backend/central_server.py#L1529-L1569`、`backend/central_server.py#L13665-L13665`：中心素材上传白名单接收图文同款元数据，素材发布 payload 继续携带 `platform/body/tags/sourceTitle/sourceBody/sourceTags/importedFromXhsNoteReplacement`。
 - `backend/local_browser_worker.py#L221-L267`：本地执行引擎从中心素材同步到本地时继续转发图文草稿元数据，保证“素材发布”真实发布前还能追溯来源。
 - `tests/test_video_replacement_v2.py#L310-L317`、`tests/test_xhs_lead_filtering.py#L83-L101`、`tests/test_xhs_note_replacement.py#L277-L318`、`tests/test_xhs_note_replacement.py#L1003-L1063`：回归覆盖表头“收藏数”、小红书搜索元数据回填、素材库元数据白名单和保存草稿后同步中心素材库。
 - 验证：本阶段目标用例与相关回归使用 `.venv-win\Scripts\python.exe -m unittest ... -v` 通过，最终完整命令见本次回复；`py_compile` 覆盖客户端、中心服、本地 API、执行引擎、平台适配器和相关测试文件。
@@ -968,7 +1152,7 @@
 
 ## 2026-07-27 同款替换漫剧项目模式
 
-- `backend/central_server.py#L94-L98`、`backend/central_server.py#L2406-L2480`、`backend/central_server.py#L14293-L14343`：中心服漫剧 SSO 增加固定账号策略，默认把所有同款替换漫剧项目 ticket 签给 AI CanvasPro 账号 `003` / `user_id=44`，不再要求当前 Matrix 用户映射到漫剧主库用户；ticket 响应、结构化日志和审计记录保留 `matrixUserId`、`comicUserId`、`comicUsername` 和 `comicAccountMode`。
+- `backend/central_server.py#L94-L98`、`backend/central_server.py#L2414-L2488`、`backend/central_server.py#L14312-L14362`：中心服漫剧 SSO 增加固定账号策略，默认把所有同款替换漫剧项目 ticket 签给 AI CanvasPro 账号 `003` / `user_id=44`，不再要求当前 Matrix 用户映射到漫剧主库用户；ticket 响应、结构化日志和审计记录保留 `matrixUserId`、`comicUserId`、`comicUsername` 和 `comicAccountMode`。
 - `tests/test_comic_sso.py#L109-L150`：回归覆盖普通本地 Matrix 用户也能签出固定漫剧账号 ticket，并验证 ticket claim 中的 `user_id=44`、`name=003`。
 - `backend/matrix_native_client.py#L8299-L8650`：`VIDEO_REPLACE_DEFAULT_MODE` 默认值切到 `comic_project`，补齐漫剧项目模式的 base URL、口播台词来源、项目创建 payload、手动资产映射和 `ComicProjectAdapter`。
 - `backend/matrix_native_client.py#L8980-L9121`：新任务面板在漫剧项目模式下改写状态文案，明确提示使用上传人物/场景/道具作为角色参考。
@@ -1009,9 +1193,9 @@
 - 回滚：回滚 `backend/platform_adapters.py`、`backend/api_server.py`、`backend/xhs_note_replacement.py`、`backend/matrix_native_client.py`、`tests/test_api_download_contract.py`、`tests/test_xhs_note_replacement.py`、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/ARCHITECTURE.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 和本条实现索引；不涉及数据库迁移，`migration.sql` 保持 no-op。
 
 ## 2026-07-27 Web 交付面移除
-- `tests/test_web_surface_removed.py#L8-L43`：锁定产品 Web 文件缺席、活动 HTML 缺席、中心服不再服务 `/admin` 或 `frontend/downloads` 安装包路径，同时保留 `/MatrixShipAgent-Setup.exe` 和 `MATRIXSHIP_AGENT_INSTALLER`。
-- `backend/central_server.py#L13462-L13568`：安装包下载只保留环境变量、服务器固定路径和后端目录候选；`/admin` HTML 路由已移除，中心服继续提供 JSON API 与安装包下载。
-- `backend/build_matrix_agent.ps1#L109-L113`、`backend/installer/MatrixShipAgent.iss#L21-L22`：Windows 原生客户端安装包输出到 `backend\dist\installer\MatrixShipAgent-Setup.exe`，不再复制到 Web 下载目录。
+- `tests/test_web_surface_removed.py#L8-L48`：锁定产品 Web 文件缺席、活动 HTML 缺席（扫描排除 `.worktrees`、`build`、`dist` 等构建/嵌套 worktree 产物）、中心服不再服务 `/admin` 或 `frontend/downloads` 安装包路径，同时保留 `/MatrixShipAgent-Setup.exe` 和 `MATRIXSHIP_AGENT_INSTALLER`。
+- `backend/central_server.py#L13481-L13587`：安装包下载只保留环境变量、服务器固定路径和后端目录候选；`/admin` HTML 路由已移除，中心服继续提供 JSON API 与安装包下载。
+- `backend/build_matrix_agent.ps1#L105-L120`、`backend/installer/MatrixShipAgent.iss#L21-L22`：Windows 原生客户端安装包输出到 `backend\dist\installer\MatrixShipAgent-Setup.exe`，不再复制到 Web 下载目录；打包脚本同时查找 Program Files 和 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`，支持用户级 Inno Setup 安装。
 - `backend/agent_launcher.py#L45-L79`、`backend/matrix_native_client.py#L8-L8`、`backend/matrix_native_client.py#L5459-L5459`：运行时提示和模块注释改为原生客户端/中心服/本地执行引擎表述，不再把产品入口描述成网页前端。
 - 回滚：校验 `backups/web-removal-20260727/archive.sha256` 中的 `fbf0989fef5727f461d6424fa24eacea4385d73e078528266997af403b794097` 后，从 `web-surface.zip` 恢复被删除的 Web 文件；若新版本错误率超过 1%，回滚本阶段提交并恢复上一稳定安装包。
 
@@ -1025,9 +1209,9 @@
 - 回滚：优先回滚本阶段提交；或校验 `backups/web-removal-20260727/archive.sha256` 后从隔离恢复目录取回修改前客户端文件。回滚会恢复网页邀请入口依赖，因此必须与后续 Web 删除提交一并回滚；本阶段不修改数据库 Schema。
 
 ## 2026-07-27 企业邀请码契约原生化
-- `backend/central_server.py#L7263-L7370`：邀请对象只持久化令牌哈希；创建成功只在顶层返回一次 `inviteCode`，公开邀请对象、列表和校验响应剔除 `token`、`tokenHash`、`inviteCode`，不再生成网页加入链接。
-- `backend/central_server.py#L7397-L7479`：接受邀请保留新用户创建账号和已有用户当前密码校验，成功响应补齐 `appRole`、`roleScope`、`memberships`、`organizations` 和会话信息，供原生客户端直接接入现有登录态。
-- `backend/central_server.py#L14145-L14155`、`backend/central_server.py#L14379-L14382`、`backend/central_server.py#L15285-L15291`：邀请校验改为公开 POST JSON 请求；审计只记录邀请 ID、企业 ID、状态和错误码，接受与创建路由沿用脱敏审计元数据。
+- `backend/central_server.py#L7282-L7389`：邀请对象只持久化令牌哈希；创建成功只在顶层返回一次 `inviteCode`，公开邀请对象、列表和校验响应剔除 `token`、`tokenHash`、`inviteCode`，不再生成网页加入链接。
+- `backend/central_server.py#L7416-L7498`：接受邀请保留新用户创建账号和已有用户当前密码校验，成功响应补齐 `appRole`、`roleScope`、`memberships`、`organizations` 和会话信息，供原生客户端直接接入现有登录态。
+- `backend/central_server.py#L14164-L14174`、`backend/central_server.py#L14398-L14401`、`backend/central_server.py#L15304-L15310`：邀请校验改为公开 POST JSON 请求；审计只记录邀请 ID、企业 ID、状态和错误码，接受与创建路由沿用脱敏审计元数据。
 - `tests/test_enterprise_invites.py#L23-L136`：TDD 覆盖邀请码只返回一次且不进入状态/列表、未注册用户与已有用户接受、完整角色上下文，以及 GET 校验退役和 POST 审计不含邀请码。
 - 回滚：先校验 `backups/web-removal-20260727/archive.sha256` 和 `manifest.sha256`，再从归档恢复本阶段文件；不得把明文邀请码写入日志、审计或持久化状态。本阶段不修改数据库 Schema。
 
@@ -1121,9 +1305,9 @@
 - 验证：先运行新增测试观察旧实现因缺少 `_selected_material_open_target` 失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v` 通过 17 条用例。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-24 云豆统一扣费收口
-- `backend/central_server.py#L2928-L2963`：中心服能力价格表按 `1 云豆 = 1 元` 口径保存，云豆到主库算力不再除以 100，而是直接乘 `MAINDB_YUAN_TO_POWER`。
-- `backend/central_server.py#L3089-L3118`：`charge_capability_user()` 通用能力扣费统一走中心服；旧云豆钱包直接扣云豆，主库钱包按 `1 云豆 = 1 元` 和 `MAINDB_YUAN_TO_POWER` 换算为算力后原子扣减。
-- `backend/central_server.py#L14885-L14910`：`/api/billing/charge` 调用统一扣费，`/api/billing/refund` 对主库通用扣费按 `ref` 幂等退款；找不到可退流水时返回退款 0，避免凭空加款。
+- `backend/central_server.py#L2936-L2971`：中心服能力价格表按 `1 云豆 = 1 元` 口径保存，云豆到主库算力不再除以 100，而是直接乘 `MAINDB_YUAN_TO_POWER`。
+- `backend/central_server.py#L3097-L3126`：`charge_capability_user()` 通用能力扣费统一走中心服；旧云豆钱包直接扣云豆，主库钱包按 `1 云豆 = 1 元` 和 `MAINDB_YUAN_TO_POWER` 换算为算力后原子扣减。
+- `backend/central_server.py#L14904-L14929`：`/api/billing/charge` 调用统一扣费，`/api/billing/refund` 对主库通用扣费按 `ref` 幂等退款；找不到可退流水时返回退款 0，避免凭空加款。
 - `backend/matrix_native_client.py#L708-L711`：客户端扣费请求新增 `capability` 字段，继续保留 `amount/reason/ref` 兼容旧中心服。
 - `tests/test_billing_unified.py#L98-L165`、`tests/test_openapi_contract.py#L13-L36`：覆盖中心服价格优先、余额不足不写流水、主库算力换算、主库通用退款幂等，以及 OpenAPI 契约包含 `charge/refund`。
 - `docs/openapi.yaml#L430-L459`、`docs/API_REFERENCE.md#L534-L536`：补充扣费和退款接口契约。
@@ -1131,9 +1315,9 @@
 - 回滚：回滚 `backend/central_server.py`、`backend/matrix_native_client.py`、`tests/test_billing_unified.py`、`tests/test_openapi_contract.py`、`docs/openapi.yaml`、`docs/API_REFERENCE.md`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及数据库结构，`migration.sql` 仍为 no-op。回滚后主库模式下文案、混剪等通用扣费会恢复为放行不扣。
 ## 2026-07-29 云豆 1:1 人民币口径
 - `backend/central_server.py#L74-L77`：新增 `YUNDOU_PER_YUAN=1.0` 和 `LEGACY_YUNDOU_PER_YUAN=100.0`，新用户默认赠豆从旧口径 100 调整为新口径 1。
-- `backend/central_server.py#L947-L968`、`backend/central_server.py#L2928-L2963`：LK888 反代媒体生成和通用业务能力价格全部按旧云豆价 `/100` 保存，保持人民币价格不变。
-- `backend/central_server.py#L2973-L3025`、`scripts/migrate_yundou_one_to_one.py#L1-L59`：新增一次性历史余额折算能力；脚本默认 dry-run，`--apply` 时先备份 `scheduler_state.json` 再写回。
-- `backend/central_server.py#L3275-L3404`、`backend/central_server.py#L13932-L13945`：充值档位和下单到账改为 `1 元 = 1 云豆`；主库算力充值仍按 `MAINDB_YUAN_TO_POWER` 单独返回算力。
+- `backend/central_server.py#L955-L976`、`backend/central_server.py#L2936-L2971`：LK888 反代媒体生成和通用业务能力价格全部按旧云豆价 `/100` 保存，保持人民币价格不变。
+- `backend/central_server.py#L2981-L3033`、`scripts/migrate_yundou_one_to_one.py#L1-L59`：新增一次性历史余额折算能力；脚本默认 dry-run，`--apply` 时先备份 `scheduler_state.json` 再写回。
+- `backend/central_server.py#L3283-L3412`、`backend/central_server.py#L13951-L13964`：充值档位和下单到账改为 `1 元 = 1 云豆`；主库算力充值仍按 `MAINDB_YUAN_TO_POWER` 单独返回算力。
 - `backend/matrix_native_client.py#L685-L689`、`backend/matrix_native_client.py#L21686-L21710`：本地客户端价格表、充值档位和充值弹窗说明同步新口径。
 - `backend/legal/user_agreement.md#L24-L29`：用户协议计费条款改为 `1 云豆 = 1 元人民币`。
 - 验证：先运行新增扣费/客户端规则测试观察旧规则失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_billing_unified tests.test_native_billing_rates tests.test_legal_agreements tests.test_openapi_contract -v`，并运行 `.venv-win\Scripts\python.exe -m py_compile backend\central_server.py backend\matrix_native_client.py scripts\migrate_yundou_one_to_one.py tests\test_billing_unified.py tests\test_native_billing_rates.py tests\test_legal_agreements.py`。
@@ -1175,7 +1359,7 @@
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-24 丰田汽车企业创建入口与成员归属修正
 - `backend/matrix_native_client.py#L3042-L3332`：团队成员页新增管理员专用“添加企业”按钮；按钮只在 `platform_admin` 下显示，提交后调用中心服已有 `/api/enterprise/orgs/upsert`，创建成功后刷新并选中新企业。企业家和普通用户不显示该入口，后端仍负责最终权限校验。
-- `backend/central_server.py#L6849-L6920`、`backend/central_server.py#L15278-L15283`：新增平台管理员专用 `/api/enterprise/memberships/replace`，用于在运行中的中心服内把指定用户独占移动到指定企业并持久化，避免只改磁盘文件后被旧内存状态覆盖。
+- `backend/central_server.py#L6868-L6939`、`backend/central_server.py#L15297-L15302`：新增平台管理员专用 `/api/enterprise/memberships/replace`，用于在运行中的中心服内把指定用户独占移动到指定企业并持久化，避免只改磁盘文件后被旧内存状态覆盖。
 - `scripts/seed_toyota_enterprise.py#L1-L158`：新增一次性丰田汽车企业初始化脚本，写入 `org-toyota / 丰田汽车`，把 `boss` 设为该企业 `admin`，把 `user01`、`user02` 设为该企业 `member`，并保留 `19711057505 / user-owner` 在默认企业。脚本正式写入前会备份 `backend/central_data/scheduler_state.json`，且重复执行为幂等。
 - `backend/central_data/scheduler_state.json`：已执行运行态数据修正；生成备份 `backend/central_data/scheduler_state.json.bak-20260724150901`。本次不迁移账号矩阵中已授权登录的抖音/小红书账号。
 - `tests/test_role_permissions.py#L146-L216`：新增客户端创建企业入口契约测试、丰田汽车归属脚本测试和中心服运行态成员替换测试，覆盖 boss/user01/user02 迁入丰田汽车、19711057505 保留默认企业、脚本重复执行不再改数据。
@@ -1344,10 +1528,10 @@
 - 验证：先运行新增测试观察旧实现因缺少 `_selected_material_open_target` 失败；实现后运行 `.venv-win\Scripts\python.exe -m unittest tests.test_native_publish tests.test_publish_util_safety -v` 通过 17 条用例。
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-23 本地客户端三角色权限体系
-- `backend/central_server.py#L3202-L3274`：新增产品角色中枢，统一把平台管理员映射为 `platform_admin`、企业 `owner/admin` 映射为 `enterprise_admin`、企业 `member` 映射为 `normal_user`，并提供自有数据过滤 helper。
-- `backend/central_server.py#L3302-L3317`：平台管理员判定收紧为 root token、`user-owner` 或显式 `isPlatformAdmin`，不再把默认企业的 admin 自动当作平台管理员。
-- `backend/central_server.py#L6630-L6659`、`backend/central_server.py#L9498-L9580`：账号矩阵和企业总览按角色返回 `all/org/self` 范围；普通用户只统计归属到自己的账号、素材、知识库、队列和任务。
-- `backend/central_server.py#L13649-L13673`、`backend/central_server.py#L14569-L14618`：充值套餐、充值下单/状态、兑换码使用和管理员加款统一要求平台管理员，企业家和普通用户接口层返回 403。
+- `backend/central_server.py#L3210-L3282`：新增产品角色中枢，统一把平台管理员映射为 `platform_admin`、企业 `owner/admin` 映射为 `enterprise_admin`、企业 `member` 映射为 `normal_user`，并提供自有数据过滤 helper。
+- `backend/central_server.py#L3310-L3325`：平台管理员判定收紧为 root token、`user-owner` 或显式 `isPlatformAdmin`，不再把默认企业的 admin 自动当作平台管理员。
+- `backend/central_server.py#L6649-L6678`、`backend/central_server.py#L9517-L9599`：账号矩阵和企业总览按角色返回 `all/org/self` 范围；普通用户只统计归属到自己的账号、素材、知识库、队列和任务。
+- `backend/central_server.py#L13668-L13692`、`backend/central_server.py#L14588-L14637`：充值套餐、充值下单/状态、兑换码使用和管理员加款统一要求平台管理员，企业家和普通用户接口层返回 403。
 - `backend/matrix_native_client.py#L596-L632`、`backend/matrix_native_client.py#L15913-L16000`、`backend/matrix_native_client.py#L17688-L17695`：本地客户端保存登录角色，左侧菜单按角色隐藏企业中心，账户中心资金容器和管理员用户管理只对平台管理员显示；兼容旧中心服未返回 `appRole/productRole/roleScope` 的登录响应，`user-owner` 推断为平台管理员，企业 `owner/admin` 推断为企业家。
 - `tests/test_role_permissions.py#L1-L125`、`tests/test_auth_login_modes.py#L32-L36`：覆盖三角色映射、默认企业 admin 不再隐式成为平台管理员、手机号自注册默认普通用户、企业总览企业/个人范围差异、旧登录响应下管理员菜单兼容，以及本地管理员密码统一来自 `CENTRAL_ADMIN_PASSWORD=test123456`。
 - 回滚：回滚 `backend/central_server.py`、`backend/matrix_native_client.py`、`tests/test_role_permissions.py`、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/ARCHITECTURE.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 和本文档即可；本次不改数据库结构，`migration.sql` 仍为 no-op。回滚后企业 admin 可能重新获得平台资金入口风险。
@@ -1692,8 +1876,8 @@
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_native_publish.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及中心服、数据库、OpenAPI 或 `migration.sql`。
 ## 2026-07-20 本地浏览器评论任务结果归一化
 
-- `backend/central_server.py#L12857-L12874`：本地浏览器任务结果列表归一化，避免对象型 `comments` 被当作列表切片。
-- `backend/central_server.py#L13266-L13293`：`local_browser_result()` 保存 `items/comments/leads` 时只切片列表，评论对象回退到规范化后的 `items` 或嵌套评论列表，确保成功结果能继续标记为 `done`。
+- `backend/central_server.py#L12876-L12893`：本地浏览器任务结果列表归一化，避免对象型 `comments` 被当作列表切片。
+- `backend/central_server.py#L13285-L13312`：`local_browser_result()` 保存 `items/comments/leads` 时只切片列表，评论对象回退到规范化后的 `items` 或嵌套评论列表，确保成功结果能继续标记为 `done`。
 - `tests/test_api_download_contract.py#L295-L336`：覆盖 `douyin.comments` 返回 `{status_code, comments:[...]}` 时中心任务状态必须结束为 `done`。
 
 ## 2026-07-25 素材发布多文件打开目录
@@ -1726,10 +1910,10 @@
 - `backend/api_server.py#L446-L463`、`backend/api_server.py#L2943-L2954`：抖音登录态完整性校验，拒绝只有 `msToken` 或缺少浏览器指纹的缓存，返回 `douyin_auth_incomplete` 供客户端提示重新登录。
 - `backend/matrix_native_client.py#L3640-L3646`、`backend/matrix_native_client.py#L8645-L8653`：原生客户端分解下载失败文案映射，将 `douyin_auth_incomplete` 和历史 `'s_v_web_id'` 显示为重新登录抖音提示。
 - `backend/api_server.py#L1443-L1678`：本地素材入库校验、原 ID 修复和事务回滚。
-- `backend/central_server.py#L1397-L1651`：中心素材镜像校验、隔离和原 ID 修复。
+- `backend/central_server.py#L1405-L1659`：中心素材镜像校验、隔离和原 ID 修复。
 - `backend/api_server.py#L4881-L4998`：抖音/XHS 下载入库错误契约与中心素材删除入口。
-- `backend/central_server.py#L13184-L13235`：local-browser 下载完成前的中心镜像最终化。
-- `backend/central_server.py#L15047-L15088`：中心云节点下载镜像错误契约。
+- `backend/central_server.py#L13203-L13254`：local-browser 下载完成前的中心镜像最终化。
+- `backend/central_server.py#L15066-L15107`：中心云节点下载镜像错误契约。
 
 ## 2026-07-25 素材发布多文件打开目录
 - `backend/matrix_native_client.py#L4733-L4804`：素材发布页把本机素材路径查找拆成文件名解析、候选目录解析、已存在文件列表和打开目标选择；仍按视频优先、图片其次查找单个素材文件。
@@ -1839,10 +2023,10 @@
 - `backend/matrix_native_client.py#L7587-L7689`：公网 URL 检查、参考图大小上限、私网拒绝、关键帧轻量重试参数和旧中心素材限定路径内存转 data URL。
 - `backend/matrix_native_client.py#L8649-L8717`：非口播公网素材门禁和口播片段在 TTS 前的头像可读性预检。
 - `backend/matrix_native_client.py#L9391-L9500`：关键帧参考图临时构建、旧任务迁移、502/504 轻量重试、公网关键帧 URL 保留和本地库 URL 分离。
-- `backend/central_server.py#L1536-L1562`、`backend/central_server.py#L13633-L13674`：`PUBLIC_MEDIA_BASE_URL`、HMAC 签名、过期校验、素材 `publicUrls` 生成和签名公网素材文件读取；音频文件按后缀返回对应 `Content-Type`。
-- `backend/central_server.py#L13399-L13461`：`/api/public-media/<material>/<file>` 签名访问、Range 支持和素材归属校验。
-- `backend/central_server.py#L755-L790`：不复制文件体的 multipart 非文件字段解析，保留 `model` / `mode` 计费契约。
-- `backend/central_server.py#L793-L930`：LK888 反代计费、multipart 适配和同步图片 480 秒上游超时。
+- `backend/central_server.py#L1544-L1570`、`backend/central_server.py#L13652-L13693`：`PUBLIC_MEDIA_BASE_URL`、HMAC 签名、过期校验、素材 `publicUrls` 生成和签名公网素材文件读取；音频文件按后缀返回对应 `Content-Type`。
+- `backend/central_server.py#L13418-L13480`：`/api/public-media/<material>/<file>` 签名访问、Range 支持和素材归属校验。
+- `backend/central_server.py#L763-L798`：不复制文件体的 multipart 非文件字段解析，保留 `model` / `mode` 计费契约。
+- `backend/central_server.py#L801-L938`：LK888 反代计费、multipart 适配和同步图片 480 秒上游超时。
 
 ## 2026-07-25 素材发布多文件打开目录
 - `backend/matrix_native_client.py#L4733-L4804`：素材发布页把本机素材路径查找拆成文件名解析、候选目录解析、已存在文件列表和打开目标选择；仍按视频优先、图片其次查找单个素材文件。
@@ -1886,8 +2070,8 @@
 - 历史 Web 登录实现已在 `2026-07-27 Web 交付面移除` 中退役；当前登录协议和同意审计只保留原生客户端与中心服契约。
 - `backend/legal/user_agreement.md#L1-L85`：用户协议 v1.0，包含 `1 云豆 = 1 元`、AI/换脸/平台授权和争议解决条款。
 - `backend/legal/privacy_policy.md#L1-L103`：隐私政策 v1.0，包含人脸、声音、Cookie、第三方 AI、保留期和用户权利。
-- `backend/central_server.py#L2469-L2534`：同意 Schema 校验、HTTP 428 契约、服务端时间和 `legal.consent.accept` 审计。
-- `backend/central_server.py#L14175-L14375`：登录、手机验证码登录、注册和会话刷新的法律版本强制门禁。
+- `backend/central_server.py#L2477-L2542`：同意 Schema 校验、HTTP 428 契约、服务端时间和 `legal.consent.accept` 审计。
+- `backend/central_server.py#L14194-L14394`：登录、手机验证码登录、注册和会话刷新的法律版本强制门禁。
 
 ## 2026-07-25 素材发布多文件打开目录
 - `backend/matrix_native_client.py#L4733-L4804`：素材发布页把本机素材路径查找拆成文件名解析、候选目录解析、已存在文件列表和打开目标选择；仍按视频优先、图片其次查找单个素材文件。
@@ -2117,16 +2301,16 @@
 
 ## 2026-07-25 余额实时刷新与 LK888 中文失败状态退款
 - `backend/matrix_native_client.py#L21159-L21171`：登录成功后启动 `_start_balance_timer()`，每 30 秒调用 `refresh_balance()` 从中心服重新读取余额；`backend/matrix_native_client.py#L21203-L21206` 在退出登录时停止该定时器，避免登出后继续刷新旧会话。
-- `backend/central_server.py#L731-L755`：新增 `lk888_proxy_task_flags()`，统一解析 LK888 task-status 的失败/完成状态，补充中文状态 `错误`、`失败`、`超时`、`已取消`、`取消`，并继续用真实媒体 URL 判断完成。
-- `backend/central_server.py#L994-L1008`：LK888 反代轮询到任务状态后调用 `lk888_proxy_task_flags()`；失败时按原 `ref` 调用 `refund_user_by_ref()` 幂等退款，退款成功后移除 `STATE['gen_charges'][task_id]`。
+- `backend/central_server.py#L739-L763`：新增 `lk888_proxy_task_flags()`，统一解析 LK888 task-status 的失败/完成状态，补充中文状态 `错误`、`失败`、`超时`、`已取消`、`取消`，并继续用真实媒体 URL 判断完成。
+- `backend/central_server.py#L1002-L1016`：LK888 反代轮询到任务状态后调用 `lk888_proxy_task_flags()`；失败时按原 `ref` 调用 `refund_user_by_ref()` 幂等退款，退款成功后移除 `STATE['gen_charges'][task_id]`。
 - `tests/test_role_permissions.py#L231-L238`、`tests/test_billing_unified.py#L165-L169`：新增余额刷新定时器源码契约测试和 LK888 中文失败状态退款判断回归测试。先运行新增测试观察旧实现失败，再实现后转绿。
 - 回滚：回滚 `backend/matrix_native_client.py`、`backend/central_server.py`、`tests/test_role_permissions.py`、`tests/test_billing_unified.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md` 和 `docs/TROUBLESHOOTING.md` 即可；不涉及 OpenAPI、数据库结构或 `migration.sql`。运行中中心服需要重启后加载代码变更。
 
 ## 2026-07-25 中心状态文件防默认骨架覆盖保护
-- `backend/central_server.py#L169-L185`：新增 `StateLoadError`、`StateWriteProtectionError` 和 `CENTRAL_ALLOW_STATE_REINIT` 显式重置开关。默认情况下，已有状态文件读失败不允许回落到默认企业/默认用户。
-- `backend/central_server.py#L223-L239`：`_load_json()` 改为 `utf-8-sig` 读取，可兼容 UTF-8 BOM；若 `scheduler_state.json` 存在但解析失败，会记录 `STATE_LOAD_ERROR` 并抛出 `StateLoadError` 阻断启动。
-- `backend/central_server.py#L242-L264`：`_state_write_guard()` 在写入前检查现有状态；当现有企业/用户/成员关系明显多于 1 条时，拒绝把 `org-default/user-owner` 的默认骨架写回覆盖。
-- `backend/central_server.py#L276-L349`：新增 `backup_state_file_on_startup()`，中心服初始化 `STATE` 前先复制 `scheduler_state.json.bak-startup-*`，保证启动级可回滚。
+- `backend/central_server.py#L177-L193`：新增 `StateLoadError`、`StateWriteProtectionError` 和 `CENTRAL_ALLOW_STATE_REINIT` 显式重置开关。默认情况下，已有状态文件读失败不允许回落到默认企业/默认用户。
+- `backend/central_server.py#L231-L247`：`_load_json()` 改为 `utf-8-sig` 读取，可兼容 UTF-8 BOM；若 `scheduler_state.json` 存在但解析失败，会记录 `STATE_LOAD_ERROR` 并抛出 `StateLoadError` 阻断启动。
+- `backend/central_server.py#L250-L272`：`_state_write_guard()` 在写入前检查现有状态；当现有企业/用户/成员关系明显多于 1 条时，拒绝把 `org-default/user-owner` 的默认骨架写回覆盖。
+- `backend/central_server.py#L284-L357`：新增 `backup_state_file_on_startup()`，中心服初始化 `STATE` 前先复制 `scheduler_state.json.bak-startup-*`，保证启动级可回滚。
 - `tools/repair_scheduler_state.py#L1-L85`：新增状态修复工具，支持只读校验、`--normalize` 无 BOM 重写、`--restore <backup>` 验证后恢复，并在写入前自动备份当前文件。
 - `tests/test_billing_unified.py#L167-L218`：覆盖启动前备份、UTF-8 BOM 读取、坏 JSON 阻断启动、完整状态禁止被默认骨架覆盖。
 - 回滚：回滚 `backend/central_server.py`、`tools/repair_scheduler_state.py`、`tests/test_billing_unified.py`、`CHANGELOG.md`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `docs/DEPLOYMENT.md` 即可；不涉及 OpenAPI、数据库结构或 `migration.sql`。回滚后坏状态文件可能再次被默认骨架覆盖。
@@ -2141,7 +2325,7 @@
 - `backend/xhs_note_replacement.py#L225-L231`：小红书图文 V1 发布阻断错误码。
 - `backend/xhs_note_replacement.py#L234-L286`：4 图图文同款无副作用冒烟 helper。
 - `backend/api_server.py#L4789-L4927`：本地 `/api/xhs-note-replacement/*` 模板、预览、确认和保存草稿接口。
-- `backend/central_server.py#L5728-L5731`：中心服发布预检复用 `image_note` blocker。
+- `backend/central_server.py#L5747-L5750`：中心服发布预检复用 `image_note` blocker。
 - `backend/matrix_native_client.py#L4129-L4176`：从小红书下载任务结果中提取素材文件；字典或纯 URL 结果统一拆为不含查询凭据的 `files` 与按索引对齐的 `urls`，避免签名 token 进入模板任务，同时保留可加载地址。
 - `backend/matrix_native_client.py#L4179-L4322`：解析本机图片、中心素材 URL 和仅带签名 URL 的图片；过滤视频等非图片文件，中心素材请求才携带登录头，外部 CDN 不外发登录凭据；模板阶段即可生成槽位行。
 - `backend/matrix_native_client.py#L4203-L4230`：远程响应按 64 KB 分块读取并在累计超过 20 MB 时立即终止；图片请求最多 4 路并发。
@@ -2175,9 +2359,9 @@
 - 回滚：回滚 `backend/matrix_native_client.py`、`tests/test_role_permissions.py`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及后端接口、数据库结构、OpenAPI 或 `migration.sql`。回滚后长余额文本仍可能挤压底部按钮。
 
 ## 2026-07-28 账号矩阵发布统计监控
-- `backend/central_server.py#L303-L394`：新增 `publishRuntime` 运行态归档结构，中心服启动时从 `scheduler_state.json` 恢复当天发布计数；跨天时自动清空当天计数，避免昨日数据混入今日发布。
-- `backend/central_server.py#L5833-L5879`：发布成功调用 `record_publish_success()` 后同步写入 `STATE["publishRuntime"]` 并持久化；账号列表通过 `account_asset_with_metrics()` 回填 `todayPublish`、`publishedToday`、`todayPublishDay` 和 `todayPublishUpdatedAt`。
-- `backend/central_server.py#L6821-L6849`：`/api/accounts` 按角色过滤后统一返回带统计字段的账号；管理员/企业家仍看范围内账号，普通用户仍只看自己的账号。
+- `backend/central_server.py#L311-L402`：新增 `publishRuntime` 运行态归档结构，中心服启动时从 `scheduler_state.json` 恢复当天发布计数；跨天时自动清空当天计数，避免昨日数据混入今日发布。
+- `backend/central_server.py#L5852-L5898`：发布成功调用 `record_publish_success()` 后同步写入 `STATE["publishRuntime"]` 并持久化；账号列表通过 `account_asset_with_metrics()` 回填 `todayPublish`、`publishedToday`、`todayPublishDay` 和 `todayPublishUpdatedAt`。
+- `backend/central_server.py#L6840-L6868`：`/api/accounts` 按角色过滤后统一返回带统计字段的账号；管理员/企业家仍看范围内账号，普通用户仍只看自己的账号。
 - `backend/matrix_native_client.py#L825-L848`、`backend/matrix_native_client.py#L3970-L3971`：账号矩阵汇总总粉丝量和今日发布时使用 `_account_metric_number()`，兼容空值、纯数字、`1.2万`、`3k` 等格式，避免非纯数字导致页面刷新异常。
 - `tests/test_account_matrix_metrics.py#L31-L105`：新增账号矩阵统计回归测试，覆盖今日发布从发布运行态回填、重启后恢复计数、客户端数字单位解析。
 - 验证：先运行 `.venv-win\Scripts\python.exe -m unittest tests.test_account_matrix_metrics -v` 观察旧实现因缺少 `todayPublish` 和 `_account_metric_number()` 失败；实现后同命令 3/3 通过。
@@ -2196,7 +2380,7 @@
 ## 2026-07-28 抖音私信全自动回复 MVP
 
 - `backend/local_browser_worker.py#L48-L48`：本地浏览器执行器新增 `douyin.dm.inbox -> /api/douyin/dm/inbox` 映射，并通过现有 `CAPABILITIES` 对中心服声明能力。
-- `backend/central_server.py#L732-L739`：中心服审计对 `douyin.dm.inbox` payload 做专门脱敏，只记录 `targetFingerprint`、`limit` 和 `sinceFingerprint`；`backend/central_server.py#L743-L773` 对中心任务结果做持久化脱敏，不保存 `target` 原文和 `messages[].text` 原文；`backend/central_server.py#L13024-L13024` 将任务类型映射到本地收件箱接口；`backend/central_server.py#L13522-L13540` 在任务结果写入时使用脱敏结果。
+- `backend/central_server.py#L740-L747`：中心服审计对 `douyin.dm.inbox` payload 做专门脱敏，只记录 `targetFingerprint`、`limit` 和 `sinceFingerprint`；`backend/central_server.py#L751-L781` 对中心任务结果做持久化脱敏，不保存 `target` 原文和 `messages[].text` 原文；`backend/central_server.py#L13043-L13043` 将任务类型映射到本地收件箱接口；`backend/central_server.py#L13541-L13559` 在任务结果写入时使用脱敏结果。
 - `backend/api_server.py#L1644-L1672`：新增私信消息归一化，固定输出 `fingerprint/direction/kind/text/createdAtText`，非文本消息不返回正文；未知方向输出 `unknown`，客户端不自动处理；浏览器抽取会给同文本重复消息附加 `ordinal`，避免连续相同文本共用同一指纹；`backend/api_server.py#L1675-L1867` 使用隔离子进程和本机 Playwright 浏览器打开指定客户私信会话并读取最近消息；`backend/api_server.py#L1759-L1760` 将私信读取浏览器固定到 `dy_dm_profile/current` 资料目录，避免每 20 秒创建全新临时 profile；`backend/api_server.py#L3032-L3040` 提供 `run_douyin_dm_inbox()` 包装；`backend/api_server.py#L5548-L5560` 接通 POST `/api/douyin/dm/inbox`。
 - 该历史实现已由本文件 2026-08-01 的 “Douyin automatic reply serial queue and manual handoff” 记录替代：当前轮询间隔仍为 20 秒，但纯文本按顺序逐条回复；非文本或明确转人工请求会关闭自动回复并提示人工接管。
 - `tests/test_douyin_dm_auto_reply.py#L22-L727`：覆盖中心服/本地执行器任务映射、本地接口契约、消息指纹稳定性、重复文本指纹、未知方向跳过、隔离子进程、本机直连轮询、20 秒轮询、首次尾部未回复消息处理、单轮即时合并、非文本/混合批次人工处理、发送失败停用、未登录/不可私信时停止全自动、固定私信 profile、中心结果脱敏和结构化日志字段；`tests/test_openapi_contract.py#L14-L44` 将 `/api/douyin/dm/inbox` 和 schema 纳入 OpenAPI 契约覆盖。
@@ -2344,13 +2528,13 @@
 - 验证：`tests/test_account_billing_dashboard.py#L1-L197` 的专项测试先有 9 项因控件/字段缺失按预期 RED；实现后专项 11/11 与既有权限/计费回归 15/15 通过。review-fix RED 确认旧 205 行离屏脚本缺少标签/表格几何断言助手；补充助手后，离屏冒烟覆盖命名指标文字、表头、可见单元格与长详情 tooltip。2026-07-30 最终复跑 `tests.test_account_billing_dashboard tests.test_role_permissions tests.test_native_billing_rates` 为 26/26（3.659s），`py_compile` 覆盖客户端、205 行冒烟脚本和 197 行专项测试，`git diff --check` 全量与 Task 5 定向检查均通过。离屏冒烟首次因 PySide6 `QWidget.render` 签名不兼容失败，修正为显式 `QPoint` 后通过；首次图片检查发现 offscreen 字体库为空导致方框字，显式加载 `Deng.ttf` 后重渲染并人工确认两种尺寸无重叠、裁切或不可读文本。
 - 回滚：只回滚 `backend/matrix_native_client.py` 的 Task 5 hunks并移除 `tests/test_account_billing_dashboard.py`、`scripts/smoke_account_billing_ui.py`、两张离屏截图、本条实现记录、对应排障记录和 Task 5 报告，即可恢复旧五列账户页。中心 API/OpenAPI、数据库、Docker、环境变量和运行中进程未改动；本任务未启动、重启、部署或提交任何服务。
 # 2026-07-30 任务中心纳入本地客户端任务
-- `backend/central_server.py#L9531-L9550`: 企业每日任务配额统计会把本地客户端浏览器任务按真实接口路径归一化后纳入计数，账号登录类任务仍不作为可计费任务。
-- `backend/central_server.py#L9591-L9601`: 企业用量 `tasks24h/tasks7d` 现在包含本地客户端执行的采集、下载、获客、发布等任务，企业中心“任务趋势”不再只看中心节点任务。
-- `backend/central_server.py#L10000-L10007`: 企业概览 `counts.tasks` 纳入 `localBrowserTasks`，管理员/企业家/普通用户仍按现有角色范围过滤。
-- `backend/central_server.py#L11189-L11203`、`backend/central_server.py#L11280-L11313`: 小红书搜索/下载/评论归类为搜索、下载、评论任务；新增 `local_browser_task_as_task()` 把本地浏览器任务转换为任务中心统一行。
-- `backend/central_server.py#L11611-L11638`: `/api/enterprise/task-center` 合并中心任务、发布队列任务和本地客户端任务；传入当前用户后，企业家看本企业，普通用户只看自己创建的任务。
-- `backend/central_server.py#L11811-L11821`、`backend/central_server.py#L14307-L14336`: `/api/central/tasks` 和批量候选列表同步纳入本地客户端任务，避免任务中心摘要和详情列表口径不一致。
-- `backend/central_server.py#L13585-L13641`: 本地客户端任务创建时，如果执行端离线，仍写入一条 `failed/local_browser_offline` 任务，任务中心可直接看到失败原因。
+- `backend/central_server.py#L9550-L9569`: 企业每日任务配额统计会把本地客户端浏览器任务按真实接口路径归一化后纳入计数，账号登录类任务仍不作为可计费任务。
+- `backend/central_server.py#L9610-L9620`: 企业用量 `tasks24h/tasks7d` 现在包含本地客户端执行的采集、下载、获客、发布等任务，企业中心“任务趋势”不再只看中心节点任务。
+- `backend/central_server.py#L10019-L10026`: 企业概览 `counts.tasks` 纳入 `localBrowserTasks`，管理员/企业家/普通用户仍按现有角色范围过滤。
+- `backend/central_server.py#L11208-L11222`、`backend/central_server.py#L11299-L11332`: 小红书搜索/下载/评论归类为搜索、下载、评论任务；新增 `local_browser_task_as_task()` 把本地浏览器任务转换为任务中心统一行。
+- `backend/central_server.py#L11630-L11657`: `/api/enterprise/task-center` 合并中心任务、发布队列任务和本地客户端任务；传入当前用户后，企业家看本企业，普通用户只看自己创建的任务。
+- `backend/central_server.py#L11830-L11840`、`backend/central_server.py#L14326-L14355`: `/api/central/tasks` 和批量候选列表同步纳入本地客户端任务，避免任务中心摘要和详情列表口径不一致。
+- `backend/central_server.py#L13604-L13660`: 本地客户端任务创建时，如果执行端离线，仍写入一条 `failed/local_browser_offline` 任务，任务中心可直接看到失败原因。
 - `backend/matrix_native_client.py#L5728-L5769`: 本地任务中心列表优先显示中文类型、中文状态、账号名或节点名，减少 `search/done` 等技术字段暴露。
 - `tests/test_enterprise_task_center_local_browser.py#L86-L134`: 回归覆盖企业家看到本企业本地任务、普通用户只看到自己的本地任务、企业用量/概览计数包含本地任务，以及离线本地执行尝试会留下失败任务。
 - 验证：先运行新增专项测试观察旧实现失败；实现后 `.\.venv-win\Scripts\python.exe -m unittest tests.test_enterprise_task_center_local_browser tests.test_role_permissions -v` 通过 17 项，`.\.venv-win\Scripts\python.exe -m py_compile backend\central_server.py backend\matrix_native_client.py tests\test_enterprise_task_center_local_browser.py` 通过。
@@ -2358,8 +2542,8 @@
 # 2026-07-30 小红书账号矩阵改名同步修复
 - `backend/matrix_native_client.py#L1108-L1117`: 账号矩阵合并中心服和本地执行引擎账号时，小红书只在本地执行引擎返回 `xhs-self` 时展示；本地登录态消失后，中心旧记录不再单独出现在账号矩阵里。
 - `backend/matrix_native_client.py#L5111-L5111`、`backend/matrix_native_client.py#L5214-L5237`: “改名”按钮把中心账号 ID 一并传入；保存昵称时先写本地 `/api/accounts/rename`，再同步调用中心服 `/api/accounts/rename`。只要本地或中心任一侧保存成功，界面刷新后即可看到新昵称；两侧都失败才提示失败。
-- `backend/central_server.py#L4283-L4313`、`backend/central_server.py#L13775-L13806`: 节点账号同步和本地浏览器账号上报时保留 `displayNameOverride`，避免下一次心跳把人工昵称刷回平台默认名。
-- `backend/central_server.py#L4445-L4450`、`backend/central_server.py#L4483-L4520`、`backend/central_server.py#L15370-L15379`: 中心账号列表优先返回人工昵称；新增中心服账号改名函数与 `/api/accounts/rename` 路由，按企业范围和当前用户可见范围拦截越权请求，并写入 `account.rename` 审计。
+- `backend/central_server.py#L4302-L4332`、`backend/central_server.py#L13794-L13825`: 节点账号同步和本地浏览器账号上报时保留 `displayNameOverride`，避免下一次心跳把人工昵称刷回平台默认名。
+- `backend/central_server.py#L4464-L4469`、`backend/central_server.py#L4502-L4539`、`backend/central_server.py#L15389-L15398`: 中心账号列表优先返回人工昵称；新增中心服账号改名函数与 `/api/accounts/rename` 路由，按企业范围和当前用户可见范围拦截越权请求，并写入 `account.rename` 审计。
 - `docs/openapi.yaml#L184-L214`、`docs/openapi.yaml#L1524-L1556`、`docs/API_REFERENCE.md#L161-L180`: 补齐账号改名 OpenAPI 和接口说明，明确不返回 Cookie、不修改平台昵称，中心服记录写入 `displayNameOverride`。
 - `tests/test_native_publish.py#L170-L191`、`tests/test_native_publish.py#L257-L268`、`tests/test_account_matrix_metrics.py#L87-L119`、`tests/test_openapi_contract.py#L78-L110`: TDD 回归覆盖小红书中心旧记录登录态失效、客户端本地/中心双写、中心人工昵称不被节点同步覆盖，以及 OpenAPI 路径/Schema 追踪。
 - Verification: 新增失败测试已先在旧实现下失败，修复后相关聚焦测试、OpenAPI 合同测试和 `py_compile` 通过。完整验证见本次最终交付记录。
@@ -2368,10 +2552,10 @@
 - `backend/matrix_native_client.py#L802-L991`: `_comic_actual_cost()` reads only final remote cost fields; `_settle_comic_actual_billing()` writes an idempotent task-based ref, actual model ID and exact amount with `allowArrears=true`. Missing cost or task ID becomes `awaiting_actual_cost` with a redacted structured log. The former video/keyframe estimate, precharge and refund helpers are deleted.
 - `backend/matrix_native_client.py#L14688-L14906`: initial comic replacement submits and waits for start/end-frame and video tasks before billing. Each successful remote task is settled from its own `cost/actual_model`; failed or cancelled tasks create no local precharge or refund.
 - `backend/matrix_native_client.py#L15256-L15418`: single-frame and video regeneration use the same actual-cost settlement. Video download failure keeps the old completed media and stores the new task as pending recovery; settlement reads the new task ID from the final payload without overwriting the old media state.
-- `backend/central_server.py#L1057-L1149`: `lk888_actual_charge_amount()` extracts final cost and `lk888_actual_model_id()` prefers `actual_model/fallback_model` over the requested model. Known Vidu Q3 remote aliases normalize to `viduq3-cankaosheng`.
-- `backend/central_server.py#L1191-L1454`: `/lk888/*` has no estimate/precharge branch or runtime switch. Synchronous final costs settle immediately. `/v1/media/generate` submit responses always remain pending even when they contain amount-like fields; task status settles only from final cost and actual model. Historical `STATE.gen_charges` is read only to refund or close old precharge records.
-- `backend/central_server.py#L3477-L3531` and `backend/central_server.py#L3735-L3833`: actual-cost charging is idempotent by `ref`, may create arrears and uses the supplied LK888 amount even for `comic_keyframe_image`; normal non-model capability charging still uses center-owned prices and blocks insufficient balance.
-- `backend/central_server.py#L15898-L15917`, `docs/openapi.yaml#L594-L622` and `docs/openapi.yaml#L1168-L1192`: `/api/billing/charge` accepts documented `allowArrears` plus actual-cost metadata (`modelId/taskId/actualAmount/billingScenario/billingStage/billingDetail`). No new path or response field is introduced.
+- `backend/central_server.py#L1065-L1157`: `lk888_actual_charge_amount()` extracts final cost and `lk888_actual_model_id()` prefers `actual_model/fallback_model` over the requested model. Known Vidu Q3 remote aliases normalize to `viduq3-cankaosheng`.
+- `backend/central_server.py#L1199-L1462`: `/lk888/*` has no estimate/precharge branch or runtime switch. Synchronous final costs settle immediately. `/v1/media/generate` submit responses always remain pending even when they contain amount-like fields; task status settles only from final cost and actual model. Historical `STATE.gen_charges` is read only to refund or close old precharge records.
+- `backend/central_server.py#L3485-L3539` and `backend/central_server.py#L3743-L3852`: actual-cost charging is idempotent by `ref`, may create arrears and uses the supplied LK888 amount even for `comic_keyframe_image`; normal non-model capability charging still uses center-owned prices and blocks insufficient balance.
+- `backend/central_server.py#L15917-L15936`, `docs/openapi.yaml#L594-L622` and `docs/openapi.yaml#L1168-L1192`: `/api/billing/charge` accepts documented `allowArrears` plus actual-cost metadata (`modelId/taskId/actualAmount/billingScenario/billingStage/billingDetail`). No new path or response field is introduced.
 - `tests/test_video_replacement.py#L2419-L2577` and `tests/test_video_replacement.py#L3009-L3120`: regression coverage proves submit-before-charge ordering, exact frame/video costs, actual model IDs, no charge/refund on submit failure, and preservation of existing media during download recovery.
 - `tests/test_api_download_contract.py#L1362-L1504` and `tests/test_billing_unified.py#L184-L205`: setting the removed legacy environment variable cannot restore precharge; async status uses the actual model; keyframe actual cost is not replaced by a local fixed capability price.
 - Observability: successful and pending comic settlements emit `video_replace_comic_actual_billing_settled` or `video_replace_comic_billing_awaiting_actual_cost`. Logs include amount/model and hashed task ID only; no Cookie, Token, Authorization, API key or private media URL is recorded.
@@ -2401,7 +2585,7 @@
 - 验证：新增断言先在旧实现下失败；修复后运行主题切换聚焦测试、工作流助手直接模式测试、`py_compile` 和 `git diff --check`。
 - 回滚：回退 `backend/matrix_native_client.py`、`tests/test_video_breakdown.py`、`CHANGELOG.md`、`docs/TROUBLESHOOTING.md` 和本条记录即可；不涉及中心服、OpenAPI、数据库、Docker、环境变量或 `migration.sql`。
 # 2026-07-31 企业中心任务趋势真实柱状图
-- `backend/central_server.py#L10036-L10116`: 新增 `enterprise_task_trend_7d()`，`enterprise_usage()` 返回 `taskTrend7d`，按最近 7 个自然日和任务 `createdAt` 聚合中心服任务 `STATE["tasks"]` 与本地客户端任务 `STATE["localBrowserTasks"]`。
+- `backend/central_server.py#L10055-L10135`: 新增 `enterprise_task_trend_7d()`，`enterprise_usage()` 返回 `taskTrend7d`，按最近 7 个自然日和任务 `createdAt` 聚合中心服任务 `STATE["tasks"]` 与本地客户端任务 `STATE["localBrowserTasks"]`。
 - `backend/matrix_native_client.py#L4415-L4522`: 新增 `_enterprise_task_trend_series()`，企业中心“任务趋势”改为读取 `usage.taskTrend7d`，展示真实日期标签和每日任务数；删除 `or 280` 与固定比例模拟柱状图。
 - `docs/openapi.yaml#L827-L856`、`docs/openapi.yaml#L1332-L1379`、`docs/API_REFERENCE.md#L629-L644`: 补齐 `/api/enterprise/usage`、`EnterpriseUsage` 和 `EnterpriseTaskTrendBucket` 契约，并说明 `调度任务` KPI 是当前权限范围内任务总数，趋势图是近 7 天每日任务量。
 - `tests/test_enterprise_task_center_local_browser.py#L113-L142`、`tests/test_agent_mode_defaults.py#L189-L208`、`tests/test_openapi_contract.py#L80-L114`: 回归覆盖真实日桶聚合、前端不再使用模拟数据和 OpenAPI 必备路径/schema。
@@ -2417,16 +2601,16 @@
 # 2026-07-31 企业中心 KPI 固定口径与在线节点统计
 - `backend/matrix_native_client.py#L3618-L3625`: 新增 `ENTERPRISE_OVERVIEW_KPI_LABELS`，企业中心总览固定展示“客户企业 / 企业用户 / 授权账号 / 可用账号 / 在线节点 / 调度任务”六个业务指标，不再按接口返回顺序展示“团队成员”等重复卡片。
 - `backend/matrix_native_client.py#L4717-L4719`: KPI 网格按固定列表取数，缺失字段显示 0；“授权账号”仍表示账号矩阵平台账号数量，“企业用户”表示企业内平台登录用户数量。
-- `backend/central_server.py#L10265-L10339`: `/api/enterprise/usage` 的 `nodes/onlineNodes/nodeOnlineRate` 改为使用统一执行端口径，包含本地浏览器客户端和兼容期旧执行节点。
-- `backend/central_server.py#L10675-L10763`: `/api/enterprise/summary` 的 `counts.nodesOnline` 按角色过滤；平台管理员/企业管理员按可见企业统计，普通用户直接调用接口返回 0，避免泄露企业执行端状态。
-- `backend/central_server.py#L14085-L14135`: 新增 `enterprise_execution_nodes()` 和 `enterprise_execution_nodes_for_orgs()`，统一本地浏览器客户端 `localBrowserClients` 与旧 `nodes`，并按 `lb-` 前缀去重同一台本地客户端。
+- `backend/central_server.py#L10284-L10358`: `/api/enterprise/usage` 的 `nodes/onlineNodes/nodeOnlineRate` 改为使用统一执行端口径，包含本地浏览器客户端和兼容期旧执行节点。
+- `backend/central_server.py#L10694-L10782`: `/api/enterprise/summary` 的 `counts.nodesOnline` 按角色过滤；平台管理员/企业管理员按可见企业统计，普通用户直接调用接口返回 0，避免泄露企业执行端状态。
+- `backend/central_server.py#L14104-L14154`: 新增 `enterprise_execution_nodes()` 和 `enterprise_execution_nodes_for_orgs()`，统一本地浏览器客户端 `localBrowserClients` 与旧 `nodes`，并按 `lb-` 前缀去重同一台本地客户端。
 - `tests/test_enterprise_task_center_local_browser.py#L113-L124`、`tests/test_role_permissions.py#L124-L134`、`tests/test_agent_mode_defaults.py#L234-L244`: 回归覆盖在线本地浏览器客户端计入企业管理员在线节点、普通用户不能看到该数量，以及客户端 KPI 固定列表。
 - 验证与回滚：新增测试先暴露旧实现未统计 `localBrowserClients`、普通用户可看到企业在线节点和客户端 KPI 未固定的问题；修复后 `tests.test_enterprise_task_center_local_browser`、`tests.test_role_permissions`、`tests.test_agent_mode_defaults` 共 52/52 通过，`py_compile` 通过。回滚 `backend/central_server.py`、`backend/matrix_native_client.py`、三组测试、`docs/API_REFERENCE.md`、`docs/openapi.yaml`、`docs/IMPLEMENTATION.md`、`docs/TROUBLESHOOTING.md` 和 `CHANGELOG.md` 即可；不涉及数据库结构、Docker、环境变量或 `migration.sql`。中心服和本地客户端需重启后生效。
 # 2026-07-31 AI触达 task_timeout 可观测性与长任务超时修复
 - `backend/matrix_native_client.py#L1394-L1416`: `submit_local_task()` 超时返回时保留最后一次 `/api/local-browser/task` 轮询结果，写入 `lastStatus`、`lastError` 和 `lastTask`，便于前端和日志判断任务是 queued、running 还是其他状态。
 - `backend/matrix_native_client.py#L1433-L1440`: `_local_task_error_message()` 新增 `task_timeout` 中文说明，提示检查本地执行引擎、登录/验证码/风控和页面加载状态，并附带任务ID与最后状态。
 - `backend/matrix_native_client.py#L6022-L6040`: `OutreachPage` 提交 `outreach.run` 时等待 900 秒，状态栏失败文案改用 `_local_task_error_message(d)`，不再直接显示 `未完成:task_timeout`。
-- `backend/central_server.py#L14005-L14074`: 中心服新增 `LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`、`LOCAL_BROWSER_LONG_TASK_PATHS` 和 `local_browser_task_timeout_sec()`；AI触达、寻找线索、发布、下载类长任务默认 900 秒后才 requeue，普通任务保持 300 秒。
+- `backend/central_server.py#L14024-L14093`: 中心服新增 `LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`、`LOCAL_BROWSER_LONG_TASK_PATHS` 和 `local_browser_task_timeout_sec()`；AI触达、寻找线索、发布、下载类长任务默认 900 秒后才 requeue，普通任务保持 300 秒。
 - `docs/DEPLOYMENT.md#L221-L221`: 环境变量清单补充可选 `CENTRAL_LOCAL_BROWSER_LONG_TASK_TIMEOUT_SEC`，便于 staging/prod 按需调整本地浏览器长任务 requeue 阈值。
 - `tests/test_outreach_page_copy.py#L31-L61`: 回归覆盖 AI触达 900 秒等待、中文错误翻译和超时诊断字段。
 - `tests/test_enterprise_task_center_local_browser.py#L180-L220`: 回归覆盖 `outreach.run` 运行超过普通 300 秒不会被中心服重新排队，同时普通搜索任务仍会按原 300 秒 requeue。
@@ -2551,13 +2735,13 @@
 ## 2026-08-03 MiniMax H3 official direct integration
 - `backend/utils/minimax_direct.py#L1-L272`: adds the dependency-light MiniMax official direct adapter. `_https_url()` rejects non-public HTTPS media including local paths, `data:` URLs, localhost, loopback, private, link-local, reserved, multicast, and unspecified IPs before provider submission. `normalize_video_request()` fixes provider model to `MiniMax-H3`, validates duration `4..15` and resolution `768P|2K`. `MiniMaxDirectClient.submit_video()` calls `/v2/video_generation`; `poll_video()` calls `/v2/query/video_generation/{task_id}`; `retrieve_video()` extracts final `task.content.url` shapes.
 - `backend/utils/minimax_pricing.py#L1-L6`: intentionally returns no published unit price with version `minimax-h3-price-unresolved`, so H3 cannot be charged from an unsupported local estimate.
-- `backend/central_server.py#L972-L1279`: adds the authenticated center endpoints `/api/v1/minimax/video/generate` and `/api/v1/minimax/video/tasks/{task_id}`, including enabled/configured/concurrency checks, redacted structured MiniMax logs, pending-task storage, official provider polling for active tasks, `resultUrl/providerResultUrl` extraction, and `awaiting_actual_cost` status when provider generation succeeds without a confirmed price.
-- `backend/central_server.py#L14296-L14321`: reads `MINIMAX_ENABLED`, `MINIMAX_CENTER_API_BASE`, `MINIMAX_CENTER_API_KEY`, `MINIMAX_MAX_ACTIVE_TASKS`, `MINIMAX_TASK_TIMEOUT_SEC`, and `MINIMAX_POLL_INTERVAL_SEC` from the environment. `backend/central_server.py#L15234-L15235` and `backend/central_server.py#L15846-L15846` wire the GET/POST routes.
+- `backend/central_server.py#L980-L1287`: adds the authenticated center endpoints `/api/v1/minimax/video/generate` and `/api/v1/minimax/video/tasks/{task_id}`, including enabled/configured/concurrency checks, redacted structured MiniMax logs, pending-task storage, official provider polling for active tasks, `resultUrl/providerResultUrl` extraction, and `awaiting_actual_cost` status when provider generation succeeds without a confirmed price.
+- `backend/central_server.py#L14315-L14340`: reads `MINIMAX_ENABLED`, `MINIMAX_CENTER_API_BASE`, `MINIMAX_CENTER_API_KEY`, `MINIMAX_MAX_ACTIVE_TASKS`, `MINIMAX_TASK_TIMEOUT_SEC`, and `MINIMAX_POLL_INTERVAL_SEC` from the environment. `backend/central_server.py#L15253-L15254` and `backend/central_server.py#L15865-L15865` wire the GET/POST routes.
 - `tools/aicanvas_remote/server_current.py#L437-L446`: adds remote-only MiniMax H3 constants and environment variables. `tools/aicanvas_remote/server_current.py#L1220-L1225` adds the `minimax-h3` catalog row with provider `minimax-direct`, actual model `MiniMax-H3`, duration `4..15`, and resolutions `768P/2K`.
 - `tools/aicanvas_remote/server_current.py#L11242-L11256`: maps H3 video selections to the `minimax-h3-video` direct adapter. `tools/aicanvas_remote/server_current.py#L12844-L12847` routes active `provider=minimax-direct` task refreshes to MiniMax official status query. `tools/aicanvas_remote/server_current.py#L13514-L13772`: submits H3 comic video tasks through the direct branch, bypassing local precharge and LK888/APIMart gateway submission, and records `billing_status=awaiting_actual_cost`.
 - `tools/aicanvas_remote/server_current.py#L14127-L14442`: implements remote H3 HTTPS media validation, duration/resolution normalization, content assembly, official `/v2/video_generation` submit, official `/v2/query/video_generation/{task_id}` status envelope, provider result URL extraction, provider `task_id` extraction, and redacted H3 task metadata.
 - `docs/openapi.yaml#L113-L161` and `docs/openapi.yaml#L2097-L2157`: document the center H3 submit/status contract, result URL fields, and `awaiting_actual_cost`. `docs/API_REFERENCE.md#L18-L71`, `docs/ARCHITECTURE.md#L3-L8`, `docs/DEPLOYMENT.md#L3-L13`, `docs/TROUBLESHOOTING.md#L1-L8`, `backend/.env.example#L24-L27`, `CHANGELOG.md#L3-L13`, and `migration.sql#L21-L25` document the two dedicated keys, official direct boundary, rollout, no-op migration, and rollback expectations.
-- `tests/test_minimax_direct.py#L1-L244`, `tests/test_minimax_pricing.py#L1-L29`, `tests/test_minimax_central_server.py#L1-L472`, `tests/test_minimax_aicanvas_remote.py#L1-L291`, and `tests/test_openapi_contract.py#L1-L372`: focused coverage for the adapter contract, unresolved pricing, center auth/config/error/status polling, remote H3 no-gateway/no-precharge branch, official remote polling, local/private-reference rejection, and OpenAPI schema exposure.
+- `tests/test_minimax_direct.py#L1-L244`, `tests/test_minimax_pricing.py#L1-L29`, `tests/test_minimax_central_server.py#L1-L480`, `tests/test_minimax_aicanvas_remote.py#L1-L291`, and `tests/test_openapi_contract.py#L1-L372`: focused coverage for the adapter contract, unresolved pricing, center auth/config/error/status polling, remote H3 no-gateway/no-precharge branch, official remote polling, local/private-reference rejection, and OpenAPI schema exposure.
 - Operations and rollback: center/runtime use only environment secrets and require process restart after deploy. Remote AI Canvas requires backing up `/root/AI-CanvasPro/server.py`, verifying incoming SHA, atomic replacement, restarting `ai-canvas.service`, checking port `8777`, and confirming `/login` returns 200. Database migration is no-op. Roll back by restoring the previous remote `server.py` backup and reverting the listed local source, tests, docs, `CHANGELOG.md`, and `migration.sql`.
 ## 2026-08-03 Native Client Username-Only Login Screen
 - `backend/matrix_native_client.py#L30111-L30119`: login account input is labeled as username-only while retaining the same widget for register-mode phone input.
@@ -2614,14 +2798,61 @@
 ## 2026-08-03 Enterprise Add Member Without Contact Fields
 - `backend/matrix_native_client.py#L5696-L5704`: the add-member success handler now opens the copy dialog with `成员已加入当前企业`, the generated login identifier, and either the provided initial password or a reset-password reminder.
 - `backend/matrix_native_client.py#L5787-L5828`: `EnterpriseMembersPage.add_member()` no longer creates phone/email inputs, no longer requires a contact field, and posts only `orgId`, `name`, optional `password`, and `role` to `/api/enterprise/users/upsert`.
-- `backend/central_server.py#L8617-L8653`: `upsert_enterprise_user()` accepts name-only member creation, generates `user-<12 hex>` ids when no user id is provided, writes optional initial passwords, creates the membership, and returns `credential.identifier`.
-- `backend/central_server.py#L17132-L17138`: the HTTP handler for `/api/enterprise/users/upsert` delegates to `upsert_enterprise_user()` and audits only user id, name, org id, status, and error code, not plaintext passwords.
+- `backend/central_server.py#L8636-L8672`: `upsert_enterprise_user()` accepts name-only member creation, generates `user-<12 hex>` ids when no user id is provided, writes optional initial passwords, creates the membership, and returns `credential.identifier`.
+- `backend/central_server.py#L17151-L17157`: the HTTP handler for `/api/enterprise/users/upsert` delegates to `upsert_enterprise_user()` and audits only user id, name, org id, status, and error code, not plaintext passwords.
 - `docs/openapi.yaml#L1080-L1118` and `docs/openapi.yaml#L1732-L1765`: OpenAPI documents the add/update member request with only `orgId/name` required and a credential-bearing response.
 - `docs/API_REFERENCE.md#L187-L226`: API reference documents that phone/email are legacy optional fields and new native add-member flow uses generated user ids.
 - `tests/test_role_permissions.py#L195-L236` and `tests/test_openapi_contract.py#L342-L364`: RED/GREEN coverage locks UI removal of contact fields, backend generated login identifiers, and OpenAPI contract.
 - Verification and rollback: `tests.test_openapi_contract` 10/10, focused team-member role tests 3/3, `py_compile`, and an offscreen `EnterpriseMembersPage` smoke check pass. Restart native client and central server to apply. No database schema, Docker, environment variable, or `migration.sql` change. Roll back the files listed in `CHANGELOG.md` to restore the previous contact-required form.
 ## 2026-08-03 公开下载页 `/download`
-- `backend/central_server.py#L15192-L15547`：内置“云灵星图 AI 爆款复刻平台 Windows 客户端下载”页面 HTML 和 `text/html; charset=utf-8` 响应头，下载按钮为禁用状态，不链接安装包。
-- `backend/central_server.py#L15658-L15659`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
-- `tests/test_web_surface_removed.py#L45-L90`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
+- `backend/central_server.py#L15211-L15566`：内置“云灵星图 AI 爆款复刻平台 Windows 客户端下载”页面 HTML 和 `text/html; charset=utf-8` 响应头，下载按钮为禁用状态，不链接安装包。
+- `backend/central_server.py#L15677-L15678`：将 `/download` 注册为公开 GET 页面，位于登录鉴权前；现有 `/MatrixShipAgent-Setup.exe` 直链保持不变。
+- `tests/test_web_surface_removed.py#L50-L92`：覆盖页面标题、公司背书、禁用按钮、无安装包链接、HTML 响应头和公开路由位置。
 - 验证与影响：`tests.test_web_surface_removed.WebSurfaceRemovedTest` 先红后绿；本次无 OpenAPI JSON Schema、数据库、Docker、环境变量或 `migration.sql` 影响。中心服重启后生效，回滚上述文件和文档即可移除页面。
+## 2026-08-07 客户端移除全部网页版替换入口
+- `backend/matrix_native_client.py#L14677-L14683`：`VideoReplacementPage.__init__()` 删除标题横幅下方的 `web_row` 与「打开网页版替换」按钮，页面在 `prereq_banner()` 之后直接进入 `self._source` 初始化。同款替换只在客户端内完成。
+- `backend/matrix_native_client.py#L15208`：删除 `VideoReplacementPage.open_replacement_web()`(原位于 `retry_source_transcription()` 之前),连同它的「请先从『分解视频』载入分解结果」「当前分解结果缺少可用的本地视频文件」「创建网页交接失败」三个提示框。
+- `backend/matrix_native_client.py#L11997-L12018`：`XhsNoteReplacementPage.__init__()` 同样删除 `web_row` 与「打开网页版替换」按钮，图文同款页在 `prereq_banner()` 之后直接构造 `source` 卡片。该页现在只剩 2 个按钮。
+- `backend/matrix_native_client.py#L746`：删除 `open_replacement_web_page()`。两个按钮移除后它没有任何调用方,也没有测试覆盖。`_open_url()` 本身保留,漫剧工具入口仍在用。
+- 保留项：`replacement_web_user_context()#L701`、`create_replacement_web_handoff()#L720`、`replacement_web_launch_url()#L731` 不动,它们由 `tests/test_replacement_web_mvp.py#L267-L321` 覆盖交接与脱敏契约。副作用是三者目前都没有 UI 调用方,视频交接 `rwh_...` 没有 UI 触发路径。
+- 未改动：`backend/replacement_web.py`、`backend/api_server.py` 的 `/replacement` 与 `/api/replacement/*` 路由、`MATRIX_REPLACEMENT_WEB_ENABLED` 开关。网页版本身仍然存在,但只能靠手工 `/replacement#token=...` 这条本地排查兜底路径进入。
+- 验证与回滚：`py_compile` 通过；`tests.test_replacement_web_mvp`、`tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service`、`tests.test_xhs_note_replacement` 合计 561/561 通过(两次移除后各跑一次)；offscreen 构造两页得到 `VideoReplacementPage` 14 个按钮、`XhsNoteReplacementPage` 2 个按钮,均无「网页」字样,`b_open_replacement_web` 属性都不存在,模块级 `open_replacement_web_page` 已消失而 `replacement_web_launch_url`/`create_replacement_web_handoff` 仍在；`nav_feature_enabled("同款替换")` 在 `MATRIX_VIDEO_REPLACEMENT_ENABLED=1` 下为 `True`。改动只在客户端进程内,需重启本地客户端；已发布安装包不受影响,除非重新打包。无中心服 API、OpenAPI、数据库、Docker、密钥、环境变量或 `migration.sql` 影响。回滚恢复 `backend/matrix_native_client.py`、`docs/API_REFERENCE.md`、`docs/TROUBLESHOOTING.md`、`CHANGELOG.md` 和本条目。
+
+## 2026-08-07 漫剧项目模式片段时长按真实口播排期
+- `backend/matrix_native_client.py#L11156-L11175`：`_estimate_replacement_tts_duration_sec()` 默认语速常量 `_REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC` 由 `4.2` 改为 `5.5` 字/秒，`VIDEO_REPLACE_TTS_CHARS_PER_SEC` 覆盖行为和 `2.5..8.0` 夹取不变。
+- `backend/matrix_native_client.py#L11178-L11241`：新增 `_comic_duration_headroom_sec()`、`_comic_duration_slots()` 和 `_comic_segment_video_duration()`；漫剧档位默认为 `4..15` 每个整数秒，`_comic_video_duration_slot()` 增加 `headroom_sec` 参数，已排期的 `videoDurationSec` 走 `headroom_sec=0.0` 保证重复调用幂等。
+- `backend/matrix_native_client.py#L11289-L11356`：新增 `_comic_measure_script_duration()` 和 `_comic_apply_measured_speech_durations()`，排期阶段用 `lk888_tts_voice()` + `_probe_media_duration()` 探测真实口播秒数，默认 4 路并发，失败或被禁用时回落估算并写入 `speechDurationSource`。
+- `backend/matrix_native_client.py#L11359-L11403`：`_comic_plan_script_segments()` 新增 `job` 参数，先按估算切分口播稿，再用测得时长重算 `videoDurationSec` 和时间轴，并保留 `speechEstimatedSec`、`speechOverflowSec` 供排查。
+- `backend/matrix_native_client.py#L13129`、`#L13295`：`_comic_project_create_payload()` 和 `_comic_storyboard_video_payload()` 改用 `_comic_segment_video_duration()`，不再对已排期时长重复叠加余量。
+- `backend/replacement_pipeline.py#L98-L99`：`HybridReplacementPipeline.build_plan()` 把 `job` 透传给 `_comic_plan_script_segments()`，使真实时长探测能拿到 `voiceId` 和取消检查。
+- `tests/test_video_replacement.py#L1965-L2052`：覆盖整秒档位与余量、环境变量回退粗档位、已排期时长幂等、真实 TTS 时长排期、TTS 失败回落估算、无 job 时不触发探测、默认语速 `5.5` 字/秒。
+- 验证：`tests.test_video_replacement`、`tests.test_video_replacement_v2`、`tests.test_replacement_service` 共 395 条通过；全量 1374 条中仅 `tests.test_ui_feature_visibility`（缺 `backend/.env.dev`）和 playwright 相关用例失败，改动前即存在。
+- 回滚：三个环境变量 `VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15`、`VIDEO_REPLACE_TTS_CHARS_PER_SEC=4.2`、`VIDEO_REPLACE_COMIC_MEASURE_TTS=0` 可分别关闭三项改动；或回滚 `backend/matrix_native_client.py`、`backend/replacement_pipeline.py`、`tests/test_video_replacement.py`、`CHANGELOG.md`、`docs/DEPLOYMENT.md`、`docs/TROUBLESHOOTING.md` 和本文档。不涉及中心服、数据库、OpenAPI、Docker 或 `migration.sql`。
+
+## 2026-08-04 Local replacement web MVP
+- `backend/platform_features.py#L15-L44`: adds the reversible `MATRIX_REPLACEMENT_WEB_ENABLED` feature gate, defaulting off unless the environment value is truthy.
+- `backend/matrix_native_client.py#L683-L710`: writes short-lived native-to-web video handoffs through `create_replacement_web_handoff()`, then builds `/replacement#token=...&user=...&handoffId=...` from the local executor token plus redacted `userId/displayName/orgId/account/appRole/roleScope`, never from the center user session, phone, Cookie, platform auth, or local video path.
+- `backend/matrix_native_client.py#L11719-L11745` and `backend/matrix_native_client.py#L14406-L14416`: add "打开网页版替换" buttons to the native image-note replacement and same-style video replacement pages. The image-note page opens the plain local page; the video page uses the handoff-aware method. **Superseded 2026-08-07**: both buttons were removed and `open_replacement_web_page()` was deleted with them; no native page opens the web replacement page any more.
+- `backend/matrix_native_client.py#L14947-L14959`: `VideoReplacementPage.open_replacement_web()` requires an already-loaded breakdown source and readable local source video before writing the `rwh_...` handoff and opening the web page. **Removed 2026-08-07**; `create_replacement_web_handoff()` is retained for the handoff contract and its tests but no longer has a UI caller.
+- `backend/replacement_web.py#L40-L392`: renders the local `/replacement` HTML page with video and image-note tabs, hash/input token handling, `handoffId` session storage, handoff loading from `/api/replacement/video/handoff`, redacted user context display, customer-facing 401/validation/network/non-JSON error text, Phase 0 video success copy, visual note preview slots, authenticated blob thumbnail loading, copy-candidate radio selection, editable title/body/tags fields, and a note save-draft button that submits `selectedCopyIndex` plus `copyOverride` to `/api/replacement/note/save-draft`.
+- `backend/replacement_web.py#L396-L565`: builds safe preview URLs, validates source URLs, rejects userinfo credentials, stores only host/pathHash, records file metadata, resolves uploaded note thumbnails only inside `replacement_web_uploads/note/<jobId>/`, and redacts Cookie/Token/Authorization/Bearer/data URL/signed URL/base64-like fragments from note inputs and filenames.
+- `backend/replacement_web.py#L567-L719`: creates, loads, expires, and redacts `rwh_...` video handoff JSON. `handoff_response()` returns source host/pathHash, `sourceVideo.available/pathHash`, analysis duration/transcript counts, and user context without exposing `sourceVideoPath` or source URL query strings.
+- `backend/replacement_web.py#L721-L809`: returns redacted job responses and creates video `rvw_...` jobs, optionally binding them to a valid handoff through `sourceContext`; neither path calls LK888, remote AI Canvas, publishing, center sync, or billing.
+- `backend/replacement_web.py#L811-L875`: creates `xnr_...` note preview state by reusing the existing image-note template/preview logic and compatible `xhs_note_replacements/<jobId>/replacement_job.json`.
+- `backend/api_server.py#L1038-L1123`: extracts `save_xhs_note_draft_payload()` so the old XHS note draft endpoint and new `/replacement` endpoint share copy override, image validation, local material copy, library insert, and compatible job persistence.
+- `backend/api_server.py#L5343-L5350`: adds `html_response()` for the local HTML page while preserving CORS and no-store headers.
+- `backend/api_server.py#L7185-L7207`: routes multipart `/api/replacement/video/start` and `/api/replacement/note/start` to local job factories, checks the feature gate before reading multipart bodies, and records structured info logs.
+- `backend/api_server.py#L7286-L7334`: routes `GET /replacement`, authenticated video/note job status reads, authenticated `/api/replacement/video/handoff` handoff reads, and authenticated `/api/replacement/file` thumbnail reads with disabled, missing-job, bad-path, and read-failure JSON errors.
+- `backend/api_server.py#L7466-L7496`: routes `/api/replacement/note/save-draft`, reuses the shared XHS draft save payload helper, replaces the internal XHS job in the HTTP response with the redacted web job response, marks the web job as `draft`, and records redacted `replacement_note_draft_saved` structured logs.
+- `backend/api_server.py#L7558-L7566`: keeps `/api/xhs-note-replacement/save-draft` compatible while delegating to the shared draft save helper.
+- `docs/openapi.yaml#L145-L357`: documents `/replacement` and the seven local `/api/replacement/*` routes, including video handoff, disabled, validation, thumbnail, and save-draft responses.
+- `docs/openapi.yaml#L2320-L2470`: documents replacement start, video handoff, save-draft, and job response schemas without secrets or full private URLs, including optional `handoffId`, `sourceContext`, object-array `copyCandidates`, `files[].previewUrl`, and note `slotMappings[].hasFile`.
+- `docs/API_REFERENCE.md#L829-L918`: documents runtime unit, feature flag, video handoff, request examples, authenticated thumbnail loading, visual preview editing, preview/save-draft boundary, token handling, observability, and rollback.
+- `tests/test_replacement_web_mvp.py#L49-L730`: covers feature gate behavior, page HTML, customer auth/Phase 0 status copy, native launch URL and handoff redaction, handoff response/job binding, note preview editing controls, job validation, upload persistence, safe thumbnail URLs/file serving, compatible XHS preview job creation, local draft saving without local path exposure, secret redaction, route wiring, disabled/missing responses, token-auth boundaries, disabled multipart reads, and docs contracts.
+- Verification and rollback: focused replacement tests, OpenAPI contract tests, adjacent XHS note tests, HTTP smoke, `py_compile`, and `git diff --check` are the release gate. Rollback first sets `MATRIX_REPLACEMENT_WEB_ENABLED=0` and restarts the local executor; code rollback restores the files named in CHANGELOG. No database schema/data migration, Docker image change, LK888 call, remote AI Canvas deploy, publish action, center sync, or billing side effect is introduced.
+
+## 2026-08-04 Installer directory selection
+- `backend/installer/MatrixShipAgent.iss#L18-L25`: the installer keeps the default user-writable `{localappdata}\MatrixShipAgent\app` location and `PrivilegesRequired=lowest`, while `DisableDirPage=no` shows the Inno Setup directory page so users can choose another install path.
+- `tests/test_web_surface_removed.py#L102-L108`: regression coverage locks the default directory, visible directory page, and non-admin install permission.
+- Verification and rollback: RED/GREEN was run for `tests.test_web_surface_removed.WebSurfaceRemovedTest.test_installer_allows_user_to_choose_install_directory` and `test_build_stays_native_only`; full relevant verification should include `tests.test_web_surface_removed` and `py_compile` for the touched test. The change requires rebuilding `backend\dist\installer\MatrixShipAgent-Setup.exe` before release. Roll back `backend/installer/MatrixShipAgent.iss`, `backend/build_matrix_agent.ps1`, `tests/test_web_surface_removed.py`, `CHANGELOG.md`, `docs/TROUBLESHOOTING.md`, and this entry; no center API, OpenAPI, database, Docker, secrets, environment variables, or `migration.sql` impact.
+

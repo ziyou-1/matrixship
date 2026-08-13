@@ -12,6 +12,7 @@ XHS_ENABLED_ENV = "MATRIX_XHS_ENABLED"
 VIDEO_REPLACEMENT_ENABLED_ENV = "MATRIX_VIDEO_REPLACEMENT_ENABLED"
 PENDING_PUBLISH_UI_ENABLED_ENV = "MATRIX_PENDING_PUBLISH_UI_ENABLED"
 DIGITAL_HUMAN_TTS_UPLOAD_ENABLED_ENV = "MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED"
+REPLACEMENT_WEB_ENABLED_ENV = "MATRIX_REPLACEMENT_WEB_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
 _XHS_ALIASES = {"xhs", "xiaohongshu", "rednote", "小红书"}
 
@@ -38,6 +39,10 @@ def pending_publish_ui_enabled(env=None):
 
 def digital_human_tts_upload_enabled(env=None):
     return env_flag_enabled(DIGITAL_HUMAN_TTS_UPLOAD_ENABLED_ENV, env=env)
+
+
+def replacement_web_enabled(env=None):
+    return env_flag_enabled(REPLACEMENT_WEB_ENABLED_ENV, env=env)
 
 
 def filter_xhs_capabilities(capabilities, env=None):

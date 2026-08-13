@@ -587,12 +587,14 @@ class XhsNoteFourImageSmokeTests(unittest.TestCase):
 
 
 class XhsNoteNativeFlowTests(unittest.TestCase):
-    def test_native_collection_hides_note_replace_button_but_keeps_handoff_handler(self):
+    def test_native_collection_has_note_replace_button_and_handoff_handler(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "backend", "matrix_native_client.py"), encoding="utf-8") as f:
             src = f.read()
-        self.assertNotIn("b_note_replace", src)
-        self.assertNotIn("def note_replace", src)
+        # 内容采集页对图文笔记提供"图文同款"入口(小红书大部分是图文，
+        # "分解"只处理视频)。按钮和 note_replace 方法都必须在。
+        self.assertIn("b_note_replace", src)
+        self.assertIn("def note_replace", src)
         self.assertIn('"c_note_replace"', src)
         self.assertIn('elif tag == "c_note_replace"', src)
         self.assertIn('BRIDGE.payload.emit("goto_nav", "🧩 图文同款")', src)
@@ -612,14 +614,14 @@ class XhsNoteNativeDisplayTests(unittest.TestCase):
     def setUp(self):
         self.client.BRIDGE = self.client.Bridge()
 
-    def test_content_page_hides_note_replacement_button(self):
+    def test_content_page_shows_note_replacement_button(self):
         page = self.client.ContentPage()
         try:
             button_texts = [
                 button.text()
                 for button in page.findChildren(self.client.QtWidgets.QPushButton)
             ]
-            self.assertNotIn("\u56fe\u6587\u540c\u6b3e", button_texts)
+            self.assertIn("\u56fe\u6587\u540c\u6b3e", button_texts)
         finally:
             page.deleteLater()
 

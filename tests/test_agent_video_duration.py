@@ -22,7 +22,7 @@ class AgentVideoDurationTest(unittest.TestCase):
 
         self.assertIn("AGENT_VIDEO_DURATIONS = (5, 10)", source)
         self.assertIn("self.b_duration = _icon_text_btn", source)
-        self.assertIn("def _cycle_video_duration(self):", source)
+        self.assertIn("def _pick_video_duration(self):", source)
         self.assertIn('"duration": self._current_video_duration()', source)
         self.assertIn("dur = _agent_video_request_duration(model, entry.get(\"duration\"))", source)
         self.assertNotIn("dur = 5\n    model =", source)
@@ -440,7 +440,7 @@ class AgentVideoDurationTest(unittest.TestCase):
             "sora-2": 2,
             "veo3.1": 3,
             "pixverse-v6-shouweizhen": 2,
-            "grok-video-3": 0,
+            "grok-video-3": 1,
             "grok-imagine-video-1.5-preview": 1,
             "happyhorse-i2v": 1,
             "hailuo-2.3": 1,
@@ -553,7 +553,9 @@ class AgentVideoDurationTest(unittest.TestCase):
         self.assertEqual(9, wan_ref["params"]["duration"])
         self.assertEqual("720P", wan_ref["params"]["resolution"])
         self.assertEqual("9:16", wan_ref["params"]["ratio"])
-        self.assertEqual(refs[:4], wan_ref["params"]["images"])
+        # 万相 2.7 参考生真实字段是 reference_urls（此前误写 images,模型收不到参考图）。
+        self.assertEqual(refs[:4], wan_ref["params"]["reference_urls"])
+        self.assertNotIn("images", wan_ref["params"])
 
         self.assertEqual(9, wan_frames["params"]["duration"])
         self.assertEqual("720P", wan_frames["params"]["resolution"])
@@ -626,7 +628,20 @@ class AgentVideoDurationTest(unittest.TestCase):
         self.assertEqual("vertical_hd", payload["params"]["size"])
         self.assertNotIn("aspect_ratio", payload["params"])
         self.assertNotIn("resolution", payload["params"])
-        self.assertNotIn("images", payload["params"])
+        # schema:images 可选、1 张作首帧。传了就要发出去 —— 此前写死 0 张,
+        # 界面上根本不给传图,而 lk888 自己的表单是可以传的。
+        self.assertEqual(["https://assets.example/ref.png"], payload["params"]["images"])
+        # 只发 schema 声明的 images,不发那一堆顶层别名
+        for alias in ("image_urls", "images", "reference_images", "referenceImages"):
+            self.assertNotIn(alias, payload)
+
+    def test_agent_grok_video3_without_a_reference_stays_text_to_video(self):
+        module = load_client_module("matrix_native_client_agent_grok_video3_t2v_test")
+
+        payload = module._agent_video_payload("grok-video-3", "prompt", 10, "16:9", [])
+
+        self.assertNotIn("images", payload["params"], "不传图时是文生视频,别塞空 images")
+        self.assertEqual("horizontal_hd", payload["params"]["size"])
 
     def test_agent_grok_imagine_video15_catalog_and_payload_match_lk888(self):
         module = load_client_module("matrix_native_client_agent_grok_imagine_video15_payload_test")
@@ -739,19 +754,23 @@ class AgentVideoDurationTest(unittest.TestCase):
 
         self.assertFalse(wan_ref["video_required"])
         self.assertEqual(1, wan_ref["video_limit"])
-        self.assertEqual("video", wan_ref["video_field"])
+        # 真实 LK888 字段:参考视频 reference_video（此前误写 video）。
+        self.assertEqual("reference_video", wan_ref["video_field"])
 
         self.assertTrue(vidu_turbo["image_required"])
         self.assertEqual(2, vidu_turbo["image_limit"])
         self.assertFalse(vidu_ref["image_required"])
         self.assertEqual(7, vidu_ref["image_limit"])
 
-    def test_agent_reference_video_button_follows_model_media_contract(self):
+    def test_agent_reference_media_buttons_follow_model_media_contract(self):
         src = CLIENT.read_text(encoding="utf-8")
 
         self.assertIn("_agent_video_media_requirements(cur)", src)
-        self.assertIn("supports_reference_video", src)
-        self.assertIn("self.ref_video_btn.setVisible(supports_reference_video)", src)
+        # 视频和音频走同一段按钮显隐逻辑,按各自的 *_limit 决定
+        self.assertIn('for kind, button in (("video", getattr(self, "ref_video_btn", None)),', src)
+        self.assertIn('("audio", getattr(self, "ref_audio_btn", None))):', src)
+        self.assertIn('limit = int(media.get("%s_limit" % kind) or 0) if self._mode == "video" else 0', src)
+        self.assertIn("button.setVisible(limit > 0)", src)
         self.assertNotIn("is_motion = self._mode == \"video\"", src)
 
     def test_agent_hailuo23_contract_matches_lk888(self):
@@ -856,7 +875,9 @@ class AgentVideoDurationTest(unittest.TestCase):
                 module._prodgen_run_video(entry)
 
         payload = media.call_args.args[1]
-        self.assertEqual("https://assets.example/reference.mp4", payload["params"]["video"])
+        # 参考视频写进真实字段 reference_video（此前误写 video）。
+        self.assertEqual("https://assets.example/reference.mp4", payload["params"]["reference_video"])
+        self.assertNotIn("video", payload["params"])
         self.assertEqual(12, payload["params"]["duration"])
         self.assertEqual("video", upload.call_args.args[2])
 

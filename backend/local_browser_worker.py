@@ -14,7 +14,7 @@ action now runs in the user's own browser + residential IP, so the central IP is
 never what platforms see.
 
 Config (env or %APPDATA%/MatrixShipAgent/data/client_config.json):
-  MATRIX_CENTRAL   central base url        (default http://39.105.120.104)
+  MATRIX_CENTRAL   central base url        (default https://central.yunlingai.net)
   MATRIX_USER_TOKEN  SaaS user session token (required; set via pairing in Phase 3)
   MATRIX_ORG_ID    organization id        (default org-default)
   LOCAL_API        local engine base url   (default http://127.0.0.1:9081)
@@ -104,7 +104,7 @@ def load_config() -> Dict[str, Any]:
             cfg = json.load(open(p, "r", encoding="utf-8-sig")) or {}  # utf-8-sig tolerates a BOM
     except Exception:
         cfg = {}
-    cfg["central"] = (os.getenv("MATRIX_CENTRAL") or cfg.get("central") or "http://39.105.120.104").rstrip("/")
+    cfg["central"] = (os.getenv("MATRIX_CENTRAL") or cfg.get("central") or "https://central.yunlingai.net").rstrip("/")
     cfg["token"] = (os.getenv("MATRIX_USER_TOKEN") or cfg.get("token") or "").strip()
     cfg["orgId"] = (os.getenv("MATRIX_ORG_ID") or cfg.get("orgId") or "org-default").strip()
     cfg["localApi"] = (os.getenv("LOCAL_API") or cfg.get("localApi") or "http://127.0.0.1:9081").rstrip("/")
@@ -146,7 +146,7 @@ def ensure_paired(cfg, code=""):
             code = ""
     if not code:
         return cfg
-    res = redeem_pairing(cfg.get("central") or "http://39.105.120.104", code)
+    res = redeem_pairing(cfg.get("central") or "https://central.yunlingai.net", code)
     if res.get("ok"):
         cfg["token"] = res.get("token") or cfg.get("token")
         cfg["orgId"] = res.get("orgId") or cfg.get("orgId")

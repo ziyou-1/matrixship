@@ -123,8 +123,16 @@ MAINDB_SIGNUP_BONUS = float(os.getenv("MAINDB_SIGNUP_BONUS", "0") or 0)
 # matrixship 生成在漫剧成本价(model_prices)基础上的加价倍率(只影响 matrixship,漫剧画布不受影响)。
 # 一个 env 就能调整全站加价;默认 ×3(留出零售利润)。
 MAINDB_PRICE_MULTIPLIER = float(os.getenv("MAINDB_PRICE_MULTIPLIER", "3") or 3)
-# 漫剧算力充值汇率:1 元 = N 算力(与漫剧 recharge_packages 一致:50元=500算力 → 10)
-MAINDB_YUAN_TO_POWER = float(os.getenv("MAINDB_YUAN_TO_POWER", "10") or 10)
+# 算力汇率:1 元 = N 算力。
+#
+# 2026-08-06 修正为 1。此前是 10,依据是"与漫剧 recharge_packages 一致:50元=500算力",
+# 但线上 recharge_packages 实际是 50元档=50算力、100元档=105、500元档=550、1000元档=1150,
+# 即**本来就是 1 元 ≈ 1 算力**(多充有梯度赠送)。用户按 1:1 买进,矩阵侧却按 10 倍扣,
+# 等于十倍超收。核对方式:SELECT name, amount, beans, bonus_beans FROM recharge_packages。
+#
+# 这一个常量同时决定扣费(maindb_power_from_yundou)和微信充值入账(create_recharge_order),
+# **不要拆成两个**:只改一边就是 10 倍定价错误,方向取决于改了哪边。
+MAINDB_YUAN_TO_POWER = float(os.getenv("MAINDB_YUAN_TO_POWER", "1") or 1)
 LEGAL_TERMS_VERSION = os.getenv("LEGAL_TERMS_VERSION", "1.0") or "1.0"
 LEGAL_PRIVACY_VERSION = os.getenv("LEGAL_PRIVACY_VERSION", "1.0") or "1.0"
 LEGAL_EFFECTIVE_DATE = os.getenv("LEGAL_EFFECTIVE_DATE", "2026-07-15") or "2026-07-15"
@@ -148,6 +156,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(MATERIALS_DIR, exist_ok=True)
 os.makedirs(MATERIAL_QUARANTINE_DIR, exist_ok=True)
 LOCK = threading.RLock()
+
+
+def _xhs_route_blocked(route="", task_type="", stage="route"):
+    """Return the platform_disabled payload, or None when the recovery switch is on.
+
+    恢复开关 MATRIX_XHS_ENABLED=1 必须在中心服这一侧真的放行:本地客户端和本地
+    执行器各自读同一个环境变量,只有中心服拦死时,内容采集搜索会固定失败在
+    `搜索失败:platform_disabled`。
+    """
+    if xhs_enabled():
+        return None
+    return _xhs_disabled(route=route, task_type=task_type, stage=stage)
 
 
 def _xhs_disabled(route="", task_type="", stage="route"):
@@ -3814,7 +3834,21 @@ def user_has_arrears(user_id):
             return bool(u.get("arrears"))
 
 
-def charge_user_allow_arrears(user_id, amount, reason="LK888实际扣费", ref="", meta=None):
+def charge_user_actual_cost(user_id, amount, reason="LK888实际扣费", ref="", meta=None):
+    """按上游返回的**实际成本**扣费。
+
+    2026-08-06 改造(与漫剧侧对齐):
+      * 漫剧账号走 maindb.charge_actual_cost():扣款与流水同一事务,写 model_usage_logs
+        和 computing_power_records —— 漫剧的消费账单界面因此能看到矩阵侧的消费。
+      * 幂等改由数据库的 request_id 唯一索引保证。旧实现靠反向扫描 STATE["ledger"],
+        而该账本会被截断到 8000 条,且"查重"与"扣款"不在同一把锁里 —— 两个并发结算
+        可以同时查不到、同时扣款。
+      * **不再写 JSON 账本**:collect_billing_records() 会合并 JSON 与 MySQL 两个来源,
+        双写会让同一笔在账户中心出现两条(只靠 ref 去重太脆弱)。MySQL 是唯一权威。
+      * 余额不足**直接拒绝**,不再允许扣成负数(函数原名 charge_user_allow_arrears)。
+
+    返回 (ok, balance_after, error),与旧签名一致。
+    """
     try:
         amount = round(float(amount or 0), 6)
     except Exception:
@@ -3823,32 +3857,31 @@ def charge_user_allow_arrears(user_id, amount, reason="LK888实际扣费", ref="
         return True, get_balance(user_id), None
     if user_id == "user-owner":
         return True, float("inf"), None
+    if maindb_on() and isinstance(user_id, int):
+        amount_power = maindb_power_from_yundou(amount)
+        meta = meta if isinstance(meta, dict) else {}
+        try:
+            # 不要把 LK888 的任务号塞进 task_id:该列是指向 generation_tasks.id 的外键,
+            # 写入外部任务号会触发 1452 外键错误。任务号本身已经在 request_id 里
+            # (ref = "lk888:<taskId>"),需要时从那里取。
+            status, charged, bal, err = maindb.charge_actual_cost(
+                user_id,
+                amount_power,
+                request_id=ref,
+                model_id=str(meta.get("modelId") or ""),
+                description=reason,
+                allow_arrears=False,
+            )
+        except Exception as e:
+            return False, get_balance(user_id), str(e)[:80]
+        if status in ("charged", "duplicate"):
+            return True, bal, None
+        return False, bal, err or status
+    # 本地(非漫剧)账号仍走 JSON 钱包
     with LOCK:
         for it in reversed(STATE.get("ledger") or []):
             if it.get("userId") == user_id and it.get("ref") == ref and float(it.get("delta") or 0) < 0:
                 return True, get_balance(user_id), None
-    if maindb_on() and isinstance(user_id, int):
-        amount_power = maindb_power_from_yundou(amount)
-        try:
-            conn = maindb._conn()
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE users SET computing_power = computing_power - %s, updated_at=NOW() WHERE id=%s",
-                    (str(amount_power), int(user_id)),
-                )
-                if cur.rowcount != 1:
-                    return False, get_balance(user_id), "user_not_found"
-            bal = get_balance(user_id)
-            with LOCK:
-                item = _add_maindb_generic_ledger(user_id, amount_power, amount, reason, ref, bal)
-                item["billingSource"] = "lk888_actual"
-                item["arrears"] = float(bal or 0) < 0
-                if isinstance(meta, dict):
-                    item.update({k: v for k, v in meta.items() if k not in ("Cookie", "Token", "Authorization")})
-                persist()
-            return True, bal, None
-        except Exception as e:
-            return False, get_balance(user_id), str(e)[:80]
     with LOCK:
         u = next((x for x in STATE.get("users") or [] if x.get("id") == user_id), None)
         if not u:
@@ -4082,7 +4115,7 @@ def settle_lk888_actual_charge(user_id, amount, ref="", model="", task_id="", me
             charge_meta["ts"] = float(usage_ts)
     except Exception:
         pass
-    return charge_user_allow_arrears(
+    return charge_user_actual_cost(
         user_id,
         amount,
         reason="LK888实际扣费 " + str(model or "")[:40],
@@ -4152,7 +4185,7 @@ def charge_capability_user(user_id, capability="", requested_amount=None, ref=""
     if cap in LK888_PROXY_CHARGED_CAPABILITIES:
         return True, get_balance(user_id), None
     if allow_arrears:
-        return charge_user_allow_arrears(user_id, amount_yundou, reason=reason, ref=ref, meta=meta)
+        return charge_user_actual_cost(user_id, amount_yundou, reason=reason, ref=ref, meta=meta)
     if user_id == "user-owner":
         return True, float("inf"), None
     if maindb_on() and isinstance(user_id, int):
@@ -7263,7 +7296,9 @@ def pick_node(task=None):
 def create_task(path, method="POST", body=None, wait_sec=None, preferred_node=None):
     body = body or {}
     if str(path or "").startswith("/api/xhs") or payload_uses_xhs(body):
-        return None, _xhs_disabled(route=path, stage="task_preflight"), 404
+        blocked = _xhs_route_blocked(route=path, stage="task_preflight")
+        if blocked is not None:
+            return None, blocked, 404
     recover_stale_tasks(normalize_org_id((body or {}).get("orgId")), dry_run=False, limit=50)
     tid = uuid.uuid4().hex
     if wait_sec is None:
@@ -14728,11 +14763,13 @@ def local_browser_create_task(handler, body):
     user = current_user(handler) or {}
     task_type = (body.get("type") or "xhs.discover").strip()
     if task_type.lower().startswith("xhs.") or payload_uses_xhs(body):
-        return _xhs_disabled(
+        blocked = _xhs_route_blocked(
             route="/api/local-browser/task",
             task_type=task_type,
             stage="task_preflight",
-        ), 404
+        )
+        if blocked is not None:
+            return blocked, 404
     if task_type not in LOCAL_BROWSER_ALLOWED_TYPES:
         return {"ok": False, "error": "unsupported_local_browser_task", "type": task_type}, 400
     payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
@@ -16262,7 +16299,9 @@ class Handler(BaseHTTPRequestHandler):
 
             body = read_body(self)
             if path.startswith("/api/xhs") or payload_uses_xhs(body):
-                return json_response(self, _xhs_disabled(route=path, stage="payload"), 404)
+                blocked = _xhs_route_blocked(route=path, stage="payload")
+                if blocked is not None:
+                    return json_response(self, blocked, 404)
 
             if path == MINIMAX_GENERATE_PATH:
                 return minimax_generate(self, body)

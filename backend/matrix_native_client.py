@@ -41,6 +41,11 @@ from utils.video_transcription import (
     transcribe_audio_chunks,
     validate_service_url,
 )
+from replacement_analysis import (
+    breakdown_visual_failure as _breakdown_visual_failure,
+    _visual_status_failed,
+    _visual_status_ok,
+)
 from runtime_paths import ensure_agent_data_dir
 from platform_features import (
     digital_human_tts_upload_enabled,
@@ -52,16 +57,51 @@ from platform_features import (
 import requests
 from PySide6 import QtCore, QtGui, QtWidgets
 
-CENTRAL = validate_service_url(
-    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL") or "http://127.0.0.1:9080"
+
+def validate_central_service_url(value):
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("central URL must be an absolute http/https URL")
+    return url
+
+
+# 默认必须是公网中心服,且必须是 HTTPS,并且用**独立子域**(path 为空)。
+#
+# 三条约束各有来历:
+#   * 默认指向 127.0.0.1 会让公网安装的客户端在登录页直接报 WinError 10061,
+#     因为普通用户机器上没有中心服进程(2026-08-04 线上事故)。
+#   * 明文 HTTP 会让登录密码和会话 token 明文过公网,并被
+#     utils.video_transcription.validate_service_url() 以
+#     "http is allowed only for loopback hosts" 拒绝,分解视频的音频转写因此失败。
+#   * 用独立子域而不是在共享站点上挂路径前缀:带前缀时,凡是拿 URL 的 path 与
+#     "/api/..." 字面量比较的地方都会静默失配(丢鉴权头 401、参考图被悄悄丢弃),
+#     中心服 _central_base() 按 Host 重建 URL 时还会把前缀丢掉;共享 vhost 也会
+#     让 X-Matrix-User-Token 的作用域只剩一处 path 判断在兜底。
+#
+# 本机开发调试请显式设置 MATRIX_CENTRAL=http://127.0.0.1:9080(回环地址豁免 HTTPS)。
+CENTRAL = validate_central_service_url(
+    os.getenv("MATRIX_CENTRAL") or os.getenv("CENTRAL_URL")
+    or "https://central.yunlingai.net"
 ).rstrip("/")
+
+
+def central_library_file_prefix(central_parsed=None):
+    """中心素材库文件接口的绝对 path 前缀,用于判断某个 URL 是否属于本中心服。
+
+    正常情况下 CENTRAL 的 path 为空,返回值就是 "/api/library/file/",与写死字面量
+    完全等价。保留这层是为了让判断对"CENTRAL 带路径前缀"免疫 —— 那种情况下写死
+    字面量会静默失配:要么丢掉鉴权头拿到 401,要么直接返回空串把参考图悄悄丢掉,
+    两种都没有明显报错,极难排查。
+    """
+    parsed = central_parsed if central_parsed is not None else urlparse(CENTRAL)
+    return (parsed.path or "").rstrip("/") + "/api/library/file/"
 APP_NAME = "MatrixShipAgent"
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 ACCENT = "#6366f1"
 XHS_PLATFORM_LABEL = "小" + "红书"
 XHS_PLATFORM_CODE = "x" + "hs"
 SAME_STYLE_REPLACEMENT_NAV = "🧬 同款替换"
-SAME_STYLE_REPLACEMENT_TOOLTIP = "功能完善中，敬请期待"
 LEGAL_TERMS_VERSION = os.getenv("LEGAL_TERMS_VERSION", "1.0") or "1.0"
 LEGAL_PRIVACY_VERSION = os.getenv("LEGAL_PRIVACY_VERSION", "1.0") or "1.0"
 LEGAL_EFFECTIVE_DATE = os.getenv("LEGAL_EFFECTIVE_DATE", "2026-07-15") or "2026-07-15"
@@ -662,6 +702,51 @@ def set_auth_context(payload):
         _SHARED["memberships"] = payload.get("memberships") or []
 
 
+def replacement_web_user_context():
+    with _SLOCK:
+        user = _SHARED.get("user") if isinstance(_SHARED.get("user"), dict) else {}
+        return {
+            "userId": str(user.get("id") or user.get("userId") or "").strip(),
+            "displayName": str(
+                user.get("displayName")
+                or user.get("display_name")
+                or user.get("name")
+                or _SHARED.get("account")
+                or ""
+            ).strip(),
+            "orgId": str(_SHARED.get("org") or "org-default").strip() or "org-default",
+            "account": account_key(_SHARED.get("account") or "default"),
+            "appRole": str(_SHARED.get("appRole") or "normal_user").strip() or "normal_user",
+            "roleScope": str(_SHARED.get("roleScope") or "self").strip() or "self",
+        }
+
+
+def create_replacement_web_handoff(source, ttl_sec=3600):
+    import replacement_web
+
+    return replacement_web.create_video_handoff(
+        data_dir(),
+        source if isinstance(source, dict) else {},
+        user=replacement_web_user_context(),
+        ttl_sec=ttl_sec,
+    )
+
+
+def replacement_web_launch_url(handoff_id=""):
+    import json as _json
+
+    port = str(os.environ.get("API_PORT") or "9081").strip() or "9081"
+    token = str(os.environ.get("MATRIX_AGENT_TOKEN") or "").strip()
+    params = {}
+    if token:
+        params["token"] = token
+    params["user"] = _json.dumps(replacement_web_user_context(), ensure_ascii=False, separators=(",", ":"))
+    handoff_id = str(handoff_id or "").strip()
+    if handoff_id:
+        params["handoffId"] = handoff_id
+    return "http://127.0.0.1:%s/replacement#%s" % (port, urlencode(params))
+
+
 def product_role():
     with _SLOCK:
         role = _SHARED.get("appRole") or "normal_user"
@@ -1159,9 +1244,37 @@ def _headers():
     return h
 
 
+def _build_central_session():
+    """给中心服请求装上连接复用 + 仅限建连阶段的重试。
+
+    两个都要:
+      * 复用连接。原实现每次调用都新建 TCP+TLS,握手一旦间歇失败,每个请求都独立
+        中招。账户中心一屏要发好几个请求,所以特别容易看到"账单数据暂时不可用"。
+      * 重试。但**只重试 connect**(read=0, status=0):TLS 握手失败意味着服务端
+        根本没收到请求,重发是安全的;而读阶段失败可能是服务端已经处理过了,
+        盲目重发会重复扣费。
+    """
+    session = requests.Session()
+    try:
+        from urllib3.util.retry import Retry
+        retry = Retry(total=3, connect=3, read=0, status=0,
+                      backoff_factor=0.5, allowed_methods=None,
+                      raise_on_status=False)
+        adapter = requests.adapters.HTTPAdapter(max_retries=retry,
+                                                pool_connections=8, pool_maxsize=16)
+    except Exception:
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_CENTRAL_SESSION = _build_central_session()
+
+
 def api(method, path, body=None, timeout=60):
     try:
-        r = requests.request(method, CENTRAL + path, headers=_headers(), json=body, timeout=timeout)
+        r = _CENTRAL_SESSION.request(method, CENTRAL + path, headers=_headers(), json=body, timeout=timeout)
         try:
             return r.status_code, r.json()
         except Exception:
@@ -1303,7 +1416,16 @@ def merge_account_sources(central_accounts, local_accounts):
             item.setdefault("nodeId", central.get("nodeId") or "")
             item.setdefault("nodeName", central.get("nodeName") or "")
         item["cookieReady"] = bool(row.get("cookieReady", central.get("cookieReady")))
-        item["online"] = bool(row.get("online", central.get("online")))
+        online = row.get("online")
+        if online is None:
+            online = central.get("online")
+        if online is None:
+            # 小红书等账号只上报 usable/cookieReady,不带 online 字段;
+            # 缺省时按可用性推断在线,避免已登录账号在风控中心/账号矩阵被误判为离线。
+            online = row.get("usable")
+        if online is None:
+            online = item["cookieReady"]
+        item["online"] = bool(online)
         item["status"] = row.get("status") or ("online" if item.get("online") and item.get("cookieReady") else "offline")
         merged.append(item)
         seen.add(key)
@@ -2235,10 +2357,24 @@ def lk888_image_data_url(prompt, size="1024x1024", model=None):
     return lk888_image_result(prompt, size=size, model=model)
 
 
-def _extract_lk888_media_url(obj, exts):
-    """Extract generated media URL from LK888 task status, including signed URLs without file suffix."""
+def _extract_lk888_media_url(obj, exts, exclude=None):
+    """Extract generated media URL from LK888 task status, including signed URLs without file suffix.
+
+    exclude:本次请求**传进去的**素材 URL。任务状态里常常回显请求参数,而参考图和成品都是 .png,
+    只按后缀挑就会把用户自己上传的原图当成生成结果下载下来(用户看到「生成的图和上传的一模一样」)。
+    这里把输入排除掉,继续往后找真正的结果。
+    """
     import re
     want = tuple("." + str(x).lower().lstrip(".") for x in (exts or []) if x)
+
+    def identity(url):
+        # 比对用的规范形式:去掉 query(签名 URL 每次签名都不同)与大小写、尾斜杠差异。
+        # 写成内嵌函数是因为 tests/test_lk888_media_task_parsing.py 会把本函数单独抽出来 exec,
+        # 引用模块级 helper 会 NameError。
+        text = str(url or "").strip().split("?", 1)[0].split("#", 1)[0]
+        return text.rstrip("/").lower()
+
+    skip = {identity(u) for u in (exclude or []) if str(u or "").strip()}
     preferred_keys = (
         "video_url", "videoUrl", "output_url", "outputUrl", "result_url", "resultUrl",
         "download_url", "downloadUrl", "file_url", "fileUrl", "media_url", "mediaUrl",
@@ -2267,6 +2403,8 @@ def _extract_lk888_media_url(obj, exts):
                 if found:
                     return found
         elif isinstance(value, str) and url_re.match(value):
+            if identity(value) in skip:
+                return ""                       # 这是本次请求传进去的素材,不是生成结果
             if has_wanted_suffix(value):
                 return value
             hint = key_hint.lower()
@@ -2302,9 +2440,13 @@ def _lk888_task_failed(obj):
     )
 
 
-def lk888_media_task(model, payload, exts, progress=None, tries=110, cancel_check=None):
+def lk888_media_task(model, payload, exts, progress=None, tries=110, cancel_check=None, exclude_urls=None,
+                     on_result=None):
     """通用 lk888 异步媒体生成:POST /v1/media/generate → 轮询 /v1/skills/task-status → 结果 URL。
-    exts=文件后缀列表(如 ['mp4'] / ['mp3','wav']);progress(i) 每轮回调。"""
+    exts=文件后缀列表(如 ['mp4'] / ['mp3','wav']);progress(i) 每轮回调。
+    exclude_urls=本次传进去的素材 URL,防止把请求里回显的参考图当成生成结果。
+    on_result(url, task_id)=拿到结果后、返回前回调。调用方靠它在下载之前把结果落盘,
+    否则下载一失败,这个**已经产生了费用**的成品就再也找不回来了。"""
     cfg = lk888_config()
     base = (cfg.get("base_url") or "").rstrip("/")
     key = cfg.get("api_key") or ""
@@ -2345,8 +2487,13 @@ def lk888_media_task(model, payload, exts, progress=None, tries=110, cancel_chec
         if callable(cancel_check) and cancel_check():
             raise RuntimeError("lk888_task_cancelled")
         last_summary = _lk888_task_status_summary(status_obj)
-        url = _extract_lk888_media_url(status_obj, exts)
+        url = _extract_lk888_media_url(status_obj, exts, exclude=exclude_urls)
         if url:
+            if callable(on_result):
+                try:
+                    on_result(url, task)
+                except Exception as ex:      # 落盘失败不能反过来把已生成的结果弄丢
+                    log("lk888 on_result hook failed: %s" % str(ex)[:120])
             return url
         if _lk888_task_failed(status_obj):
             raise RuntimeError("%s 生成失败:%s" % (model, last_summary))
@@ -2444,6 +2591,21 @@ def lk888_vision(prompt, media_urls=None, model="gemini-3.1-pro-preview", max_to
 
 _LK888_MODEL_CACHE = {"ts": 0.0, "rows": []}
 _LK888_MODEL_CACHE_TTL = 300.0
+# ---- 单模型表单 schema(GET /lk888/v1/skills/models/{name})----
+# LK888 为每个模型公开一份表单描述:input_hint + params[{name,label,type,required,description,options}]。
+# Agent.模式的参数控件按这份描述渲染,而不是把每个模型的参数名和取值写死在客户端。
+# 与 _LK888_MODEL_CACHE 的区别:那个是裸 dict 且失败按成功 TTL 缓存 300 秒;这里失败单独走短 TTL 负缓存,
+# 并且复合读改写全程持锁(UI 线程读、后台线程写)。
+_LK888_SCHEMA_MEM = {}                 # name -> {"ts": float, "ok": bool, "schema": dict}
+_LK888_SCHEMA_LOCK = threading.Lock()
+_LK888_SCHEMA_TTL_OK = 86400.0         # schema 准静态,一天足够
+_LK888_SCHEMA_TTL_FAIL = 120.0         # 负缓存要短,别被一次 502 冻住
+_LK888_SCHEMA_MEM_MAX = 200
+_LK888_SCHEMA_DISK_MAX = 200
+_LK888_SCHEMA_DISK_VERSION = 1
+# 实测 https://api.lk888.ai/v1/skills/models/{name} 与 /api/v1/skills/models/{name} 同源同结果,
+# 中心服 lk888_proxy 把 /lk888/<子路径> 原样转给 api.lk888.ai,所以这里只需要一条路径。
+_LK888_SCHEMA_PATH = "/lk888/v1/skills/models/%s"
 _LK888_FALLBACK_MODELS = [
     {"name": "gpt-image-2", "display_name": "GPT Image 2", "type": "image", "endpoint": "media"},
     {"name": "gpt-image-2-guan", "display_name": "GPT Image 2 Official", "type": "image", "endpoint": "media"},
@@ -2523,7 +2685,9 @@ _AGENT_VIDEO_REFERENCE_LIMITS = {
     "pixverse-v6-shouweizhen": 2,
     "veo3.1": 3,
     "sora-2": 2,
-    "grok-video-3": 0,
+    # schema:images 可选、1 张作首帧,「不传则为文生视频」。此前写 0 是没有依据的猜测,
+    # 导致界面上根本不给传图,而 lk888 自己的表单是可以传的。
+    "grok-video-3": 1,
     "grok-imagine-video-1.5-preview": 1,
     "happyhorse-t2v": 0,
     "happyhorse-i2v": 1,
@@ -2531,6 +2695,7 @@ _AGENT_VIDEO_REFERENCE_LIMITS = {
     "happyhorse-1.1-r2v": 5,
     "happyhorse-video-edit": 5,
     "hailuo-2.3": 1,
+    "hailuo-h3-quannengcankao": 9,
     "wan2.7-cankaosheng": 4,
     "wan2.7-shouweizhen": 2,
 }
@@ -2546,7 +2711,7 @@ _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
     "wan2.7-cankaosheng": {
         "video_required": False,
         "video_limit": 1,
-        "video_field": "video",
+        "video_field": "reference_video",
     },
     "wan2.7-shouweizhen": {"image_required": True},
     "kling-v3-omni-shouweizhen": {"image_required": True},
@@ -2564,6 +2729,43 @@ _AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES = {
 }
 
 
+def _agent_schema_media_defaults(model):
+    """从模型自己的 schema 推出视频/音频上传契约。
+
+    手写的 `_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES` 只覆盖了想起来加的那几个模型,
+    其余声明了 video/audio 上传的模型在界面上根本没有入口(用户:「有的模型可以上传视频,
+    为什么输入框里只能传图片」)。这里按 schema 补全,手写覆盖仍然优先 —— 那些是线上验证过的。
+    """
+    out = {}
+    try:
+        schema, _source = _lk888_model_schema_cached(model)
+        form = _agent_schema_form(model, "video", schema, _source)
+    except Exception:
+        return out
+    for upload in form.get("uploads") or []:
+        media = upload.get("media")
+        if media not in ("video", "audio"):
+            continue
+        if out.get("%s_limit" % media):
+            continue                     # 同一类型只认第一个,和参考图的角色去重同理
+        out["%s_limit" % media] = max(1, int(upload.get("limit") or 1))
+        out["%s_field" % media] = upload.get("name") or media
+        out["%s_required" % media] = bool(upload.get("required"))
+        out["%s_is_array" % media] = bool(upload.get("is_array"))
+    return out
+
+
+def _agent_media_url_list(value):
+    """把「单个字符串」或「字符串列表」统一成去重后的非空列表。"""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out = []
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 def _agent_video_media_requirements(model):
     """Return the LK888 media contract used by both Agent UI and payloads."""
     model = str(model or "").strip()
@@ -2573,10 +2775,13 @@ def _agent_video_media_requirements(model):
         "video_required": False,
         "video_limit": 0,
         "video_field": "video",
+        "video_is_array": False,
         "audio_required": False,
         "audio_limit": 0,
         "audio_field": "audio",
+        "audio_is_array": False,
     }
+    requirements.update(_agent_schema_media_defaults(model))
     requirements.update(_AGENT_VIDEO_MEDIA_REQUIREMENT_OVERRIDES.get(model) or {})
     requirements["image_limit"] = max(0, int(requirements.get("image_limit") or 0))
     requirements["video_limit"] = max(0, int(requirements.get("video_limit") or 0))
@@ -2669,18 +2874,30 @@ def _agent_image_endpoint(model):
         return "media"
     return "images"
 
+# 像素档位 ↔ 画面比例。图片模式的请求只由 size 决定(_prodgen_run_image 只把 size 传下去),
+# 所以「界面显示的比例」和「实际发出的比例」必须由同一张表推,否则界面说 16:9、上游收到 3:2。
+_AGENT_SIZE_TO_ASPECT = {
+    "1024x1024": "1:1", "2048x2048": "1:1", "2880x2880": "1:1",
+    "1024x1536": "2:3", "2048x3072": "2:3", "2304x3456": "2:3",
+    "1536x1024": "3:2", "3072x2048": "3:2", "3456x2304": "3:2",
+    "960x1280": "3:4", "1920x2560": "3:4", "2400x3200": "3:4",
+    "1280x960": "4:3", "2560x1920": "4:3", "3200x2400": "4:3",
+    "1088x1920": "9:16", "1440x2560": "9:16", "2160x3840": "9:16",
+    "1920x1088": "16:9", "2560x1440": "16:9", "3840x2160": "16:9",
+}
+# 反向表取每个比例的 1K 档(dict 保持插入序,第一个就是最小档)。由同一份数据推导,不会漂移。
+_AGENT_ASPECT_TO_SIZE = {}
+for _size, _aspect in _AGENT_SIZE_TO_ASPECT.items():
+    _AGENT_ASPECT_TO_SIZE.setdefault(_aspect, _size)
+del _size, _aspect
+
+
 def _agent_aspect_from_size(size, default="1:1"):
-    text = str(size or "").strip().lower()
-    mapping = {
-        "1024x1024": "1:1", "2048x2048": "1:1", "2880x2880": "1:1",
-        "1024x1536": "2:3", "2048x3072": "2:3", "2304x3456": "2:3",
-        "1536x1024": "3:2", "3072x2048": "3:2", "3456x2304": "3:2",
-        "960x1280": "3:4", "1920x2560": "3:4", "2400x3200": "3:4",
-        "1280x960": "4:3", "2560x1920": "4:3", "3200x2400": "4:3",
-        "1088x1920": "9:16", "1440x2560": "9:16", "2160x3840": "9:16",
-        "1920x1088": "16:9", "2560x1440": "16:9", "3840x2160": "16:9",
-    }
-    return mapping.get(text, default)
+    return _AGENT_SIZE_TO_ASPECT.get(str(size or "").strip().lower(), default)
+
+
+def _agent_size_from_aspect(aspect, default=""):
+    return _AGENT_ASPECT_TO_SIZE.get(str(aspect or "").strip().lower(), default)
 
 def _agent_orientation_from_aspect(aspect):
     aspect = str(aspect or "").strip()
@@ -2738,8 +2955,12 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
     media = _agent_video_media_requirements(model)
     refs = [str(url).strip() for url in (reference_urls or []) if str(url or "").strip()]
     refs = refs[:media["image_limit"]]
-    video_url = str(reference_video_url or "").strip()
-    audio_url = str(reference_audio_url or "").strip()
+    # 视频/音频都可能是多个(wan2.7-xuxie 的 clips 上限 10、hailuo-h3-quannengcankao 的 video_url 上限 3),
+    # 但历史调用方传的是单个字符串,两种都要收。
+    video_urls = _agent_media_url_list(reference_video_url)[:max(0, int(media.get("video_limit") or 0))]
+    audio_urls = _agent_media_url_list(reference_audio_url)[:max(0, int(media.get("audio_limit") or 0))]
+    video_url = video_urls[0] if video_urls else ""
+    audio_url = audio_urls[0] if audio_urls else ""
     if media["image_required"] and not refs:
         raise RuntimeError("需要上传参考图")
     if media["video_required"] and not video_url:
@@ -2814,12 +3035,23 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
         if model == "wan2.7-cankaosheng":
             params["ratio"] = ar
     payload = {"prompt": prompt[:600], "params": params}
+    if model == "wan2.7-cankaosheng":
+        # 真实 LK888 字段:参考图走 reference_urls、参考视频走 reference_video。
+        # 旧代码把参考图写进 images/image_urls/reference_images、参考视频写进 video,
+        # 该模型都收不到 -> 退化成纯文生视频。这里只写真实字段,不带多余别名。
+        if refs:
+            payload["params"]["reference_urls"] = refs
+        if video_url and media["video_limit"] > 0:
+            payload["params"]["reference_video"] = video_url
+        return payload
     if refs:
         if model == "sora-2":
             payload["input_reference"] = refs[:2]
             payload["params"]["input_reference"] = refs[:2]
             return payload
-        if model == "grok-imagine-video-1.5-preview":
+        if model in ("grok-imagine-video-1.5-preview", "grok-video-3"):
+            # 两个 grok 的 schema 都只声明 images(1 张首帧),不发那一堆顶层别名。
+            # size / duration 已在上面按线上验证过的口径设好,这里只补首帧。
             payload["params"]["images"] = refs[:1]
             return payload
         if model == "wan2.7-shouweizhen":
@@ -2873,14 +3105,15 @@ def _agent_video_payload(model, prompt, duration, aspect_ratio="16:9", reference
     elif model in ("happyhorse-r2v", "happyhorse-1.1-r2v"):
         payload["params"].pop("image_urls", None)
         payload["params"].pop("reference_images", None)
-    elif video_url and media["video_limit"] > 0:
+    elif video_urls and media["video_limit"] > 0:
         video_field = str(media.get("video_field") or "video").strip() or "video"
-        payload["params"][video_field] = video_url
+        # 复数名参数(clips/videos/...)按 LK888 的约定必须传数组,哪怕只有一个文件。
+        payload["params"][video_field] = video_urls if media.get("video_is_array") else video_url
         if video_field != "video":
             payload["params"]["video"] = video_url
-    if audio_url and media["audio_limit"] > 0:
+    if audio_urls and media["audio_limit"] > 0:
         audio_field = str(media.get("audio_field") or "audio").strip() or "audio"
-        payload["params"][audio_field] = audio_url
+        payload["params"][audio_field] = audio_urls if media.get("audio_is_array") else audio_url
         if audio_field != "audio":
             payload["params"]["audio"] = audio_url
     return payload
@@ -2919,6 +3152,519 @@ def _agent_video_request_duration(model, value):
     return max(lower) if lower else slots[0]
 
 
+# ======================================================================
+# Agent.模式 动态表单:把 LK888 的单模型 schema 规范化成一份「表单描述」
+# ----------------------------------------------------------------------
+# 每个模型需要的参数完全不同(实测 67 个模型 356 个参数:duration 出现在 42 个模型、
+# resolution 39 个、aspect_ratio 38 个,还有 aspectRatio/ratio/imageSize/size 各种叫法),
+# 所以参数控件按这份描述渲染,不再为每个模型写 if/elif。
+#
+# 关键事实:schema 里**没有任何一个参数带 default 键**,所以「模型的默认值」只能是 options[0],
+# 而今天客户端硬编码的值有一批和 options[0] 相反。默认值规则见 _agent_param_default 的八级阶梯。
+AGENT_PARAM_UNSET = "__unset__"        # 可选参数「未设置」:控件显示「默认」,提交时整个不发(= 用户没碰过)
+_AGENT_REF_SLOT_CAP = 10
+
+# 已按 schema 装配 payload 的模型。空集 = 全部走既有的 _agent_image_payload/_agent_video_payload。
+# 逐个模型开闸,每个开闸前要拿 schema 与今天发的值逐条比对并真跑一次生成。回滚 = 删一个字符串。
+_AGENT_SCHEMA_MODELS = set()
+AGENT_DYNAMIC_PARAMS = os.environ.get("MATRIX_AGENT_DYNAMIC_PARAMS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+_AGENT_DURATION_FIELDS = ("duration", "audio_duration", "seconds")
+_AGENT_ASPECT_FIELDS = ("aspect_ratio", "aspectratio", "ratio", "orientation")
+_AGENT_RESOLUTION_FIELDS = ("resolution", "imagesize", "quality")
+# LK888 自己在 77/78 条 upload 描述的样板里写死了这份契约:这些复数名参数一律传数组,即使只有一个文件。
+_AGENT_UPLOAD_PLURAL = ("images", "videos", "clips", "files", "attachments", "reference_urls", "avatar_ids")
+_AGENT_UPLOAD_DESC_BOILERPLATE = ("（传可公开访问", "(传可公开访问", "⚠️", "支持公网直链URL")
+# 量词要带上「段」「条」:音频描述写的是「参考音频最多 3 段」「上传0~3段参考音频」。
+_AGENT_UPLOAD_LIMIT_RE = re.compile(
+    r"(?:上传|支持|最多|可传)?\s*(\d+)\s*[-~至到]\s*(\d+)\s*[张个段条]"
+    r"|(?:上传|支持|最多|可传)\s*(\d+)\s*[张个段条]"
+    r"|(\d+)\s*[张个段条](?:图片|参考图|图|音频|视频)")
+
+# schema 表达不了、或与线上验证过的行为冲突的东西。每条必须写清 why,并且只在该模型开闸时才生效。
+# 这张表是「覆盖」不是「重写」——它越短越好,test_agent_overrides.py 会检测空转条目。
+_AGENT_OVERRIDE_KEYS = frozenset((
+    "why", "defaults", "switch_default_true", "upload_limits",
+    "slot_labels", "pin_params", "drop_params", "extra_keys",
+))
+_AGENT_MODEL_OVERRIDES = {
+    "veo3.1": {
+        "why": "docs/TROUBLESHOOTING.md 记录线上一直发 enhance_prompt/enable_upsample=true;"
+               "schema 未给 default,按通用规则会翻成 false",
+        "switch_default_true": ["enhance_prompt", "enable_upsample"],
+    },
+    "wan2.7-shouweizhen": {
+        "why": "docs/TROUBLESHOOTING.md 首尾帧模型:第 1 张是首帧、第 2 张是尾帧,顺序语义只在自然语言描述里",
+        "slot_labels": {"images": ["首帧", "尾帧"]},
+        "upload_limits": {"images": 2},
+    },
+}
+
+
+def _agent_model_overrides(model):
+    return _AGENT_MODEL_OVERRIDES.get(str(model or "").strip()) or {}
+
+
+def _agent_dynamic_model_enabled(model):
+    return bool(AGENT_DYNAMIC_PARAMS) and str(model or "").strip() in _AGENT_SCHEMA_MODELS
+
+
+def _agent_param_kind(raw_type, options):
+    """LK888 的七种控件类型 → 客户端控件族。未知类型不抛异常,降级成 unknown 并跳过渲染。"""
+    raw = str(raw_type or "").strip().lower()
+    if raw == "upload":
+        return "upload"
+    if raw == "textarea":
+        return "text"
+    if raw == "switch":
+        return "toggle"
+    if raw in ("select", "radio"):
+        return "choice" if options else "text"
+    if raw == "number":
+        return "number"
+    if raw == "input":
+        return "text"
+    return "unknown"
+
+
+def _agent_param_role(name, label):
+    """给字段派个语义角色,用于跨模型迁移用户已选的值(换模型后 16:9 还是 16:9)。
+    同一模型内同角色只认第一个字段 —— happyhorse-r2v 同时有 ratio 和 aspect_ratio,
+    两个都发会 400,绑第一个就机械避开了。"""
+    key = str(name or "").strip().lower()
+    text = key + " " + str(label or "")
+    if key in _AGENT_DURATION_FIELDS or "时长" in text:
+        return "duration"
+    if key in _AGENT_ASPECT_FIELDS or "比例" in text or "宽高" in text:
+        return "aspect"
+    if key in _AGENT_RESOLUTION_FIELDS or "分辨率" in text or "清晰度" in text:
+        return "resolution"
+    if key == "size":
+        # gpt-image-2 的 size 是像素档位(承担比例语义);grok-video-3 的 size 是清晰度档位。
+        return "aspect"
+    return "other"
+
+
+def _agent_clean_description(text):
+    """剥掉 LK888 在 upload 描述里统一追加的那段 base64/URL 样板,只留对用户有用的那半句。
+    这段文案会直接显示在控件下方(不是 tooltip —— 客户端全局禁用 setToolTip)。"""
+    body = str(text or "").strip()
+    for mark in _AGENT_UPLOAD_DESC_BOILERPLATE:
+        idx = body.find(mark)
+        if idx > 0:
+            body = body[:idx]
+    return body.strip(" ；;。，,\n\r\t")
+
+
+def _agent_desc_count_limit(text):
+    m = _AGENT_UPLOAD_LIMIT_RE.search(str(text or ""))
+    if not m:
+        return 0
+    groups = [g for g in m.groups() if g]
+    try:
+        return max(int(g) for g in groups)
+    except ValueError:
+        return 0
+
+
+def _agent_upload_media(name, label):
+    text = (str(name or "") + " " + str(label or "")).lower()
+    if "audio" in text or "sound" in text or "音" in text:
+        return "audio"
+    if "video" in text or "clip" in text or "视频" in text:
+        return "video"
+    return "image"
+
+
+def _agent_upload_is_array(name):
+    return str(name or "").strip().lower() in _AGENT_UPLOAD_PLURAL
+
+
+def _agent_upload_limit(model, field, mode):
+    """upload 的数量上限。schema 没有结构化的 max/maxItems,只能层层推,并且以今天验证过的上限封顶。
+    返回 (limit, source)。"""
+    name = field["name"]
+    fixed = (_agent_model_overrides(model).get("upload_limits") or {}).get(name)
+    if isinstance(fixed, int) and fixed > 0:
+        return fixed, "override"
+    guess = _agent_desc_count_limit(field.get("description") or "")
+    source = "desc"
+    if not guess:
+        # 描述里没写数量时:图片按老规矩(复数名给上限,下面还会被 legacy 硬顶压回去);
+        # 视频/音频一律按 1 个 —— 拿上限当默认会让 wan2.7-xuxie 的 clips(「上传首段视频」)
+        # 变成能选 10 个。
+        if _agent_upload_media(name, field.get("label")) == "image":
+            guess = _AGENT_REF_SLOT_CAP if _agent_upload_is_array(name) else 1
+        else:
+            guess = 1
+        source = "name"
+    if _agent_upload_media(name, field.get("label")) == "image":
+        # 今天验证过的上限只覆盖图片槽,继续当硬顶用,避免描述解析出的数字比实际能力大。
+        legacy = (_agent_video_reference_limit(model) if mode == "video"
+                  else _agent_image_reference_limit(model))
+        if legacy > 0:
+            capped = min(guess, max(legacy, 1))
+            if capped != guess:
+                source = "legacy"
+            guess = capped
+    return max(1, min(int(guess), _AGENT_REF_SLOT_CAP)), source
+
+
+def _agent_param_default(model, field):
+    """八级默认值阶梯。schema 里 356 个参数一个 default 都没有,所以必须客户端决定。
+    核心取舍:**可选参数一律不预填**(规则 4),用户不点就整个不发,等于 lk888 上「没碰过」的状态。
+    这样既不会照抄 options[0] 造成静默升档/降档,也不会出现「显示了却不发」。"""
+    values = [o["value"] for o in (field.get("options") or [])]
+    fixed = (_agent_model_overrides(model).get("defaults") or {}).get(field["name"])
+    if fixed in values:
+        return fixed                                              # 1 覆盖表
+    if field["name"].startswith("_"):
+        return values[0] if values else ""                        # 2 下划线内部字段:隐藏,取首项
+    if len(values) == 1:
+        return values[0]                                          # 3 唯一值:渲染但禁用
+    if field["kind"] in ("choice", "toggle") and not field["required"]:
+        return AGENT_PARAM_UNSET                                  # 4 可选:不预填、不发送
+    if field["kind"] == "toggle":
+        on = _agent_model_overrides(model).get("switch_default_true") or []
+        truthy = [v for v in values if v in ("true", "on", "1", "yes")]
+        falsy = [v for v in values if v in ("false", "off", "0", "no")]
+        if field["name"] in on:
+            return truthy[0] if truthy else (values[0] if values else "true")
+        return falsy[0] if falsy else (values[-1] if values else "false")   # 5 必填开关默认关(不额外花钱)
+    if "auto" in values:
+        return "auto"                                             # 6 有自适应就用自适应
+    if field["role"] == "duration":
+        numeric = sorted((int(v), v) for v in values if str(v).isdigit())
+        usable = [pair for pair in numeric if pair[0] >= 4]
+        if usable:
+            return usable[0][1]                                   # 7 避开 1/2/3 秒这种退化首项
+    return values[0] if values else ""                            # 8 首项
+
+
+def _agent_schema_field(model, mode, raw, seen_roles):
+    options = [dict(o) for o in (raw.get("options") or [])]
+    kind = _agent_param_kind(raw.get("type"), options)
+    name = str(raw.get("name") or "")
+    role = _agent_param_role(name, raw.get("label"))
+    duplicate_role = ""
+    if role != "other" and role in seen_roles:
+        # 同一模型内同角色只认第一个字段。happyhorse-r2v 同时有 ratio 和 aspect_ratio,
+        # 两个都发会 400 —— 第二个既不渲染也不发送,连「更多参数」抽屉里也不出现。
+        duplicate_role, role = role, "other"
+    field = {
+        "name": name,
+        "label": str(raw.get("label") or name),
+        "raw_type": str(raw.get("type") or "").strip().lower(),
+        "kind": kind,
+        "required": bool(raw.get("required")),
+        "description": _agent_clean_description(raw.get("description")),
+        "options": options,
+        "role": role,
+        "duplicate_role": duplicate_role,
+        "hidden": name.startswith("_") or bool(duplicate_role),
+        "enabled": len(options) != 1,
+        "emit": "always" if raw.get("required") else "if_set",
+    }
+    field["default"] = _agent_param_default(model, field)
+    if kind == "upload":
+        limit, limit_src = _agent_upload_limit(model, field, mode)
+        field.update({
+            "media": _agent_upload_media(name, field["label"]),
+            "limit": limit,
+            "limit_src": limit_src,
+            # 复数名要数组是 LK888 写在 description 样板里的约定;
+            # 但上限 >1 时也必须是数组 —— hailuo-h3-quannengcankao 的 video_url 是单数名却「最多 3 个」,
+            # 3 个 URL 塞不进一个字符串。
+            "is_array": _agent_upload_is_array(name) or limit > 1,
+            "slot_labels": list((_agent_model_overrides(model).get("slot_labels") or {}).get(name) or []),
+            "placement": "upload",
+        })
+    elif field["hidden"] or kind == "unknown":
+        field["placement"] = "none"
+    elif kind in ("choice", "toggle"):
+        field["placement"] = "pill"
+    else:
+        field["placement"] = "drawer"
+    if role != "other":
+        seen_roles.add(role)
+    return field
+
+
+def _agent_schema_form(model, mode="", schema=None, source=""):
+    """schema → FORM。纯函数,整体兜底:任何异常都退回 _agent_legacy_form,参数区绝不空白。"""
+    model = str(model or "").strip()
+    try:
+        rows = (schema or {}).get("params") or []
+        if not rows:
+            return _agent_legacy_form(model, mode)
+        mode = str(mode or _agent_model_type(model) or "").strip()
+        seen_roles, fields, warnings = set(), [], []
+        prompt_field, prompt_required = "", False
+        for raw in rows:
+            field = _agent_schema_field(model, mode, raw, seen_roles)
+            if field["kind"] == "unknown":
+                warnings.append("未知控件类型 %s.%s=%s" % (model, field["name"], field["raw_type"]))
+            if field["kind"] == "text" and field["name"] in ("prompt", "script_content") and not prompt_field:
+                prompt_field, prompt_required = field["name"], field["required"]
+                field["placement"] = "prompt"
+            fields.append(field)
+        digest = hashlib.sha1(("|".join(
+            "%s:%s:%s" % (f["name"], f["kind"], ",".join(o["value"] for o in f["options"]))
+            for f in fields)).encode("utf-8")).hexdigest()[:12]
+        return {
+            "model": model,
+            "mode": mode,
+            "display_name": str((schema or {}).get("display_name") or ""),
+            "input_hint": str((schema or {}).get("input_hint") or ""),
+            "fields": fields,
+            "uploads": [f for f in fields if f["kind"] == "upload"],
+            "prompt_field": prompt_field,
+            "prompt_required": prompt_required,
+            "source": str(source or "net"),
+            "dynamic": _agent_dynamic_model_enabled(model),
+            "hash": digest,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        log("agent schema form %s: %s" % (model, e))
+        return _agent_legacy_form(model, mode)
+
+
+def _agent_legacy_form(model, mode=""):
+    """拿不到 schema 时的兜底表单:就是今天写死的那几个参数。source='legacy' 让 UI 能显示降级状态。"""
+    model = str(model or "").strip()
+    mode = str(mode or _agent_model_type(model) or "image").strip()
+    fields = []
+    if mode == "video":
+        slots = _agent_video_duration_slots(model)
+        fields.append({
+            "name": "duration", "label": "视频时长", "raw_type": "select", "kind": "choice",
+            "required": True, "description": "", "role": "duration", "hidden": False,
+            "enabled": len(slots) > 1, "emit": "always", "placement": "pill",
+            "options": [{"value": str(s), "label": "%d 秒" % s} for s in slots],
+            "default": str(slots[0]),
+        })
+    aspects = [{"value": a[2], "label": a[0]} for a in ProductGenPage.ASPECTS] \
+        if "ProductGenPage" in globals() else [{"value": "16:9", "label": "横版 16:9"}]
+    fields.append({
+        "name": "aspect_ratio", "label": "画面比例", "raw_type": "select", "kind": "choice",
+        "required": True, "description": "", "role": "aspect", "hidden": False,
+        "enabled": True, "emit": "always", "placement": "pill",
+        "options": aspects, "default": aspects[0]["value"],
+    })
+    limit = (_agent_video_reference_limit(model) if mode == "video"
+             else _agent_image_reference_limit(model))
+    if limit > 0:
+        fields.append({
+            "name": "images", "label": "参考图片", "raw_type": "upload", "kind": "upload",
+            "required": False, "description": "", "options": [], "role": "other", "hidden": False,
+            "enabled": True, "emit": "if_set", "placement": "upload", "default": AGENT_PARAM_UNSET,
+            "media": "image", "limit": min(limit, _AGENT_REF_SLOT_CAP), "limit_src": "legacy",
+            "is_array": True, "slot_labels": [],
+        })
+    return {
+        "model": model, "mode": mode, "display_name": _lk888_model_label(model),
+        "input_hint": "", "fields": fields,
+        "uploads": [f for f in fields if f["kind"] == "upload"],
+        "prompt_field": "prompt", "prompt_required": True,
+        "source": "legacy", "dynamic": False, "hash": "legacy", "warnings": [],
+    }
+
+
+def _agent_schema_form_for_ui(model, mode=""):
+    """UI 线程用:只读缓存,绝不发网络。"""
+    schema, source = _lk888_model_schema_cached(model)
+    return _agent_schema_form(model, mode, schema, source)
+
+
+def _agent_form_field(form, name):
+    for field in (form or {}).get("fields") or []:
+        if field["name"] == name:
+            return field
+    return None
+
+
+def _agent_form_role_field(form, role):
+    for field in (form or {}).get("fields") or []:
+        if field["role"] == role and field["placement"] == "pill":
+            return field
+    return None
+
+
+def _agent_form_visible_fields(form):
+    """会渲染成控件、并且**一定会被发出去**的字段。绝不画点了不影响请求的假控件。"""
+    return [f for f in (form or {}).get("fields") or []
+            if f["placement"] in ("pill", "drawer") and not f["hidden"]]
+
+
+def _agent_form_drawer_fields(form):
+    """「更多参数」抽屉里的字段:比例/时长以外的全部可渲染参数。"""
+    return [f for f in _agent_form_visible_fields(form) if f["role"] not in ("aspect", "duration")]
+
+
+def _agent_entry_extra_params(entry):
+    """条目上用户在抽屉里显式改过的参数。没改过就是空 —— 请求与今天逐字节一致。"""
+    values = (entry or {}).get("params")
+    return {str(k): v for k, v in values.items()
+            if isinstance(values, dict) and v not in (None, "", AGENT_PARAM_UNSET)} if isinstance(values, dict) else {}
+
+
+def _agent_apply_entry_params(payload, entry):
+    """把用户显式设过的模型参数合并进已组装好的请求体。
+
+    只合并用户真正改过的键(条目里的 `params`),所以没碰过抽屉时请求与今天完全相同。
+    每个值都要经过该模型 schema 的校验:字段必须存在、值必须在它的 options 里,
+    否则宁可丢掉也不往上游发一个它没声明过的值。
+    """
+    extras = _agent_entry_extra_params(entry)
+    if not extras:
+        return payload
+    model = str((entry or {}).get("model") or "").strip()
+    schema, _source = _lk888_model_schema_cached(model)
+    form = _agent_schema_form(model, (entry or {}).get("mode") or "", schema, _source)
+    applied, dropped = {}, []
+    for name, value in extras.items():
+        field = _agent_form_field(form, name)
+        if field is None or field["hidden"] or field["kind"] in ("upload", "unknown"):
+            dropped.append(name)
+            continue
+        clean = _agent_serialize_value(field, value)
+        if clean in (None, ""):
+            dropped.append(name)
+            continue
+        applied[name] = clean
+    if dropped:
+        log("agent extra params dropped %s: %s" % (model, ",".join(sorted(dropped))))
+    if applied:
+        payload.setdefault("params", {}).update(applied)
+        log("agent extra params applied %s: %s" % (model, ",".join(sorted(applied))))
+    return payload
+
+
+def _agent_serialize_value(field, value):
+    """值恒为该字段 options 里的原字符串,永不发 JSON 布尔/数字。
+    这一条直接消灭两类已记录的线上问题:kling-v2-6 收到 sound=false 报 400、
+    happyhorse-video-edit 发 Python bool 的 watermark=False。返回 None 表示「不发这个键」。"""
+    if value is None or value == AGENT_PARAM_UNSET:
+        return None
+    kind = field.get("kind")
+    if kind in ("choice", "toggle"):
+        values = [o["value"] for o in (field.get("options") or [])]
+        text = str(value)
+        if text in values:
+            return text
+        folded = {o["value"].casefold(): o["value"] for o in (field.get("options") or [])}
+        hit = folded.get(text.casefold())
+        if hit is not None:
+            return hit
+        fallback = field.get("default")
+        return None if fallback in (None, "", AGENT_PARAM_UNSET) else str(fallback)
+    if kind == "number":
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        return int(num) if float(num).is_integer() else num
+    text = str(value or "")
+    return text or None
+
+
+def _agent_dynamic_payload(form, prompt, values, uploads):
+    """FORM + 用户取值 + 已上传的公网 URL → {"prompt": ..., "params": {...}}。纯函数。
+
+    三条规则:
+      R1 required 一定发;
+      R2 可选且用户没设过 → 整个不发(等于 lk888 上没碰过的状态,也避开 happyhorse 的 ratio/aspect_ratio 互斥);
+      R4 值恒取自 options 且恒为字符串。
+    """
+    form = form or {}
+    params = {}
+    for field in form.get("fields") or []:
+        if field["kind"] in ("upload", "unknown") or field["placement"] == "prompt":
+            continue
+        value = _agent_serialize_value(field, values.get(field["name"], field.get("default")))
+        if value in (None, ""):
+            if field["emit"] != "always":
+                continue                                      # R2
+            value = _agent_serialize_value(field, field.get("default"))
+            if value in (None, ""):
+                continue
+        params[field["name"]] = value                         # R1 + R4
+    for field in form.get("uploads") or []:
+        urls = [str(u).strip() for u in (uploads or {}).get(field["name"]) or [] if str(u or "").strip()]
+        urls = urls[:int(field.get("limit") or 1)]
+        if not urls:
+            continue
+        params[field["name"]] = urls if field.get("is_array") else urls[0]
+    text = str(prompt or "")[:600]
+    prompt_field = str(form.get("prompt_field") or "")
+    if prompt_field and prompt_field != "prompt":
+        params[prompt_field] = text                           # vidu-jieshuoman 的主文本叫 script_content
+    payload = {"prompt": text, "params": params}
+    override = _agent_model_overrides(form.get("model"))
+    for key, value in (override.get("pin_params") or {}).items():
+        params[key] = value
+    for key in (override.get("drop_params") or []):
+        params.pop(key, None)
+    return _agent_payload_gate(form, payload)
+
+
+def _agent_payload_gate(form, payload):
+    """params 的键必须是该模型 schema 真的声明过的。被丢掉的键记日志(只记键名不记值)。
+    未开闸的模型原样放行 —— 它们走的还是既有的 _agent_image_payload/_agent_video_payload。"""
+    form = form or {}
+    if not form.get("dynamic"):
+        return payload
+    allowed = {f["name"] for f in (form.get("fields") or [])}
+    allowed.update(_agent_model_overrides(form.get("model")).get("extra_keys") or [])
+    if form.get("prompt_field"):
+        allowed.add(form["prompt_field"])
+    dropped = [k for k in list(payload.get("params") or {}) if k not in allowed]
+    for key in dropped:
+        payload["params"].pop(key, None)
+    if dropped:
+        log("agent payload gate dropped %s: %s" % (form.get("model"), ",".join(sorted(dropped))))
+    for key in [k for k in list(payload) if k not in ("prompt", "params")]:
+        payload.pop(key, None)
+    return payload
+
+
+def _agent_validate_form(form, prompt, values, uploads):
+    """提交前校验,返回中文错误列表。必须在扣费之前调用。"""
+    form = form or {}
+    errors = []
+    if form.get("prompt_required") and not str(prompt or "").strip():
+        errors.append("请先填写提示词")
+    for field in form.get("fields") or []:
+        if field["kind"] == "upload":
+            count = len([u for u in (uploads or {}).get(field["name"]) or [] if str(u or "").strip()])
+            if field["required"] and not count:
+                errors.append("请上传%s" % field["label"])
+            continue
+        if field["placement"] == "prompt" or field["kind"] == "unknown" or not field["required"]:
+            continue
+        value = _agent_serialize_value(field, values.get(field["name"], field.get("default")))
+        if value in (None, ""):
+            # choice/toggle 有 options 兜底,走到这里的基本都是 required 的自由文本/数字,只能让用户填。
+            errors.append(("请选择%s" if field["kind"] in ("choice", "toggle") else "请填写%s") % field["label"])
+    return errors
+
+
+def _agent_params_meta(form, values):
+    """存进条目、给生成卡显示用的参数快照。只存已确定会发出去的那些。"""
+    meta = []
+    for field in (form or {}).get("fields") or []:
+        if field["kind"] in ("upload", "unknown") or field["placement"] == "prompt" or field["hidden"]:
+            continue
+        value = values.get(field["name"], field.get("default"))
+        if value in (None, "", AGENT_PARAM_UNSET):
+            continue
+        label = next((o["label"] for o in (field.get("options") or []) if o["value"] == str(value)), str(value))
+        meta.append({"name": field["name"], "label": field["label"], "kind": field["kind"],
+                     "role": field["role"], "value": str(value), "valueLabel": label})
+    return meta
+
+
 _LK888_REPLACEMENT_VIDEO_DEFAULT = "viduq3-turbo-cankaosheng"
 _COMIC_PROJECT_VIDEO_DEFAULT = "doubao-seedance-2-0-260128"
 _COMIC_PROJECT_VIDEO_FALLBACKS = (
@@ -2929,7 +3675,6 @@ _COMIC_PROJECT_VIDEO_FALLBACKS = (
 )
 _LK888_PRINCIPAL_VIDEO_MODEL = "happyhorse-video-edit"
 _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
-    "kwvideo-v2-quannengcankao",
     "hailuo-h3-quannengcankao",
     "viduq3-turbo-cankaosheng",
     "viduq3-cankaosheng",
@@ -2939,7 +3684,6 @@ _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS = frozenset((
     "happyhorse-1.1-r2v",
 ))
 _LK888_REPLACEMENT_BUILTIN_SELECTABLE_MODELS = (
-    "kwvideo-v2-quannengcankao",
     "hailuo-h3-quannengcankao",
 )
 _LK888_REPLACEMENT_MODEL_FALLBACKS = (
@@ -2952,18 +3696,17 @@ _LK888_REPLACEMENT_MODEL_FALLBACKS = (
 )
 _LK888_REPLACEMENT_MODEL_LABELS = {
     "doubao-seedance-2-0-260128": "Seedance 2.0 Standard（漫剧首尾帧）",
-    "happyhorse-video-edit": "HappyHorse Video Edit",
-    "kwvideo-v2-quannengcankao": "SD 2.0 全能参考",
+    "happyhorse-video-edit": "HappyHorse 视频编辑",
     "hailuo-h3-quannengcankao": "海螺 H3 全能参考",
     "viduq3-turbo-cankaosheng": "Vidu Q3 Turbo 参考生视频",
-    "wan2.7-cankaosheng": "万相 2.7 参考生视频",
+    "wan2.7-cankaosheng": "Wanxiang 2.7 参考生视频",
     "viduq3-cankaosheng": "Vidu Q3 参考生视频",
     "viduq2-cankaosheng": "Vidu Q2 参考生视频",
     "wan2.7-shouweizhen": "万相 2.7 首尾帧生视频",
     "kling-v3-omni": "Kling V3 Omni 首尾帧生视频",
     "pixverse-v6-shouweizhen": "PixVerse V6 首尾帧生视频",
-    "happyhorse-r2v": "HappyHorse 参考视频",
-    "happyhorse-1.1-r2v": "HappyHorse 1.1 参考视频",
+    "happyhorse-r2v": "HappyHorse 参考生视频",
+    "happyhorse-1.1-r2v": "HappyHorse 1.1 参考生视频",
 }
 
 
@@ -2986,40 +3729,13 @@ def _replacement_row_label(row):
     return str(row.get("display_name") or row.get("displayName") or _LK888_REPLACEMENT_MODEL_LABELS.get(name) or name).strip()
 
 
-def _replacement_is_sd20_all_reference_row(row):
-    row = row or {}
-    if str(row.get("type") or "").strip().lower() != "video":
-        return False
-    text = ("%s %s" % (_replacement_row_name(row), _replacement_row_label(row))).lower()
-    compact = "".join(ch for ch in text if ch.isalnum())
-    has_sd20 = (
-        "sd20" in compact
-        or "seedance20" in compact
-        or "sd 2.0" in text
-        or "seedance 2.0" in text
-    )
-    has_reference = (
-        "全能参考" in text
-        or "参考" in text
-        or "reference" in text
-        or "ref" in text
-        or "omni" in text
-        or "all" in text
-    )
-    return bool(has_sd20 and has_reference)
-
-
 def _replacement_configured_model_is_allowed(name):
     name = str(name or "").strip()
     if not name:
         return False
     if name == _LK888_PRINCIPAL_VIDEO_MODEL:
         return True
-    if name in _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS:
-        return True
-    compact = "".join(ch for ch in name.lower() if ch.isalnum())
-    lower = name.lower()
-    return bool(("sd20" in compact or "seedance20" in compact) and ("reference" in lower or "ref" in lower or "all" in lower))
+    return name in _LK888_REPLACEMENT_REFERENCE_VIDEO_MODELS
 
 
 def _replacement_supported_model_rows(rows=None):
@@ -3037,9 +3753,6 @@ def _replacement_supported_model_rows(rows=None):
             "type": "video",
         })
         ordered.append(row)
-    for row in catalog:
-        if _replacement_is_sd20_all_reference_row(row):
-            ordered.append(dict(row))
     for name in _LK888_REPLACEMENT_MODEL_FALLBACKS:
         row = dict(by_name.get(name) or {
             "name": name,
@@ -3114,6 +3827,150 @@ def _lk888_skill_models(force=False):
     _LK888_MODEL_CACHE["ts"] = now_ts
     _LK888_MODEL_CACHE["rows"] = list(rows)
     return rows
+
+
+def _lk888_schema_disk_path():
+    return os.path.join(data_dir(), "lk888_model_schemas.json")
+
+
+def _lk888_schema_disk_load():
+    """读磁盘 schema 缓存。任何异常/版本不符都当空,绝不让一份坏文件拖垮参数区。"""
+    import json as _json
+    try:
+        with open(_lk888_schema_disk_path(), "r", encoding="utf-8-sig") as f:
+            blob = _json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(blob, dict) or int(blob.get("version") or 0) != _LK888_SCHEMA_DISK_VERSION:
+        return {}
+    rows = blob.get("models")
+    return rows if isinstance(rows, dict) else {}
+
+
+def _lk888_schema_disk_save(name, schema):
+    rows = _lk888_schema_disk_load()
+    rows[str(name)] = {"ts": time.time(), "schema": schema}
+    if len(rows) > _LK888_SCHEMA_DISK_MAX:
+        ordered = sorted(rows.items(), key=lambda kv: float((kv[1] or {}).get("ts") or 0))
+        for key, _v in ordered[:len(rows) - _LK888_SCHEMA_DISK_MAX]:
+            rows.pop(key, None)
+    try:
+        _atomic_write_json(_lk888_schema_disk_path(),
+                           {"version": _LK888_SCHEMA_DISK_VERSION, "models": rows})
+    except Exception as e:
+        log("lk888 schema disk save %s: %s" % (name, e))
+
+
+def _lk888_schema_snapshot(name):
+    """随包快照。首次冷启动 / 断网 / LK888 挂掉时,参数区仍然按各模型真实字段渲染。"""
+    try:
+        import lk888_schema_snapshot as _snap
+    except Exception:
+        return {}
+    try:
+        return dict(_snap.schema_for(str(name or "")) or {})
+    except Exception as e:
+        log("lk888 schema snapshot %s: %s" % (name, e))
+        return {}
+
+
+def _lk888_schema_normalize(name, raw):
+    """把上游返回收敛成固定形状:params 恒为 list,option 恒为 {value:str,label:str}。
+    上游多给的键原样留着(将来加字段不用改这里),但下游只认这几个。"""
+    src = raw if isinstance(raw, dict) else {}
+    params = []
+    for item in (src.get("params") if isinstance(src.get("params"), list) else []):
+        if not isinstance(item, dict):
+            continue
+        pname = str(item.get("name") or "").strip()
+        if not pname:
+            continue
+        options = []
+        for opt in (item.get("options") if isinstance(item.get("options"), list) else []):
+            if isinstance(opt, dict):
+                value = opt.get("value")
+                if value is None:
+                    continue
+                options.append({"value": str(value), "label": str(opt.get("label") or value)})
+            elif opt is not None:
+                options.append({"value": str(opt), "label": str(opt)})
+        row = dict(item)
+        row.update({
+            "name": pname,
+            "label": str(item.get("label") or pname),
+            "type": str(item.get("type") or "").strip().lower(),
+            "required": bool(item.get("required")),
+            "description": str(item.get("description") or ""),
+            "options": options,
+        })
+        params.append(row)
+    return {
+        "name": str(src.get("name") or name or ""),
+        "display_name": str(src.get("display_name") or ""),
+        "input_hint": str(src.get("input_hint") or ""),
+        "type": str(src.get("type") or "").strip().lower(),
+        "tags": [str(t) for t in (src.get("tags") or []) if t is not None],
+        "params": params,
+    }
+
+
+def _lk888_model_schema_cached(name):
+    """只读缓存,绝不发网络 —— 给 UI 线程用。返回 (schema, source)。
+    降级顺序:内存(含过期 stale) → 磁盘 → 随包快照 → 空。"""
+    name = str(name or "").strip()
+    if not name:
+        return {}, "none"
+    with _LK888_SCHEMA_LOCK:
+        hit = _LK888_SCHEMA_MEM.get(name)
+        hit = dict(hit) if hit else None
+    if hit and hit.get("schema"):
+        fresh = bool(hit.get("ok")) and (time.time() - float(hit.get("ts") or 0)) < _LK888_SCHEMA_TTL_OK
+        return dict(hit["schema"]), ("memory" if fresh else "stale")
+    row = (_lk888_schema_disk_load().get(name) or {})
+    disk = row.get("schema")
+    if isinstance(disk, dict) and disk.get("params"):
+        return dict(disk), "disk"
+    snap = _lk888_schema_snapshot(name)
+    if snap.get("params"):
+        return snap, "snapshot"
+    return {}, "none"
+
+
+def _lk888_model_schema(name, force=False):
+    """取单模型表单 schema。**只在后台线程调**(会发网络)。返回 (schema, source)。
+    失败绝不抛异常,也绝不按成功 TTL 缓存失败结果 —— 直接落到 _lk888_model_schema_cached 的降级链。"""
+    name = str(name or "").strip()
+    if not name:
+        return {}, "none"
+    now_ts = time.time()
+    if not force:
+        with _LK888_SCHEMA_LOCK:
+            hit = _LK888_SCHEMA_MEM.get(name)
+            hit = dict(hit) if hit else None
+        if hit:
+            ttl = _LK888_SCHEMA_TTL_OK if hit.get("ok") else _LK888_SCHEMA_TTL_FAIL
+            if now_ts - float(hit.get("ts") or 0) < ttl:
+                if hit.get("ok") and hit.get("schema"):
+                    return dict(hit["schema"]), "memory"
+                return _lk888_model_schema_cached(name)
+    with _LK888_SCHEMA_LOCK:
+        prev = dict(_LK888_SCHEMA_MEM.get(name) or {})
+    schema, ok = {}, False
+    code, j = api("GET", _LK888_SCHEMA_PATH % quote(name, safe=""), timeout=30)
+    if code == 200 and isinstance(j, dict) and isinstance(j.get("params"), list):
+        schema, ok = _lk888_schema_normalize(name, j), True
+    else:
+        log("lk888 schema %s: http %s %s" % (name, code, str(j)[:160]))
+    with _LK888_SCHEMA_LOCK:
+        # 失败时保住上一次成功的结果,否则这次失败会把 stale 降级也一起抹掉。
+        keep = dict(schema) if ok else dict(prev.get("schema") or {})
+        _LK888_SCHEMA_MEM[name] = {"ts": now_ts, "ok": ok, "schema": keep}
+        while len(_LK888_SCHEMA_MEM) > _LK888_SCHEMA_MEM_MAX:
+            _LK888_SCHEMA_MEM.pop(next(iter(_LK888_SCHEMA_MEM)), None)
+    if ok:
+        _lk888_schema_disk_save(name, schema)
+        return dict(schema), "net"
+    return _lk888_model_schema_cached(name)
 
 
 def _lk888_canonical_model_row(row):
@@ -3777,12 +4634,17 @@ THEMES = {
         "navCheckedText": "#ffffff", "navCheckBg1": "rgba(99,102,241,0.30)", "navCheckBg2": "rgba(99,102,241,0.05)",
         "ghostBg": "rgba(255,255,255,0.03)", "ghostBorder": "#2b3040", "ghostText": "#dfe3ec", "ghostHoverBg": "rgba(99,102,241,0.10)",
         "primaryDisBg": "#3a3f52", "primaryDisText": "#98a0b0",
+        "disBg": "rgba(255,255,255,0.025)", "disBorder": "rgba(255,255,255,0.07)",
+        "checkBg": "rgba(255,255,255,0.12)", "checkBorder": "rgba(255,255,255,0.62)",
+        "checkDisBg": "rgba(255,255,255,0.04)", "checkDisBorder": "rgba(255,255,255,0.18)",
         "inputBg": "#0c0f17", "inputBorder": "#262c3b", "inputFocusBg": "#0e1220", "comboView": "#12151f",
         "tableBg": "#0b0e16", "tableBorder": "#222a3a", "tableGrid": "#191e2a", "selBg": "rgba(99,102,241,0.22)", "selText": "#ffffff",
         "headerBg": "#141824", "headerText": "#8b93a3", "headerBorder": "#232b3c",
         "scroll": "#2a3040", "scrollHover": "#3a4358", "menuBg": "#141824", "menuText": "#e8eaf0", "menuBorder": "rgba(255,255,255,0.10)",
         "iconBg": "rgba(255,255,255,0.05)", "iconText": "#8b93a3", "iconBorder": "rgba(255,255,255,0.09)",
         "accent": _ACCENT_HEX, "accent2": _ACCENT2_HEX,
+        # 同款替换/图文同款的"换位台账"状态色:保留原片(中性) / 已替换(主色) / 待补(琥珀) / 完成 / 失败
+        "stKeep": "#7c869c", "stSwap": _ACCENT_HEX, "stOwe": "#e0a32e", "stDone": "#34d399", "stFail": "#ef4444",
     },
     "light": {
         "rootBg1": "#f5f7fb", "rootBg2": "#eef1f7", "sideBg1": "#ffffff", "sideBg2": "#f6f8fc", "sideBorder": "#e4e8f0",
@@ -3793,13 +4655,20 @@ THEMES = {
         "navText": "#4b5568", "navHoverBg": "#eef1f8", "navHoverText": "#111726",
         "navCheckedText": "#4338ca", "navCheckBg1": "rgba(99,102,241,0.16)", "navCheckBg2": "rgba(99,102,241,0.02)",
         "ghostBg": "#eef2f8", "ghostBorder": "#ccd4e2", "ghostText": "#3a4356", "ghostHoverBg": "rgba(99,102,241,0.12)",
-        "primaryDisBg": "#c7cdd8", "primaryDisText": "#ffffff",
+        # 亮色下白字压在浅灰上几乎读不出来,禁用态仍然要看得清写的是什么
+        "primaryDisBg": "#dde1e9", "primaryDisText": "#78839a",
+        "disBg": "#f1f3f7", "disBorder": "#e2e6ee",
+        # 亮色下白描边压在白卡上等于没有;授权确认这种勾选框必须看得见
+        "checkBg": "#ffffff", "checkBorder": "#a9b3c4",
+        "checkDisBg": "#f1f3f7", "checkDisBorder": "#d5dbe5",
         "inputBg": "#ffffff", "inputBorder": "#d0d7e2", "inputFocusBg": "#f6f8ff", "comboView": "#ffffff",
         "tableBg": "#ffffff", "tableBorder": "#e6eaf1", "tableGrid": "#eef1f6", "selBg": "rgba(99,102,241,0.14)", "selText": "#28303f",
         "headerBg": "#f5f7fb", "headerText": "#6b7488", "headerBorder": "#e6eaf1",
         "scroll": "#cbd3e0", "scrollHover": "#b0bacb", "menuBg": "#ffffff", "menuText": "#28303f", "menuBorder": "#e6eaf1",
         "iconBg": "#f0f3f9", "iconText": "#6b7488", "iconBorder": "#e4e8f0",
         "accent": _ACCENT_HEX, "accent2": _ACCENT2_HEX,
+        # 亮色下同一组状态色需要压深,保证在白卡上仍有足够对比
+        "stKeep": "#78839a", "stSwap": "#4f46e5", "stOwe": "#b07d12", "stDone": "#0f9d6e", "stFail": "#dc2626",
     },
 }
 CURRENT_THEME = "dark"
@@ -3834,7 +4703,7 @@ QFrame#hero { border-radius:18px; border:1px solid %(hero)s; }
 QFrame#accentBar { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 %(accent)s, stop:1 %(accent2)s); border-radius:2px; }
 QPushButton { background:%(ghostBg)s; border:1px solid %(ghostBorder)s; color:%(ghostText)s; border-radius:10px; padding:9px 16px; min-height:18px; min-width:76px; font-weight:650; }
 QPushButton:hover { border-color:%(accent)s; background:%(ghostHoverBg)s; color:%(title)s; }
-QPushButton:disabled { background:rgba(255,255,255,0.025); border-color:rgba(255,255,255,0.07); color:%(muted)s; }
+QPushButton:disabled { background:%(disBg)s; border-color:%(disBorder)s; color:%(muted)s; }
 QPushButton#iconbtn { padding:0; min-width:26px; max-width:26px; min-height:26px; max-height:26px; border-radius:7px; }
 QPushButton#nav { background:transparent; color:%(navText)s; text-align:left; padding:10px 14px; border-radius:10px; font-size:13px; font-weight:600; }
 QPushButton#nav:hover { background:%(navHoverBg)s; color:%(navHoverText)s; }
@@ -3850,12 +4719,12 @@ QToolButton#replacementSlot { background:%(ghostBg)s; border:1px dashed %(ghostB
 QToolButton#replacementSlot:hover, QToolButton#replacementSlot:focus { border-color:%(accent)s; background:%(ghostHoverBg)s; color:%(title)s; }
 QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit { background:%(inputBg)s; border:1px solid %(inputBorder)s; border-radius:10px; padding:10px; color:%(text)s; selection-background-color:%(accent)s; selection-color:#ffffff; }
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border:1px solid %(accent)s; background:%(inputFocusBg)s; }
-QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QTextEdit:disabled { color:%(sub)s; background:rgba(255,255,255,0.025); border-color:rgba(255,255,255,0.08); }
+QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QPlainTextEdit:disabled, QTextEdit:disabled { color:%(sub)s; background:%(disBg)s; border-color:%(disBorder)s; }
 QCheckBox { color:%(text)s; background:transparent; spacing:9px; font-size:12.5px; font-weight:600; }
-QCheckBox::indicator { width:18px; height:18px; border-radius:5px; border:1.5px solid rgba(255,255,255,0.62); background:rgba(255,255,255,0.12); }
+QCheckBox::indicator { width:18px; height:18px; border-radius:5px; border:1.5px solid %(checkBorder)s; background:%(checkBg)s; }
 QCheckBox::indicator:hover { border-color:%(accent)s; background:rgba(99,102,241,0.18); }
 QCheckBox::indicator:checked { border:1.5px solid %(accent)s; background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 %(accent)s,stop:1 %(accent2)s); image:url('%(checkIcon)s'); }
-QCheckBox::indicator:disabled { border-color:rgba(255,255,255,0.18); background:rgba(255,255,255,0.04); }
+QCheckBox::indicator:disabled { border-color:%(checkDisBorder)s; background:%(checkDisBg)s; }
 QComboBox::drop-down { border:0; width:22px; }
 QComboBox QAbstractItemView { background:%(comboView)s; border:1px solid %(inputBorder)s; selection-background-color:%(accent)s; selection-color:#ffffff; color:%(text)s; outline:0; }
 QTableWidget { background:%(tableBg)s; border:1px solid %(tableBorder)s; border-radius:12px; gridline-color:%(tableGrid)s; color:%(text)s; }
@@ -3865,13 +4734,36 @@ QHeaderView::section { background:%(headerBg)s; color:%(headerText)s; border:0; 
 QScrollBar:vertical { background:transparent; width:10px; margin:2px; }
 QScrollBar::handle:vertical { background:%(scroll)s; border-radius:5px; min-height:32px; }
 QScrollBar::handle:vertical:hover { background:%(scrollHover)s; }
-QScrollBar::add-line, QScrollBar::sub-line { height:0; }
+QScrollBar:horizontal { background:transparent; height:10px; margin:2px; }
+QScrollBar::handle:horizontal { background:%(scroll)s; border-radius:5px; min-width:32px; }
+QScrollBar::handle:horizontal:hover { background:%(scrollHover)s; }
+QScrollBar::add-page, QScrollBar::sub-page { background:transparent; }
+QScrollBar::add-line, QScrollBar::sub-line { height:0; width:0; }
 QPushButton#primary::menu-indicator { subcontrol-position: right center; subcontrol-origin: padding; right:10px; width:12px; }
 QPushButton#iconbtn { background:%(iconBg)s; color:%(iconText)s; border:1px solid %(iconBorder)s; border-radius:7px; font-size:12px; font-weight:700; padding:0; min-width:26px; max-width:26px; min-height:26px; max-height:26px; }
 QPushButton#iconbtn:hover { background:rgba(239,68,68,0.20); color:#ffffff; border-color:rgba(239,68,68,0.55); }
 QMenu { background:%(menuBg)s; color:%(menuText)s; border:1px solid %(menuBorder)s; border-radius:10px; padding:6px; }
 QMenu::item { padding:9px 18px; border-radius:7px; margin:1px 2px; }
 QMenu::item:selected { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(99,102,241,0.30), stop:1 rgba(139,92,246,0.30)); color:#ffffff; }
+
+/* ---- 同款替换 / 图文同款:换位台账排版层 ---- */
+/* 统一字阶:眉标 10.5/800 · 分区标题 13.5/750 · 正文 12.5/600 · 元信息 11/500 */
+QLabel#eyebrow { color:%(group)s; font-size:10.5px; font-weight:800; letter-spacing:1.5px; }
+QLabel#zoneTitle { color:%(title)s; font-size:13.5px; font-weight:750; }
+QLabel#zoneHint { color:%(sub)s; font-size:11.5px; font-weight:500; }
+QLabel#fieldLabel { color:%(sub)s; font-size:12px; font-weight:650; }
+QLabel#fieldValue { color:%(text)s; font-size:12.5px; font-weight:600; }
+QLabel#meta { color:%(muted)s; font-size:11px; font-weight:500; }
+QLabel#slotIndex { color:%(muted)s; font-family:'Consolas','Cascadia Mono',monospace; font-size:11px; font-weight:700; letter-spacing:0.5px; }
+QFrame#zone { background:%(cardBg)s; border:1px solid %(cardBorder)s; border-radius:16px; }
+QFrame#zoneFlat { background:transparent; border:0; }
+QFrame#hline { background:%(cardBorder)s; border:0; max-height:1px; min-height:1px; }
+QFrame#readyBar { background:%(cardBg)s; border:1px solid %(cardBorder)s; border-radius:14px; }
+QProgressBar { background:%(inputBg)s; border:1px solid %(inputBorder)s; border-radius:8px; height:16px; text-align:center; color:%(sub)s; font-size:11px; font-weight:700; }
+QProgressBar::chunk { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 %(accent)s, stop:1 %(accent2)s); border-radius:7px; }
+QPushButton#quiet { background:transparent; border:1px solid %(ghostBorder)s; color:%(sub)s; border-radius:9px; padding:7px 13px; min-width:0; font-size:12px; font-weight:650; }
+QPushButton#quiet:hover { border-color:%(accent)s; color:%(title)s; background:%(ghostHoverBg)s; }
+QPushButton#quiet:disabled { border-color:%(cardBorder)s; color:%(muted)s; background:transparent; }
 """ % t)
 
 
@@ -4175,6 +5067,279 @@ def _rgba(hexc, a):
     hexc = str(hexc).lstrip("#")
     r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
     return "rgba(%d,%d,%d,%.3f)" % (r, g, b, a)
+
+
+# ---------- 换位台账(同款替换 / 图文同款共用) ----------
+# 这两个页面做的是同一件事:把原片拆成槽位,再把你的素材塞进槽位。
+# 状态由"连接线"本身表达,而不是散落在别处的文字标签:
+#   keep 保留原片 = 中性虚线(什么都没传,原片直接透传)
+#   swap 已替换   = 主色实线箭头(你换掉的东西)
+#   owe  待补     = 琥珀箭头指向空槽(必须补齐才能生成)
+_SWAP_STATE_KEYS = {"keep": "stKeep", "swap": "stSwap", "owe": "stOwe", "done": "stDone", "fail": "stFail"}
+_SWAP_STATE_LABELS = {"keep": "保留原片", "swap": "已替换", "owe": "待补", "done": "已完成", "fail": "失败"}
+
+
+def _state_color(state):
+    return TK.get(_SWAP_STATE_KEYS.get(str(state or "keep"), "stKeep")) or TK["sub"]
+
+
+def _style_state_pill(label, state, text=None):
+    color = _state_color(state)
+    label.setText(str(text if text is not None else _SWAP_STATE_LABELS.get(state, state)))
+    label.setStyleSheet(
+        "background:%s;border:1px solid %s;border-radius:9px;color:%s;"
+        "font-size:10.5px;font-weight:800;padding:2px 9px;"
+        % (_rgba(color, 0.13), _rgba(color, 0.42), color)
+    )
+
+
+def state_pill(state, text=None):
+    """状态胶囊:保留原片 / 已替换 / 待补。"""
+    label = QtWidgets.QLabel()
+    label.setAlignment(QtCore.Qt.AlignCenter)
+    # 固定高度,否则在高一点的行里 QLabel 会被拉成一个竖条
+    label.setFixedHeight(21)
+    label.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
+    _style_state_pill(label, state, text)
+    return label
+
+
+# 所有分区共用一条标签沟槽宽度,避免每个卡片各自算宽、输入框左边缘参差
+_FIELD_LABEL_W = 104
+
+
+def field_label(text):
+    label = QtWidgets.QLabel(str(text))
+    label.setObjectName("fieldLabel")
+    return label
+
+
+def field_grid(columns=1):
+    """字段网格:标签列宽固定,输入列吃掉剩余宽度。"""
+    grid = QtWidgets.QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(12)
+    grid.setVerticalSpacing(9)
+    for index in range(max(1, int(columns))):
+        grid.setColumnMinimumWidth(index * 2, _FIELD_LABEL_W)
+        grid.setColumnStretch(index * 2, 0)
+        grid.setColumnStretch(index * 2 + 1, 1)
+    return grid
+
+
+def button_cell(*buttons):
+    """把按钮放进网格时用它包一层,否则按钮会被拉成整行宽。"""
+    # 注意:这里不要 setStyleSheet("background:transparent")。
+    # 无类型选择器会顺着继承压到子控件上,把 #primary 按钮的主色底也刷成透明
+    # (亮色主题下就变成白底白字直接看不见)。QWidget 默认本来就不画背景。
+    host = QtWidgets.QWidget()
+    row = QtWidgets.QHBoxLayout(host)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    for button in buttons:
+        row.addWidget(button)
+    row.addStretch(1)
+    return host
+
+
+def zone_card(eyebrow, title, hint=None, actions=None):
+    """分区卡片:眉标写的是流程里的哪一段(原片 / 替换素材 / 声音…),不是装饰。
+    返回 (frame, body) —— 内容加到 body。"""
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("zone")
+    outer = QtWidgets.QVBoxLayout(frame)
+    outer.setContentsMargins(18, 14, 18, 16)
+    outer.setSpacing(12)
+    head = QtWidgets.QHBoxLayout()
+    head.setSpacing(10)
+    left = QtWidgets.QVBoxLayout()
+    left.setSpacing(3)
+    if eyebrow:
+        eb = QtWidgets.QLabel(str(eyebrow))
+        eb.setObjectName("eyebrow")
+        left.addWidget(eb)
+    line = QtWidgets.QHBoxLayout()
+    line.setSpacing(10)
+    tt = QtWidgets.QLabel(str(title))
+    tt.setObjectName("zoneTitle")
+    line.addWidget(tt)
+    if hint:
+        ht = QtWidgets.QLabel(str(hint))
+        ht.setObjectName("zoneHint")
+        line.addWidget(ht, 1)
+    else:
+        line.addStretch(1)
+    left.addLayout(line)
+    head.addLayout(left, 1)
+    for action in (actions or []):
+        head.addWidget(action)
+    outer.addLayout(head)
+    rule = QtWidgets.QFrame()
+    rule.setObjectName("hline")
+    outer.addWidget(rule)
+    body = QtWidgets.QVBoxLayout()
+    body.setSpacing(10)
+    outer.addLayout(body)
+    return frame, body
+
+
+class SwapRail(QtWidgets.QWidget):
+    """图文同款:横向换位连接线,画在"原笔记图片"条和"替换图片"条之间。
+    每一列一根线,列距与两条缩略图带完全一致,所以第 N 张原图正对第 N 个替换槽,
+    不用再靠人眼数位置。"""
+
+    def __init__(self, cell=132, gap=10, height=30):
+        super().__init__()
+        self._cell = int(cell)
+        self._pitch = int(cell) + int(gap)
+        self._states = []
+        self._offset = 0
+        self.setFixedHeight(int(height))
+        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+
+    def set_states(self, states):
+        states = list(states or [])
+        if states != self._states:
+            self._states = states
+            self.update()
+
+    def set_offset(self, offset):
+        offset = int(offset or 0)
+        if offset != self._offset:
+            self._offset = offset
+            self.update()
+
+    def paintEvent(self, event):
+        del event
+        if not self._states:
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        top = 3.0
+        bottom = float(self.height()) - 3.0
+        for index, state in enumerate(self._states):
+            cx = self._cell / 2.0 + index * self._pitch - self._offset
+            if cx < -self._cell or cx > self.width() + self._cell:
+                continue
+            base = QtGui.QColor(_state_color(state))
+            pen = QtGui.QPen(base)
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            if state == "keep":
+                # 保留原片:细虚线、压暗 —— 不做任何事,不该抢视线
+                faded = QtGui.QColor(base)
+                faded.setAlpha(140)
+                pen.setColor(faded)
+                pen.setWidthF(1.4)
+                pen.setStyle(QtCore.Qt.CustomDashLine)
+                pen.setDashPattern([2.0, 3.0])
+                painter.setPen(pen)
+                painter.drawLine(QtCore.QPointF(cx, top), QtCore.QPointF(cx, bottom))
+                continue
+            pen.setWidthF(2.0)
+            painter.setPen(pen)
+            painter.drawLine(QtCore.QPointF(cx, top), QtCore.QPointF(cx, bottom - 6.0))
+            head = QtGui.QPainterPath()
+            head.moveTo(cx, bottom)
+            head.lineTo(cx - 4.5, bottom - 6.5)
+            head.lineTo(cx + 4.5, bottom - 6.5)
+            head.closeSubpath()
+            painter.fillPath(head, QtGui.QBrush(base))
+        painter.end()
+
+
+class SwapSlotRow(QtWidgets.QFrame):
+    """同款替换:一条"原片槽位 → 你的素材"台账行。
+    左侧竖脊线就是横向连接线转 90 度 —— 同一个记号,两个方向。"""
+
+    def __init__(self, title, note=""):
+        super().__init__()
+        self.setObjectName("zoneFlat")
+        self._state = "keep"
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(14, 9, 2, 9)
+        row.setSpacing(14)
+        left = QtWidgets.QVBoxLayout()
+        left.setSpacing(4)
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.setSpacing(8)
+        caption = QtWidgets.QLabel(str(title))
+        caption.setObjectName("fieldValue")
+        self.pill = state_pill("keep")
+        title_row.addWidget(caption)
+        title_row.addWidget(self.pill)
+        title_row.addStretch(1)
+        left.addLayout(title_row)
+        self.note = QtWidgets.QLabel(str(note))
+        self.note.setObjectName("meta")
+        self.note.setWordWrap(True)
+        left.addWidget(self.note)
+        left.addStretch(1)
+        row.addLayout(left, 3)
+        self.body = QtWidgets.QVBoxLayout()
+        self.body.setSpacing(7)
+        row.addLayout(self.body, 4)
+
+    def set_state(self, state, note=None, pill_text=None):
+        self._state = str(state or "keep")
+        _style_state_pill(self.pill, self._state, pill_text)
+        if note is not None:
+            self.note.setText(str(note))
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        color = QtGui.QColor(_state_color(self._state))
+        if self._state == "keep":
+            color.setAlpha(120)
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(0.0, 8.0, 3.0, max(0.0, self.height() - 16.0)), 1.5, 1.5)
+        painter.fillPath(path, QtGui.QBrush(color))
+        painter.end()
+
+
+class ReadyBar(QtWidgets.QFrame):
+    """行动条:主行动 + 一行"还差什么"。
+    把"能不能生成"从点完才知道,提前到点之前就知道。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("readyBar")
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(16, 11, 14, 11)
+        row.setSpacing(11)
+        self.dot = QtWidgets.QLabel()
+        self.dot.setFixedSize(9, 9)
+        row.addWidget(self.dot, 0, QtCore.Qt.AlignTop)
+        lines = QtWidgets.QVBoxLayout()
+        lines.setSpacing(3)
+        self.hint = QtWidgets.QLabel("")
+        self.hint.setObjectName("fieldValue")
+        self.hint.setWordWrap(True)
+        lines.addWidget(self.hint)
+        self.details = QtWidgets.QVBoxLayout()
+        self.details.setSpacing(2)
+        lines.addLayout(self.details)
+        row.addLayout(lines, 1)
+        self.actions = QtWidgets.QHBoxLayout()
+        self.actions.setSpacing(8)
+        row.addLayout(self.actions)
+        self.set_state("owe", "")
+        # 点位对齐:圆点跟第一行文字齐,不跟整块居中
+        self.dot.setContentsMargins(0, 5, 0, 0)
+
+    def add(self, *widgets):
+        for widget in widgets:
+            self.actions.addWidget(widget)
+
+    def add_detail(self, widget):
+        """把服务端返回的状态文字收进行动条,不让它裸露在页面上。"""
+        self.details.addWidget(widget)
+
+    def set_state(self, state, text):
+        self.dot.setStyleSheet("background:%s;border-radius:4px;" % _state_color(state))
+        self.hint.setText(str(text or ""))
 
 
 class HoverCard(QtWidgets.QFrame):
@@ -4707,6 +5872,35 @@ def _draw_icon(kind, size=22, color="#ffffff"):
         for gx in (0.20, 0.56):
             for gy in (0.20, 0.56):
                 p.drawRoundedRect(QtCore.QRectF(s * gx, s * gy, s * 0.24, s * 0.24), s * 0.04, s * 0.04)
+    elif kind == "bolt":  # 闪电(计费徽章)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(c)
+        path = QtGui.QPainterPath(QtCore.QPointF(s * 0.58, s * 0.08))
+        path.lineTo(s * 0.24, s * 0.55)
+        path.lineTo(s * 0.46, s * 0.55)
+        path.lineTo(s * 0.42, s * 0.92)
+        path.lineTo(s * 0.76, s * 0.45)
+        path.lineTo(s * 0.54, s * 0.45)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif kind == "info":  # 圆圈 i(说明)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawEllipse(QtCore.QRectF(s * 0.13, s * 0.13, s * 0.74, s * 0.74))
+        line(0.5, 0.45, 0.5, 0.70)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(c)
+        p.drawEllipse(QtCore.QRectF(s * 0.44, s * 0.28, s * 0.12, s * 0.12))
+    elif kind == "close":  # 叉(清空输入)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        line(0.29, 0.29, 0.71, 0.71)
+        line(0.71, 0.29, 0.29, 0.71)
+    elif kind == "chevron":  # 下拉箭头
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        line(0.28, 0.40, 0.50, 0.62)
+        line(0.50, 0.62, 0.72, 0.40)
     else:  # dot
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(c)
@@ -5773,7 +6967,7 @@ class EnterpriseMembersPage(BasePage):
             elif action == "invite":
                 self._show_copy_dialog(
                     "邀请已创建",
-                    "邀请码：\n%s\n\n请通过可信渠道发送给对方，对方在本地客户端登录页选择“加入企业”。"
+                    "邀请码：\n%s\n\n当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。"
                     % (response.get("inviteCode") or "-"),
                 )
             elif action == "add":
@@ -5946,7 +7140,7 @@ class EnterpriseMembersPage(BasePage):
         form.addRow("成员角色", role)
         form.addRow("邀请码有效期", ttl)
         layout.addLayout(form)
-        tip = QtWidgets.QLabel("创建后复制邀请码发送给对方；对方在登录页输入邀请码、姓名和密码即可加入所选企业。")
+        tip = QtWidgets.QLabel("当前登录页仅保留账号登录；交付新成员建议使用“添加成员”或“重置密码”。")
         tip.setObjectName("sub")
         tip.setWordWrap(True)
         layout.addWidget(tip)
@@ -7210,7 +8404,9 @@ def _xhs_note_source_image_headers(url, central_base=""):
         )
     except Exception:
         return {}
-    if same_origin and target.path.startswith("/api/library/file/"):
+    # 不要放宽成"只比 origin":在共享站点上,这处 path 判断是 X-Matrix-User-Token
+    # 唯一的作用域边界。
+    if same_origin and target.path.startswith(central_library_file_prefix(central)):
         return _headers()
     return {}
 
@@ -7564,6 +8760,11 @@ class ContentPage(BasePage):
         self.b_dl = QtWidgets.QPushButton("下载")
         self.b_dl.setObjectName("ghost")
         self.b_dl.clicked.connect(self.download)
+        # 小红书大部分是图文笔记，"分解"只处理视频；图文走"图文同款"入口，
+        # 下载后自动跳转到图文同款页复刻结构。
+        self.b_note_replace = QtWidgets.QPushButton("图文同款")
+        self.b_note_replace.setObjectName("primary")
+        self.b_note_replace.clicked.connect(self.note_replace)
         self.b_break = QtWidgets.QPushButton("分解")
         self.b_break.setObjectName("primary")
         self.b_break.clicked.connect(self.breakdown)
@@ -7572,6 +8773,7 @@ class ContentPage(BasePage):
         self.b_cm.clicked.connect(self.comments)
         ab.addWidget(self.url, 3)
         ab.addWidget(self.b_dl)
+        ab.addWidget(self.b_note_replace)
         ab.addWidget(self.b_break)
         ab.addWidget(self.b_cm)
         self.v.addLayout(ab)
@@ -7678,6 +8880,7 @@ class ContentPage(BasePage):
         elif tag == "c_dl":
             self.b_dl.setEnabled(False)
         elif tag == "c_note_replace":
+            self.b_note_replace.setEnabled(False)
             self.b_dl.setEnabled(False)
         elif tag == "c_cm":
             self.b_cm.setEnabled(False)
@@ -7749,6 +8952,39 @@ class ContentPage(BasePage):
             return
         self._xhs_retry_context.pop("c_dl", None)
         run_bg(lambda: BRIDGE.payload.emit("c_dl", submit_local_task(pf + ".download", payload, 600)))
+
+    def note_replace(self):
+        u = self.url.text().strip()
+        if not u:
+            self.status.setText("请先选择或粘贴小红书笔记链接")
+            return
+        host = (urlparse(u).hostname or "").lower()
+        is_xhs_url = host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")
+        if self._pf() != "xhs" or not is_xhs_url:
+            self.status.setText("图文同款仅支持小红书笔记，请先切换到小红书或选择小红书链接")
+            return
+        self.b_note_replace.setEnabled(False)
+        self.b_dl.setEnabled(False)
+        self.status.setText("账号下载中：使用账号矩阵里已登录的小红书账号")
+        payload = {
+            "url": u,
+            "noteUrl": u,
+            "save_choice": "all",
+            "platform": "xhs",
+            "guestMode": False,
+            "accountCollectionConfirmed": True,
+        }
+        payload = self._attach_content_account(payload)
+        if payload is None:
+            self.b_note_replace.setEnabled(True)
+            self.b_dl.setEnabled(True)
+            return
+        self._xhs_retry_context.pop("c_note_replace", None)
+
+        def work():
+            task = submit_local_task("xhs.download", payload, 600)
+            BRIDGE.payload.emit("c_note_replace", {"task": task, "url": u, "platform": "xhs"})
+        run_bg(work)
 
     def breakdown(self):
         u = self.url.text().strip()
@@ -7836,6 +9072,7 @@ class ContentPage(BasePage):
             self.status.setText("下载完成并入库。" if (d.get("status") == "done" and rr.get("ok") is not False)
                                 else ("下载失败:" + str(d.get("error") or rr.get("error") or "")))
         elif tag == "c_note_replace":
+            self.b_note_replace.setEnabled(True)
             self.b_dl.setEnabled(True)
             payload = d if isinstance(d, dict) else {}
             if self._xhs_retry_with_account(tag, payload):
@@ -8141,6 +9378,7 @@ class VideoBreakdownPage(BasePage):
                 progress("调用视觉模型分析关键帧…")
                 frame_urls = [_image_data_url(f.get("path")) for f in frames[:16]]
                 frame_urls = [u for u in frame_urls if u]
+                visual_status = _visual_status_ok()
                 try:
                     visual = lk888_vision(
                         "请逐帧描述这些短视频关键帧，重点提取人物、产品、场景、动作、字幕、道具、镜头节奏。",
@@ -8158,10 +9396,14 @@ class VideoBreakdownPage(BasePage):
                     )
                     import json as _json
                     error_id = (_json.loads(raw) or {}).get("errorId")
-                    visual = "视觉模型分析失败（errorId: %s）: %s\n%s" % (
-                        error_id or "-", str(exc)[:160], frame_notes
+                    # Diagnostics never become画面描述; the failure travels in
+                    # visualStatus so the report and the UI can show it instead.
+                    visual = ""
+                    visual_status = _visual_status_failed(
+                        error_id, "video_breakdown_vision_failed"
                     )
                 out["visual"] = visual
+                out["visualStatus"] = visual_status
                 out["frameNotes"] = frame_notes
                 progress("生成深度拆解报告…")
                 report, msg = _generate_video_breakdown_report(out)
@@ -8189,6 +9431,10 @@ class VideoBreakdownPage(BasePage):
                     "status": "failed", "text": "", "segments": [], "failedRanges": [],
                     "errors": [], "retryCount": 0, "message": "",
                 }
+                out["visual"] = out.get("visual") or ""
+                out["visualStatus"] = out.get("visualStatus") or _visual_status_failed(
+                    error_id, "video_breakdown_failed"
+                )
                 out["report"] = "## 分解失败\nerrorId: %s\n\n%s" % (error_id or "-", str(exc)[:500])
                 BRIDGE.payload.emit("video_breakdown_done", {
                     "job": job,
@@ -11156,31 +12402,93 @@ def _format_duration_zh(seconds):
     return "%d秒" % secs
 
 
+_REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC = 5.5
+_COMIC_DURATION_MIN_SEC = 4
+_COMIC_DURATION_MAX_SEC = 15
+_COMIC_DURATION_DEFAULT_HEADROOM_SEC = 0.5
+
+
 def _estimate_replacement_tts_duration_sec(text):
     value = re.sub(r"\s+", "", str(text or "").strip())
     if not value:
         return 0.0
-    chars_per_sec = 4.2
+    chars_per_sec = _REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC
     try:
         configured = float(os.getenv("VIDEO_REPLACE_TTS_CHARS_PER_SEC", "") or 0)
         if configured > 0:
             chars_per_sec = configured
     except (TypeError, ValueError):
-        chars_per_sec = 4.2
+        chars_per_sec = _REPLACEMENT_TTS_DEFAULT_CHARS_PER_SEC
     chars_per_sec = max(2.5, min(chars_per_sec, 8.0))
     punctuation_pause = len(re.findall(r"[，。！？；、,.!?;:：]", value)) * 0.12
     return round((len(value) / chars_per_sec) + punctuation_pause, 2)
 
 
-def _comic_video_duration_slot(speech_duration_sec):
+def _comic_duration_headroom_sec():
+    try:
+        value = float(os.getenv("VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC", "") or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        value = _COMIC_DURATION_DEFAULT_HEADROOM_SEC
+    return max(0.0, min(value, 3.0))
+
+
+def _comic_duration_slots():
+    """Video seconds the comic backend may be asked for, ascending.
+
+    Defaults to every integer second in the supported range, so a 12.1 second
+    line books 13 seconds instead of the old 15 second rung. Set
+    VIDEO_REPLACE_COMIC_DURATION_SLOTS=4,8,12,15 to restore the coarse ladder
+    if the remote model rejects arbitrary seconds.
+    """
+    slots = []
+    for part in re.split(r"[,\s;]+", str(os.getenv("VIDEO_REPLACE_COMIC_DURATION_SLOTS", "") or "").strip()):
+        if not part:
+            continue
+        try:
+            value = int(float(part))
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in slots:
+            slots.append(value)
+    if slots:
+        return tuple(sorted(slots))
+    return tuple(range(_COMIC_DURATION_MIN_SEC, _COMIC_DURATION_MAX_SEC + 1))
+
+
+def _comic_video_duration_slot(speech_duration_sec, headroom_sec=None):
     try:
         duration = max(0.0, float(speech_duration_sec or 0.0))
     except (TypeError, ValueError):
         duration = 0.0
-    for slot in (4, 8, 12, 15):
+    if duration > 0:
+        if headroom_sec is None:
+            duration += _comic_duration_headroom_sec()
+        else:
+            try:
+                duration += max(0.0, float(headroom_sec or 0.0))
+            except (TypeError, ValueError):
+                pass
+    slots = _comic_duration_slots()
+    for slot in slots:
         if duration <= slot:
             return slot
-    return 15
+    return slots[-1]
+
+
+def _comic_segment_video_duration(segment):
+    """Video seconds for one comic segment; an already planned value wins as-is."""
+    segment = segment or {}
+    try:
+        planned = float(segment.get("videoDurationSec") or 0)
+    except (TypeError, ValueError):
+        planned = 0.0
+    if planned > 0:
+        return _comic_video_duration_slot(planned, headroom_sec=0.0)
+    return _comic_video_duration_slot(
+        segment.get("speechDurationSec") or segment.get("duration")
+    )
 
 
 def _comic_split_script_for_duration(script, max_speech_sec=15.0):
@@ -11227,7 +12535,77 @@ def _comic_split_script_for_duration(script, max_speech_sec=15.0):
     return chunks or [text]
 
 
-def _comic_plan_script_segments(segments, max_speech_sec=15.0):
+def _comic_measure_tts_enabled():
+    raw = str(os.getenv("VIDEO_REPLACE_COMIC_MEASURE_TTS", "") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _comic_measure_tts_parallelism():
+    try:
+        value = int(float(os.getenv("VIDEO_REPLACE_COMIC_MEASURE_TTS_PARALLELISM", "") or 0))
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        value = 4
+    return max(1, min(value, 8))
+
+
+def _comic_measure_script_duration(job, script):
+    """Real TTS seconds for one comic line; 0.0 when it cannot be measured.
+
+    The character-count estimate is only a proxy; booking video seconds from the
+    real audio length is what stops a 11 second line from paying for 15.
+    """
+    text = str(script or "").strip()
+    if not text:
+        return 0.0
+    job = job or {}
+    try:
+        url = lk888_tts_voice(
+            text,
+            str(job.get("voiceId") or job.get("ttsVoice") or "").strip(),
+            cancel_check=_replacement_cancel_check(job),
+        )
+    except Exception as exc:
+        if _replacement_cancel_exception(exc):
+            raise
+        log("comic tts measure: %s" % str(exc)[:120])
+        return 0.0
+    if not _is_remote_fetchable_media_url(url):
+        return 0.0
+    return max(0.0, _probe_media_duration(url))
+
+
+def _comic_apply_measured_speech_durations(planned, job):
+    """Swap character-count estimates for measured TTS seconds where possible."""
+    if not (planned and job and _comic_measure_tts_enabled()):
+        return
+    targets = [item for item in planned if str(item.get("script") or "").strip()]
+    if not targets:
+        return
+    parallelism = min(_comic_measure_tts_parallelism(), len(targets))
+    log("comic plan: measuring %d TTS lines (parallelism=%d)" % (len(targets), parallelism))
+
+    def measure_one(item):
+        return item, _comic_measure_script_duration(job, item.get("script"))
+
+    if parallelism <= 1:
+        measured = [measure_one(item) for item in targets]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as pool:
+            futures = [pool.submit(measure_one, item) for item in targets]
+            measured = [future.result() for future in concurrent.futures.as_completed(futures)]
+    top_slot = _comic_duration_slots()[-1]
+    for item, seconds in measured:
+        if seconds <= 0:
+            continue
+        item["speechDurationSec"] = round(seconds, 2)
+        item["speechDurationSource"] = "measured"
+        if seconds > top_slot:
+            item["speechOverflowSec"] = round(seconds - top_slot, 2)
+
+
+def _comic_plan_script_segments(segments, max_speech_sec=15.0, job=None):
     planned = []
     for source_segment in list(segments or []):
         if not isinstance(source_segment, dict):
@@ -11238,14 +12616,15 @@ def _comic_plan_script_segments(segments, max_speech_sec=15.0):
         count = len(script_parts)
         for continuation_index, script_part in enumerate(script_parts, start=1):
             segment = dict(source_segment)
-            speech_duration = _estimate_replacement_tts_duration_sec(script_part)
+            estimated = _estimate_replacement_tts_duration_sec(script_part)
             source_start = source_segment.get("sourceStart", source_segment.get("start"))
             source_end = source_segment.get("sourceEnd", source_segment.get("end"))
             source_duration = source_segment.get("sourceDuration", source_segment.get("duration"))
             segment.update({
                 "script": script_part,
-                "speechDurationSec": round(speech_duration, 2),
-                "videoDurationSec": _comic_video_duration_slot(speech_duration),
+                "speechDurationSec": round(estimated, 2),
+                "speechEstimatedSec": round(estimated, 2),
+                "speechDurationSource": "estimated",
                 "continuationIndex": continuation_index,
                 "continuationCount": count,
                 "sourceStart": source_start,
@@ -11259,9 +12638,12 @@ def _comic_plan_script_segments(segments, max_speech_sec=15.0):
                 )
             planned.append(segment)
 
+    _comic_apply_measured_speech_durations(planned, job)
+
     cursor = 0.0
     for index, segment in enumerate(planned, start=1):
-        duration = float(segment.get("videoDurationSec") or 4)
+        segment["videoDurationSec"] = _comic_video_duration_slot(segment.get("speechDurationSec"))
+        duration = float(segment.get("videoDurationSec") or _COMIC_DURATION_MIN_SEC)
         segment["index"] = index
         segment["start"] = round(cursor, 3)
         cursor += duration
@@ -11618,8 +13000,200 @@ def _replacement_hybrid_pipeline():
     return HybridReplacementPipeline(helpers=_REPLACEMENT_HELPERS, runtime=time)
 
 
+def _replacement_comic_pipeline():
+    from replacement_pipeline import ComicProjectReplacementPipeline
+    return ComicProjectReplacementPipeline(helpers=_REPLACEMENT_HELPERS, runtime=time)
+
+
+def _replacement_pipeline_for_job(job=None):
+    if _replacement_job_mode(job) == "comic_project" or str((job or {}).get("pipeline") or "").strip() == "comic_project":
+        return _replacement_comic_pipeline()
+    return _replacement_hybrid_pipeline()
+
+
+class _ReplacementServicePipeline:
+    """Route each ReplacementService call to the hybrid or comic pipeline by job mode.
+
+    The /replacement web path and the Qt shared-service adapter both drive a
+    ReplacementService built from a single pipeline. Using only the hybrid
+    pipeline ignored comic_project jobs, which is the product default
+    (VIDEO_REPLACE_DEFAULT_MODE). This router mirrors _replacement_pipeline_for_job
+    so both surfaces honor comic vs legacy exactly like the native Qt page.
+
+    A job that carries no explicit replacementMode (e.g. a fresh web job) is
+    defaulted to the product default at plan time so the choice persists in
+    job.json and later execute/retry/concat route to the same pipeline. Jobs that
+    already carry a mode (Qt shared-mode jobs) are never overridden.
+    """
+
+    def _for(self, job):
+        return _replacement_pipeline_for_job(job)
+
+    def build_plan(self, job):
+        job = job if isinstance(job, dict) else {}
+        if not str(job.get("replacementMode") or "").strip():
+            job["replacementMode"] = _video_replacement_default_mode()
+        return self._for(job).build_plan(job)
+
+    def execute(self, job, selected_segments=None, progress=None):
+        return self._for(job).execute(job, selected_segments, progress=progress)
+
+    def retry(self, job, segment_indices, progress=None):
+        return self._for(job).retry(job, segment_indices, progress=progress)
+
+    def concat(self, job):
+        return self._for(job).concat(job)
+
+    def regenerate_frame(self, job, segment_index, frame_kind, progress=None):
+        return self._for(job).regenerate_frame(job, segment_index, frame_kind, progress=progress)
+
+
+def _replacement_service_pipeline():
+    return _ReplacementServicePipeline()
+
+
 def _replacement_public_job(job):
-    return _replacement_hybrid_pipeline().public_job(job)
+    return _replacement_pipeline_for_job(job).public_job(job)
+
+
+def replacement_mode_for_new_job():
+    """Return the video-replacement service mode for a *new* job.
+
+    Controlled by ``VIDEO_REPLACEMENT_SERVICE_MODE`` (``legacy`` | ``shared``).
+    Defaults to ``legacy`` for safety. A new job uses ``shared`` only when BOTH
+    the env opt-in AND the local circuit breaker (``shared_mode_allowed``) agree;
+    when the breaker is open we emit ``shared_mode_circuit_opened`` /
+    ``rollback_requested`` and fall back to ``legacy``. A job already in flight
+    keeps whatever path it started on — the breaker only gates new jobs.
+    """
+    mode = str(os.getenv("VIDEO_REPLACEMENT_SERVICE_MODE", "") or "").strip().lower()
+    if mode != "shared":
+        return "legacy"
+    try:
+        import replacement_service
+    except Exception:
+        return "shared"
+    try:
+        base_dir = data_dir()
+    except Exception:
+        base_dir = None
+    try:
+        if replacement_service.shared_mode_allowed(base_dir):
+            return "shared"
+    except Exception:
+        # Fail open to shared only if the breaker itself is unavailable; any
+        # decision error must not silently strand an opted-in operator.
+        return "shared"
+    try:
+        state = replacement_service.circuit_breaker_state(base_dir)
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "shared_mode_circuit_opened", level="warning",
+            stage="new_job_gate", status="open",
+            detail={
+                "total": state.get("total"),
+                "failures": state.get("failures"),
+                "failureRate": round(float(state.get("failureRate") or 0.0), 6),
+            },
+        )
+        replacement_service.emit_replacement_event(
+            _CLIENT_JSON_LOGGER, "rollback_requested", level="warning",
+            stage="new_job_gate", status="legacy",
+        )
+    except Exception:
+        pass
+    return "legacy"
+
+
+def video_replacement_service_shared():
+    return replacement_mode_for_new_job() == "shared"
+
+
+class ReplacementServiceAdapter:
+    """Bridge the Qt VideoReplacementPage onto the shared ReplacementService.
+
+    The adapter only forwards request overrides built from Qt page controls and
+    reads job state back through the service's public (scrubbed) job. Provider
+    task IDs and billing refs live in job.json / the pipeline and are never
+    mutated here, so Qt never sees or rewrites internal paths, credentials or
+    provider task identifiers. Existing BRIDGE event shapes are preserved.
+    """
+
+    def __init__(self, data_dir=None, service=None, bridge=None):
+        self._data_dir = data_dir
+        self._service = service
+        self._bridge = bridge
+
+    def _resolve_service(self):
+        if self._service is None:
+            import replacement_web
+            self._service = replacement_web.build_video_service(self._data_dir or data_dir())
+        return self._service
+
+    def _emit(self, event, payload):
+        bridge = self._bridge if self._bridge is not None else BRIDGE
+        if bridge is not None:
+            bridge.payload.emit(event, payload)
+
+    def prepare(self, job_id, request, files, progress=None):
+        job = self._resolve_service().prepare(job_id, request, files, progress=progress)
+        self._emit("video_replace_plan_ready", {"jobId": job_id, "job": job})
+        return job
+
+    def execute(self, job_id, overrides=None, progress=None):
+        job = self._resolve_service().execute(job_id, overrides=overrides or {}, progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def retry(self, job_id, segment_indices, progress=None):
+        job = self._resolve_service().retry(job_id, segment_indices or [], progress=progress)
+        self._emit_run_result(job_id, job)
+        return job
+
+    def concat(self, job_id, progress=None):
+        job = self._resolve_service().concat(job_id, progress=progress)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "替换生成完成，已存入资产库",
+            "job": job,
+        })
+        return job
+
+    def cancel(self, job_id):
+        job = self._resolve_service().cancel(job_id)
+        self._emit("video_replace_done", {
+            "jobId": job_id,
+            "message": "任务已取消",
+            "job": job,
+        })
+        return job
+
+    def _emit_run_result(self, job_id, job):
+        job = job if isinstance(job, dict) else {}
+        status = str(job.get("status") or "")
+        if status == "partial":
+            failed = [
+                segment for segment in (job.get("segments") or [])
+                if isinstance(segment, dict) and segment.get("status") in ("failed", "download_failed")
+            ]
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
+                "job": job,
+                "failedSegments": failed,
+            })
+        elif status in ("completed", "done"):
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成完成，已存入资产库",
+                "job": job,
+            })
+        elif status == "failed":
+            self._emit("video_replace_done", {
+                "jobId": job_id,
+                "message": "替换生成失败",
+                "job": job,
+            })
+        # running / awaiting_review are surfaced through progress events only.
 
 
 def _replacement_cancel_requested(job):
@@ -11717,12 +13291,24 @@ class XhsNoteReplacementPage(BasePage):
         self.v.addWidget(make_header("图文同款", "小红书图文结构复刻 · 先预览替换方案，再保存到素材发布和资产库"))
         self.v.addWidget(prereq_banner("图文同款 V1 只生成草稿，不自动发布；缺图必须手动选择替换图片后才能生成预览和保存草稿。"))
 
-        source = QtWidgets.QFrame()
-        source.setObjectName("card")
-        sl = QtWidgets.QGridLayout(source)
-        sl.setContentsMargins(16, 14, 16, 14)
-        sl.setHorizontalSpacing(12)
-        sl.setVerticalSpacing(10)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        page = QtWidgets.QWidget()
+        # 用 objectName 走 QSS 里已有的 QWidget#page 规则;直接 setStyleSheet
+        # 无类型选择器会继承到子控件,把主色按钮刷成透明
+        page.setObjectName("page")
+        col = QtWidgets.QVBoxLayout(page)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(14)
+        scroll.setWidget(page)
+        self.v.addWidget(scroll, 1)
+
+        # ---- 原片:只读来源,默认让位给下面要动手的部分 ----
+        source, sb = zone_card("原片", "来源笔记", "从内容采集下载后自动带入，可改")
+        sl = field_grid(columns=2)
         self.material_id = QtWidgets.QLineEdit()
         self.material_id.hide()
         self.source_path = QtWidgets.QLineEdit()
@@ -11734,44 +13320,26 @@ class XhsNoteReplacementPage(BasePage):
         self.source_title.setPlaceholderText("可选：原笔记标题")
         self.source_body = QtWidgets.QPlainTextEdit()
         self.source_body.setPlaceholderText("可选：原笔记正文")
-        self.source_body.setMaximumHeight(82)
+        self.source_body.setFixedHeight(58)
         self.source_tags = QtWidgets.QLineEdit()
         self.source_tags.setPlaceholderText("可选：原标签，用空格或逗号分隔")
-        sl.addWidget(QtWidgets.QLabel("来源素材"), 0, 0)
-        sl.addWidget(self.source_path, 0, 1)
-        sl.addWidget(QtWidgets.QLabel("笔记链接"), 1, 0)
-        sl.addWidget(self.source_url, 1, 1)
-        sl.addWidget(QtWidgets.QLabel("原始标题"), 2, 0)
-        sl.addWidget(self.source_title, 2, 1)
-        sl.addWidget(QtWidgets.QLabel("原始正文"), 3, 0)
-        sl.addWidget(self.source_body, 3, 1)
-        sl.addWidget(QtWidgets.QLabel("原始标签"), 4, 0)
-        sl.addWidget(self.source_tags, 4, 1)
-        sl.addWidget(QtWidgets.QLabel("原笔记图片"), 5, 0)
-        self.source_image_count = QtWidgets.QLabel("0 张")
-        self.source_image_count.setObjectName("sub")
-        sl.addWidget(self.source_image_count, 5, 1)
-        self.source_image_scroll = QtWidgets.QScrollArea()
-        self.source_image_scroll.setWidgetResizable(True)
-        self.source_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.source_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self.source_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.source_image_scroll.setFixedHeight(192)
-        self.source_image_host = QtWidgets.QWidget()
-        self.source_image_layout = QtWidgets.QHBoxLayout(self.source_image_host)
-        self.source_image_layout.setContentsMargins(0, 0, 0, 0)
-        self.source_image_layout.setSpacing(10)
-        self.source_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.source_image_scroll.setWidget(self.source_image_host)
-        sl.addWidget(self.source_image_scroll, 6, 0, 1, 2)
-        self.v.addWidget(source)
+        # 只读参考信息排成两列,不让它在页面顶部占掉真正要动手的位置
+        for row, column, caption, widget in (
+            (0, 0, "来源素材", self.source_path),
+            (0, 1, "笔记链接", self.source_url),
+            (1, 0, "原始标题", self.source_title),
+            (1, 1, "原始标签", self.source_tags),
+        ):
+            sl.addWidget(field_label(caption), row, column * 2, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+            sl.addWidget(widget, row, column * 2 + 1)
+        sl.addWidget(field_label("原始正文"), 2, 0, QtCore.Qt.AlignTop | QtCore.Qt.AlignRight)
+        sl.addWidget(self.source_body, 2, 1, 1, 3)
+        sb.addLayout(sl)
+        col.addWidget(source)
 
-        business = QtWidgets.QFrame()
-        business.setObjectName("card")
-        bl = QtWidgets.QGridLayout(business)
-        bl.setContentsMargins(16, 14, 16, 14)
-        bl.setHorizontalSpacing(12)
-        bl.setVerticalSpacing(10)
+        # ---- 你的信息 ----
+        business, bb = zone_card("你的信息", "业务信息", "标题、所在地、目标客户填完才能生成")
+        bl = field_grid()
         self.biz_name = QtWidgets.QLineEdit()
         self.biz_name.setPlaceholderText("生成后笔记标题")
         self.biz_region = QtWidgets.QLineEdit()
@@ -11780,85 +13348,164 @@ class XhsNoteReplacementPage(BasePage):
         self.biz_audience.setPlaceholderText("目标客户，例如：新手宝妈 / 本地门店老板")
         self.biz_selling = QtWidgets.QPlainTextEdit()
         self.biz_selling.setPlaceholderText("卖点，一行一个")
-        self.biz_selling.setMaximumHeight(88)
-        bl.addWidget(QtWidgets.QLabel("标题（必填）"), 0, 0)
-        bl.addWidget(self.biz_name, 0, 1)
-        bl.addWidget(QtWidgets.QLabel("所在地（必填）"), 1, 0)
-        bl.addWidget(self.biz_region, 1, 1)
-        bl.addWidget(QtWidgets.QLabel("目标客户（必填）"), 2, 0)
-        bl.addWidget(self.biz_audience, 2, 1)
-        bl.addWidget(QtWidgets.QLabel("卖点（可编辑）"), 3, 0)
-        bl.addWidget(self.biz_selling, 3, 1)
-        self.v.addWidget(business)
+        self.biz_selling.setFixedHeight(76)
+        for row, (caption, widget) in enumerate((
+            ("标题（必填）", self.biz_name),
+            ("所在地（必填）", self.biz_region),
+            ("目标客户（必填）", self.biz_audience),
+            ("卖点（可编辑）", self.biz_selling),
+        )):
+            align = QtCore.Qt.AlignTop if widget is self.biz_selling else QtCore.Qt.AlignVCenter
+            bl.addWidget(field_label(caption), row, 0, align | QtCore.Qt.AlignRight)
+            bl.addWidget(widget, row, 1)
+        bb.addLayout(bl)
+        for widget in (self.biz_name, self.biz_region, self.biz_audience):
+            widget.textChanged.connect(self._sync_swap_state)
+        col.addWidget(business)
 
-        replacement = QtWidgets.QFrame()
-        replacement.setObjectName("card")
-        rl = QtWidgets.QVBoxLayout(replacement)
-        rl.setContentsMargins(16, 14, 16, 14)
-        rhead = QtWidgets.QHBoxLayout()
-        rtitle = QtWidgets.QLabel("替换图片")
-        rtitle.setObjectName("sub")
-        rhead.addWidget(rtitle)
-        rhead.addStretch()
-        rl.addLayout(rhead)
+        # ---- 换位台账:上=原图,下=你的替换图,中间的连接线就是状态 ----
+        replacement, rb = zone_card(
+            "换位台账", "图片换位", "上下同一列就是同一个位置：第 N 张原图正对第 N 个替换槽")
+        caption_row = QtWidgets.QHBoxLayout()
+        caption_row.setSpacing(8)
+        origin_caption = QtWidgets.QLabel("原笔记图片")
+        origin_caption.setObjectName("fieldLabel")
+        self.source_image_count = QtWidgets.QLabel("0 张")
+        self.source_image_count.setObjectName("meta")
+        self.swap_progress = QtWidgets.QLabel("尚未读取图文结构")
+        self.swap_progress.setObjectName("meta")
+        caption_row.addWidget(origin_caption)
+        caption_row.addWidget(self.source_image_count)
+        caption_row.addStretch(1)
+        caption_row.addWidget(self.swap_progress)
+        rb.addLayout(caption_row)
+
+        self.source_image_scroll = QtWidgets.QScrollArea()
+        self.source_image_scroll.setWidgetResizable(True)
+        self.source_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.source_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.source_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.source_image_scroll.setFixedHeight(186)
+        self.source_image_host = QtWidgets.QWidget()
+        self.source_image_layout = QtWidgets.QHBoxLayout(self.source_image_host)
+        self.source_image_layout.setContentsMargins(0, 0, 0, 0)
+        self.source_image_layout.setSpacing(10)
+        self.source_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.source_image_scroll.setWidget(self.source_image_host)
+        rb.addWidget(self.source_image_scroll)
+
+        self.swap_rail = SwapRail(cell=132, gap=10, height=30)
+        rb.addWidget(self.swap_rail)
+
         self.replacement_image_scroll = QtWidgets.QScrollArea()
         self.replacement_image_scroll.setWidgetResizable(True)
         self.replacement_image_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.replacement_image_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.replacement_image_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.replacement_image_scroll.setFixedHeight(192)
+        self.replacement_image_scroll.setFixedHeight(186)
         self.replacement_image_host = QtWidgets.QWidget()
         self.replacement_image_layout = QtWidgets.QHBoxLayout(self.replacement_image_host)
         self.replacement_image_layout.setContentsMargins(0, 0, 0, 0)
         self.replacement_image_layout.setSpacing(10)
         self.replacement_image_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.replacement_image_scroll.setWidget(self.replacement_image_host)
-        rl.addWidget(self.replacement_image_scroll)
-        self.v.addWidget(replacement)
+        rb.addWidget(self.replacement_image_scroll)
 
-        controls = QtWidgets.QHBoxLayout()
+        # 两条缩略图带共用一个滚动位置,否则一滚动上下就对不上了
+        self.source_image_scroll.horizontalScrollBar().valueChanged.connect(self._on_swap_scrolled)
+        self.replacement_image_scroll.horizontalScrollBar().valueChanged.connect(self._on_swap_scrolled)
+
+        self.template_summary = QtWidgets.QLabel("尚未读取图文结构")
+        self.template_summary.setObjectName("meta")
+        self.template_summary.setWordWrap(True)
+        rb.addWidget(self.template_summary)
+        col.addWidget(replacement)
+
+        # ---- 行动条:点之前就知道还差什么 ----
+        self.ready = ReadyBar()
         self.b_preview = QtWidgets.QPushButton("生成同款预览")
         self.b_preview.setObjectName("primary")
         self.b_preview.clicked.connect(self.generate_preview)
-        self.b_save = QtWidgets.QPushButton("保存草稿")
-        self.b_save.setObjectName("primary")
-        self.b_save.clicked.connect(self.save_draft)
-        controls.addWidget(self.b_preview)
-        controls.addWidget(self.b_save)
-        controls.addStretch()
-        self.v.addLayout(controls)
-
+        self.ready.add(self.b_preview)
         self.status = QtWidgets.QLabel("未开始")
-        self.status.setObjectName("sub")
+        self.status.setObjectName("meta")
         self.status.setWordWrap(True)
-        self.v.addWidget(self.status)
-        self.template_summary = QtWidgets.QLabel("尚未读取图文结构")
-        self.template_summary.setObjectName("sub")
-        self.template_summary.setWordWrap(True)
-        self.v.addWidget(self.template_summary)
+        self.ready.add_detail(self.status)
+        col.addWidget(self.ready)
 
+        # ---- 生成结果:文案在这里改,也在这里存 ----
         self.copy_selector = QtWidgets.QComboBox()
         self.copy_selector.setEnabled(False)
+        self.copy_selector.setPlaceholderText("尚无方案")
+        self.copy_selector.setMinimumWidth(128)
         self.copy_selector.currentIndexChanged.connect(self._render_selected_copy)
-        self.v.addWidget(self.copy_selector)
+        copy_zone, cb = zone_card(
+            "生成结果", "文案方案", "改完再保存，保存的是你当前看到的这一版", actions=[self.copy_selector])
 
         self.copy_title = QtWidgets.QLineEdit()
         self.copy_title.setPlaceholderText("当前方案标题，可编辑")
         self.copy_title.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_title)
-
         self.copy_view = QtWidgets.QPlainTextEdit()
         self.copy_view.setReadOnly(False)
         self.copy_view.setPlaceholderText("当前方案正文，可编辑。")
         self.copy_view.setMinimumHeight(180)
         self.copy_view.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_view, 1)
-
         self.copy_tags = QtWidgets.QLineEdit()
         self.copy_tags.setPlaceholderText("当前方案标签，可编辑，例如：#本地探店 #避坑")
         self.copy_tags.textChanged.connect(self._capture_current_copy_edit)
-        self.v.addWidget(self.copy_tags)
+        for caption, widget in (("标题", self.copy_title), ("正文", self.copy_view), ("标签", self.copy_tags)):
+            label = QtWidgets.QLabel(caption)
+            label.setObjectName("fieldLabel")
+            cb.addWidget(label)
+            cb.addWidget(widget)
+
+        save_row = QtWidgets.QHBoxLayout()
+        save_row.addStretch(1)
+        self.b_save = QtWidgets.QPushButton("保存草稿")
+        self.b_save.setObjectName("primary")
+        self.b_save.clicked.connect(self.save_draft)
+        save_row.addWidget(self.b_save)
+        cb.addLayout(save_row)
+        col.addWidget(copy_zone)
+        col.addStretch(1)
+
         BRIDGE.payload.connect(self._on)
+        self._sync_swap_state()
+
+    def _on_swap_scrolled(self, value):
+        """两条缩略图带联动滚动,并把偏移交给中间的连接线。"""
+        value = int(value or 0)
+        for bar in (self.source_image_scroll.horizontalScrollBar(),
+                    self.replacement_image_scroll.horizontalScrollBar()):
+            if bar.value() != value:
+                bar.blockSignals(True)
+                bar.setValue(value)
+                bar.blockSignals(False)
+        self.swap_rail.set_offset(value)
+
+    def _sync_swap_state(self, *_args):
+        """把"还差什么"算出来:缺图 + 缺必填字段,连接线和行动条读同一份状态。"""
+        slots = list(self._replacement_slots or [])
+        states = ["swap" if str(slot.get("filePath") or "").strip() else "owe" for slot in slots]
+        self.swap_rail.set_states(states)
+        filled = sum(1 for state in states if state == "swap")
+        if slots:
+            self.swap_progress.setText("已替换 %d / %d" % (filled, len(slots)))
+        else:
+            self.swap_progress.setText("尚未读取图文结构")
+
+        missing_fields = self._missing_required_fields()
+        missing_images = len(slots) - filled
+        if not slots:
+            self.ready.set_state("keep", "先从内容采集下载一条笔记，读到图文结构后才能开始换图。")
+        elif missing_images and missing_fields:
+            self.ready.set_state("owe", "还差 %d 张替换图，以及%s。" % (missing_images, "、".join(missing_fields)))
+        elif missing_images:
+            self.ready.set_state("owe", "还差 %d 张替换图，点上面的空槽选图。" % missing_images)
+        elif missing_fields:
+            self.ready.set_state("owe", "图片齐了，还差%s。" % "、".join(missing_fields))
+        else:
+            self.ready.set_state("done", "%d 张图片已全部替换，必填项齐了，可以生成预览。" % len(slots))
 
     def _set_source_thumbnail(self, button, pixmap):
         if not button or pixmap is None or pixmap.isNull():
@@ -12099,6 +13746,7 @@ class XhsNoteReplacementPage(BasePage):
             self._replacement_slots.append(item)
             self.replacement_image_layout.addWidget(button)
             self._update_replacement_button(item)
+        self._sync_swap_state()
 
     def _fill_replacement_paths(self, paths, start_slot=1):
         clean_paths = [str(path or "").strip().strip('"') for path in (paths or []) if str(path or "").strip()]
@@ -12111,6 +13759,7 @@ class XhsNoteReplacementPage(BasePage):
                 break
             self._replacement_slots[target_index]["filePath"] = path
             self._update_replacement_button(self._replacement_slots[target_index])
+        self._sync_swap_state()
 
     def pick_replacement_images(self, start_slot=1):
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -12296,6 +13945,7 @@ class XhsNoteReplacementPage(BasePage):
         self.biz_selling.clear()
         self.template_summary.setText("尚未读取图文结构")
         _clear_layout(self.replacement_image_layout)
+        self._sync_swap_state()
         self.copy_selector.clear()
         self.copy_selector.setEnabled(False)
         self.copy_title.clear()
@@ -12902,6 +14552,22 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
                 chunks.append(chunk)
         return chunks
 
+    def describable_visual_line(value):
+        """Whitelist gate: only Chinese画面描述 may reach an image prompt.
+
+        The drop-marker list below can only reject text we already know about,
+        so anything that carries no Chinese description, or that carries
+        diagnostic noise, is rejected here regardless of what produced it.
+        """
+        candidate = str(value or "").strip()
+        if not candidate:
+            return ""
+        if _REPLACEMENT_DIAGNOSTIC_NOISE_RE.search(candidate):
+            return ""
+        if not _re.search(r"[一-鿿]", candidate):
+            return ""
+        return candidate
+
     kept = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -12916,7 +14582,9 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
         if chunks:
             kept.extend(
                 chunk for chunk in (
-                    _comic_reference_safe_visual_text(chunk, has_person_reference) for chunk in chunks)
+                    describable_visual_line(
+                        _comic_reference_safe_visual_text(chunk, has_person_reference))
+                    for chunk in chunks)
                 if chunk
             )
             continue
@@ -12929,7 +14597,8 @@ def _comic_visual_prompt_text(segment, fallback="生成同款替换片段", job=
         if script and stripped == script:
             continue
         stripped = _re.sub(visual_prefix, "", stripped).strip()
-        stripped = _comic_reference_safe_visual_text(stripped, has_person_reference)
+        stripped = describable_visual_line(
+            _comic_reference_safe_visual_text(stripped, has_person_reference))
         if stripped:
             kept.append(stripped)
     cleaned = _replacement_strip_source_subtitle_dialogue("\n".join(kept))
@@ -12993,9 +14662,7 @@ def _comic_project_create_payload(job):
         sequence = int(segment.get("index") or index)
         description = _comic_visual_prompt_text(segment, job=job)
         script = str(segment.get("script") or "").strip()
-        target_duration = _comic_video_duration_slot(
-            segment.get("videoDurationSec") or segment.get("speechDurationSec") or segment.get("duration")
-        )
+        target_duration = _comic_segment_video_duration(segment)
         storyboard = {
             "sequence": sequence,
             "description": description,
@@ -13161,9 +14828,7 @@ def _comic_storyboard_video_payload(job, segment, force_regenerate=True):
             if value:
                 refs.append(value)
     refs = hidden_colored_refs or list(dict.fromkeys(refs))
-    target_duration = _comic_video_duration_slot(
-        segment.get("videoDurationSec") or segment.get("speechDurationSec") or segment.get("duration")
-    )
+    target_duration = _comic_segment_video_duration(segment)
     payload = {
         "workflow_mode": "keyframes",
         "video_model": video_model,
@@ -14107,6 +15772,31 @@ def _comic_recover_completed_media(job, segment, adapter):
     return True
 
 
+def _comic_storyboard_tts_url_for_submit(job, segment):
+    """本地客户端提交 comic_project 视频任务前,若 audioMode=tts/uploaded,
+    预生成音频并返回可下载 URL,让远端 _comic_storyboard_tts_url_from_task
+    能取到、做 TTS mux。返回 "" 时远端 fix A(preserve_paid_video)会 degrade
+    到 provider 音轨,视频不会丢,只是不换 TTS。
+
+    _replacement_segment_audio_url_for_lipsync 是共用 seam,自带 ttsUrl 缓存,
+    重试/切换 fallback 都复用,不会重复扣费。异常吞掉不阻塞视频生成。
+    """
+    if not isinstance(job, dict) or not isinstance(segment, dict):
+        return ""
+    audio_mode = _replacement_audio_mode(job)
+    if audio_mode not in ("tts", "uploaded"):
+        return ""
+    try:
+        url = _replacement_segment_audio_url_for_lipsync(job, segment)
+    except Exception as exc:
+        log("comic storyboard TTS pre-gen failed, submitting without: %s" % str(exc)[:120])
+        return ""
+    url = str(url or "").strip()
+    if not _is_remote_fetchable_media_url(url):
+        return ""
+    return url
+
+
 class ComicProjectAdapter:
     def __init__(self, central_base=None, comic_base=None, request_fn=None, now_fn=None):
         self.central_base = (central_base or CENTRAL).rstrip("/")
@@ -14321,6 +16011,14 @@ class ComicProjectAdapter:
 
     def submit_storyboard_video(self, storyboard_id, job, segment):
         payload = _comic_storyboard_video_payload(job, segment)
+        # 提前生成 TTS/取上传音频,把 URL 挂进 payload,让远端
+        # _comic_storyboard_tts_url_from_task 能读到并 mux。这是"AI 音色配音"真正
+        # 生效的路径;没做的话远端 fix A 会 degrade 保留 provider 音轨(视频不丢
+        # 但音色不换)。TTS 结果缓存到 segment["ttsUrl"],重试/fallback 复用。
+        audio_url = _comic_storyboard_tts_url_for_submit(job, segment)
+        if audio_url:
+            payload["storyboard_tts_url"] = audio_url
+            payload["storyboardTtsUrl"] = audio_url
         return self.comic_json(
             "POST",
             "/api/v1/comic-drama/storyboards/%d/generate-video" % int(storyboard_id),
@@ -14401,51 +16099,104 @@ class VideoReplacementPage(BasePage):
         self._comic_frame_downloads = {}
         self._comic_video_cells = []
 
-        src_row = QtWidgets.QHBoxLayout()
-        self.source_lab = QtWidgets.QLabel("等待从『分解视频』进入。")
-        self.source_lab.setObjectName("sub")
-        self.source_lab.setWordWrap(True)
-        src_row.addWidget(self.source_lab, 1)
-        self.b_open_output = QtWidgets.QPushButton("打开成片")
-        self.b_open_output.setObjectName("ghost")
-        self.b_open_output.clicked.connect(self.open_output)
-        self.b_open_output.setEnabled(False)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        page = QtWidgets.QWidget()
+        # 用 objectName 走 QSS 里已有的 QWidget#page 规则;直接 setStyleSheet
+        # 无类型选择器会继承到子控件,把主色按钮刷成透明
+        page.setObjectName("page")
+        col = QtWidgets.QVBoxLayout(page)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(14)
+        scroll.setWidget(page)
+        self.v.addWidget(scroll, 1)
+
+        # ---- 原片 ----
         self.b_retry_transcript = QtWidgets.QPushButton("重试口播")
-        self.b_retry_transcript.setObjectName("ghost")
+        self.b_retry_transcript.setObjectName("quiet")
         self.b_retry_transcript.clicked.connect(self.retry_source_transcription)
         self.b_retry_transcript.setEnabled(False)
-        src_row.addWidget(self.b_open_output)
-        src_row.addWidget(self.b_retry_transcript)
-        self.v.addLayout(src_row)
+        src_zone, src_body = zone_card(
+            "原片", "来源视频", "从『分解视频』进入后自动带入", actions=[self.b_retry_transcript])
+        self.source_lab = QtWidgets.QLabel("等待从『分解视频』进入。")
+        self.source_lab.setObjectName("meta")
+        self.source_lab.setWordWrap(True)
+        src_body.addWidget(self.source_lab)
+        col.addWidget(src_zone)
 
-        refs = QtWidgets.QFrame()
-        refs.setObjectName("card")
-        refs_l = QtWidgets.QGridLayout(refs)
-        refs_l.setContentsMargins(16, 14, 16, 14)
-        refs_l.setHorizontalSpacing(12)
-        refs_l.setVerticalSpacing(10)
-        self.b_products = QtWidgets.QPushButton("上传产品图")
-        self.b_products.setObjectName("ghost")
-        self.b_products.clicked.connect(self.pick_products)
-        self.product_lab = QtWidgets.QLabel("未选择产品图（可选；上传后强制替换原片产品，未上传则保留原产品）")
-        self.product_lab.setObjectName("sub")
-        self.product_lab.setWordWrap(True)
+        # ---- 换位台账:一个槽位一行,状态写在行上,不用去别处找 ----
+        # 纯产品视频是整条任务的模式开关(它会整个关掉人物槽位),
+        # 所以放在分区标题栏,而不是塞在人物那一行里当成人物的一个属性
+        self.no_person_mode = QtWidgets.QCheckBox("纯产品视频（无人物）")
+        self.no_person_mode.setObjectName("sub")
+        self.no_person_mode.setToolTip("")
+        self.no_person_mode.toggled.connect(self._sync_person_controls)
+        refs, refs_l = zone_card(
+            "替换素材", "槽位换位", "上传就强制替换该槽位；不传就保留原片这一项",
+            actions=[self.no_person_mode])
+
+        self.row_person = SwapSlotRow("人物", "原片主角 → 你的人物")
         self.b_face = QtWidgets.QPushButton("上传主角正脸全身照")
         self.b_face.setObjectName("ghost")
         self.b_face.clicked.connect(self.pick_face)
+        self.b_virtual = QtWidgets.QPushButton("生成虚拟模特")
+        self.b_virtual.setObjectName("ghost")
+        self.b_virtual.clicked.connect(self.generate_virtual_model)
+        person_buttons = QtWidgets.QHBoxLayout()
+        person_buttons.setSpacing(8)
+        person_buttons.addWidget(self.b_face)
+        person_buttons.addWidget(self.b_virtual)
+        person_buttons.addStretch(1)
+        self.row_person.body.addLayout(person_buttons)
         self.face_authorized = QtWidgets.QCheckBox("我确认已获得该人物素材授权")
         self.face_authorized.setObjectName("sub")
         self.person_full_body = QtWidgets.QCheckBox("该人物图为清晰正脸全身照（已确认）")
         self.person_full_body.setObjectName("sub")
+        self.model_lab = QtWidgets.QLabel("未选择人物；请上传 1 张清晰正脸全身照。")
+        self.model_lab.setObjectName("meta")
+        self.model_lab.setWordWrap(True)
+        for widget in (self.face_authorized, self.person_full_body, self.model_lab):
+            self.row_person.body.addWidget(widget)
+        for box in (self.face_authorized, self.person_full_body):
+            box.toggled.connect(self._sync_swap_ledger)
+        refs_l.addWidget(self.row_person)
+
+        self.row_product = SwapSlotRow("产品", "原片产品 → 你的产品")
+        self.b_products = QtWidgets.QPushButton("上传产品图")
+        self.b_products.setObjectName("ghost")
+        self.b_products.clicked.connect(self.pick_products)
+        self.product_lab = QtWidgets.QLabel("未选择产品图（可选；上传后强制替换原片产品，未上传则保留原产品）")
+        self.product_lab.setObjectName("meta")
+        self.product_lab.setWordWrap(True)
+        product_buttons = QtWidgets.QHBoxLayout()
+        product_buttons.setSpacing(8)
+        product_buttons.addWidget(self.b_products)
+        product_buttons.addStretch(1)
+        self.row_product.body.addLayout(product_buttons)
+        self.row_product.body.addWidget(self.product_lab)
+        refs_l.addWidget(self.row_product)
+
+        self.row_scene = SwapSlotRow("场景", "原片场景 → 你的场景")
         self.b_scene = QtWidgets.QPushButton("上传场景图")
         self.b_scene.setObjectName("ghost")
         self.b_scene.clicked.connect(self.pick_scene)
         self.scene_prompt = QtWidgets.QLineEdit()
         self.scene_prompt.setPlaceholderText("可选场景描述；上传场景图后强制替换原片场景，未上传则保留原场景")
-        self.no_person_mode = QtWidgets.QCheckBox("纯产品视频（无人物）")
-        self.no_person_mode.setObjectName("sub")
-        self.no_person_mode.setToolTip("")
-        self.no_person_mode.toggled.connect(self._sync_person_controls)
+        scene_buttons = QtWidgets.QHBoxLayout()
+        scene_buttons.setSpacing(8)
+        scene_buttons.addWidget(self.b_scene)
+        scene_buttons.addStretch(1)
+        self.row_scene.body.addLayout(scene_buttons)
+        self.row_scene.body.addWidget(self.scene_prompt)
+        refs_l.addWidget(self.row_scene)
+        col.addWidget(refs)
+
+        # ---- 声音与模型 ----
+        audio_zone, audio_body = zone_card("声音与模型", "声音来源与生成模型")
+        grid = field_grid()
         self.audio_mode = QtWidgets.QComboBox()
         self.audio_mode.setToolTip("")
         self.audio_mode.addItem("自动", "auto")
@@ -14460,38 +16211,26 @@ class VideoReplacementPage(BasePage):
         self.b_replacement_audio.setObjectName("ghost")
         self.b_replacement_audio.clicked.connect(self.pick_replacement_audio)
         self.audio_lab = QtWidgets.QLabel("声音：自动使用生成视频自带声音")
-        self.audio_lab.setObjectName("sub")
+        self.audio_lab.setObjectName("meta")
         self.audio_lab.setWordWrap(True)
         self.replacement_model = QtWidgets.QComboBox()
         self.replacement_model.setToolTip("")
         self.replacement_model.currentIndexChanged.connect(self._on_replacement_model_changed)
-        self.b_virtual = QtWidgets.QPushButton("生成虚拟模特")
-        self.b_virtual.setObjectName("ghost")
-        self.b_virtual.clicked.connect(self.generate_virtual_model)
-        self.model_lab = QtWidgets.QLabel("未选择人物；请上传 1 张清晰正脸全身照。")
-        self.model_lab.setObjectName("sub")
-        self.model_lab.setWordWrap(True)
-        refs_l.addWidget(self.b_products, 0, 0)
-        refs_l.addWidget(self.product_lab, 0, 1)
-        refs_l.addWidget(self.b_face, 1, 0)
-        refs_l.addWidget(self.face_authorized, 1, 1)
-        refs_l.addWidget(self.person_full_body, 2, 1)
-        refs_l.addWidget(self.b_scene, 3, 0)
-        refs_l.addWidget(self.scene_prompt, 3, 1)
-        refs_l.addWidget(self.no_person_mode, 4, 1)
-        refs_l.addWidget(QtWidgets.QLabel("同款替换模型"), 5, 0)
-        refs_l.addWidget(self.replacement_model, 5, 1)
-        refs_l.addWidget(QtWidgets.QLabel("声音来源"), 6, 0)
-        refs_l.addWidget(self.audio_mode, 6, 1)
-        refs_l.addWidget(QtWidgets.QLabel("AI 音色"), 7, 0)
-        refs_l.addWidget(self.replacement_voice, 7, 1)
-        refs_l.addWidget(self.b_replacement_audio, 8, 0)
-        refs_l.addWidget(self.audio_lab, 8, 1)
-        refs_l.addWidget(self.b_virtual, 9, 0)
-        refs_l.addWidget(self.model_lab, 9, 1)
-        self.v.addWidget(refs)
+        for row, (caption, widget) in enumerate((
+            ("声音来源", self.audio_mode),
+            ("AI 音色", self.replacement_voice),
+            ("完整配音", button_cell(self.b_replacement_audio)),
+            ("同款替换模型", self.replacement_model),
+        )):
+            grid.addWidget(field_label(caption), row, 0, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
+            grid.addWidget(widget, row, 1)
+        audio_body.addLayout(grid)
+        audio_body.addWidget(self.audio_lab)
+        self.audio_mode.currentIndexChanged.connect(self._sync_swap_ledger)
+        col.addWidget(audio_zone)
 
-        ctl = QtWidgets.QHBoxLayout()
+        # ---- 行动条:只留推进流程的两步,其余按钮归到它们操作的东西旁边 ----
+        self.ready = ReadyBar()
         self.b_plan = QtWidgets.QPushButton("生成替换方案")
         self.b_plan.setObjectName("ghost")
         self.b_plan.clicked.connect(self.generate_plan)
@@ -14499,48 +16238,42 @@ class VideoReplacementPage(BasePage):
         self.b_start.setObjectName("primary")
         self.b_start.clicked.connect(self.start_generation)
         self.b_start.setEnabled(False)
-        self.b_review = QtWidgets.QPushButton("确认片段并合成")
-        self.b_review.setObjectName("primary")
-        self.b_review.clicked.connect(self.confirm_and_concat)
-        self.b_review.setEnabled(False)
-        self.b_retry_failed = QtWidgets.QPushButton("重试失败片段")
-        self.b_retry_failed.setObjectName("ghost")
-        self.b_retry_failed.clicked.connect(self.retry_failed_segments)
-        self.b_retry_failed.setEnabled(False)
-        self.b_regen_segment = QtWidgets.QPushButton("重生选中片段")
-        self.b_regen_segment.setObjectName("ghost")
-        self.b_regen_segment.clicked.connect(self.regenerate_selected_segment)
-        self.b_regen_segment.setEnabled(False)
+        self.ready.add(self.b_plan, self.b_start)
+        col.addWidget(self.ready)
+
+        # ---- 进度 ----
         self.b_cancel = QtWidgets.QPushButton("取消任务")
-        self.b_cancel.setObjectName("ghost")
+        self.b_cancel.setObjectName("quiet")
         self.b_cancel.clicked.connect(self.cancel_generation)
         self.b_cancel.setEnabled(False)
-        self.b_pending = QtWidgets.QPushButton("加入待发布队列")
-        self.b_pending.setObjectName("ghost")
-        self.b_pending.clicked.connect(self.add_output_to_pending)
-        self.b_pending.setEnabled(False)
-        ctl.addWidget(self.b_plan)
-        ctl.addWidget(self.b_start)
-        ctl.addWidget(self.b_review)
-        ctl.addWidget(self.b_retry_failed)
-        ctl.addWidget(self.b_regen_segment)
-        ctl.addWidget(self.b_cancel)
-        ctl.addWidget(self.b_pending)
-        ctl.addStretch()
-        self.v.addLayout(ctl)
-
+        progress_zone, progress_body = zone_card("生成", "任务进度", actions=[self.b_cancel])
         self.status = QtWidgets.QLabel("未开始")
-        self.status.setObjectName("sub")
-        self.v.addWidget(self.status)
+        self.status.setObjectName("fieldValue")
+        self.status.setWordWrap(True)
+        progress_body.addWidget(self.status)
         self.progress_detail = QtWidgets.QLabel("用时: - · 预计剩余: -")
-        self.progress_detail.setObjectName("sub")
-        self.v.addWidget(self.progress_detail)
+        self.progress_detail.setObjectName("slotIndex")
+        progress_body.addWidget(self.progress_detail)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(True)
         self.progress.setFormat("准备中…")
         self.progress.setVisible(False)
-        self.v.addWidget(self.progress)
+        progress_body.addWidget(self.progress)
+        col.addWidget(progress_zone)
+
+        # ---- 片段审核:重生/重试/合成都贴着片段表放 ----
+        self.b_regen_segment = QtWidgets.QPushButton("重生选中片段")
+        self.b_regen_segment.setObjectName("quiet")
+        self.b_regen_segment.clicked.connect(self.regenerate_selected_segment)
+        self.b_regen_segment.setEnabled(False)
+        self.b_retry_failed = QtWidgets.QPushButton("重试失败片段")
+        self.b_retry_failed.setObjectName("quiet")
+        self.b_retry_failed.clicked.connect(self.retry_failed_segments)
+        self.b_retry_failed.setEnabled(False)
+        table_zone, table_body = zone_card(
+            "审核", "片段", "逐段确认后再合成成片",
+            actions=[self.b_regen_segment, self.b_retry_failed])
         self.table = QtWidgets.QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels(["片段", "时间", "口播稿", "状态", "审核帧", "视频文件", "耗时/预计", "错误", "操作"])
         self.table.setWordWrap(True)
@@ -14566,16 +16299,93 @@ class VideoReplacementPage(BasePage):
         self.table.setColumnWidth(7, 150)
         self.table.setColumnWidth(8, 120)
         self.table.setMinimumHeight(420)
-        self.v.addWidget(self.table)
+        table_body.addWidget(self.table)
+
+        output_row = QtWidgets.QHBoxLayout()
+        output_row.setSpacing(8)
+        self.b_open_output = QtWidgets.QPushButton("打开成片")
+        self.b_open_output.setObjectName("quiet")
+        self.b_open_output.clicked.connect(self.open_output)
+        self.b_open_output.setEnabled(False)
+        self.b_pending = QtWidgets.QPushButton("加入待发布队列")
+        self.b_pending.setObjectName("ghost")
+        self.b_pending.clicked.connect(self.add_output_to_pending)
+        self.b_pending.setEnabled(False)
+        self.b_review = QtWidgets.QPushButton("确认片段并合成")
+        self.b_review.setObjectName("primary")
+        self.b_review.clicked.connect(self.confirm_and_concat)
+        self.b_review.setEnabled(False)
+        output_row.addStretch(1)
+        output_row.addWidget(self.b_open_output)
+        output_row.addWidget(self.b_pending)
+        output_row.addWidget(self.b_review)
+        table_body.addLayout(output_row)
+        col.addWidget(table_zone)
+
+        prompt_zone, prompt_body = zone_card("核对", "当前片段提示词", "只读，用来核对这一段到底按什么在生成")
         self.prompt_view = QtWidgets.QPlainTextEdit()
         self.prompt_view.setReadOnly(True)
         self.prompt_view.setPlaceholderText("生成时会显示当前片段提示词。")
-        self.v.addWidget(self.prompt_view, 1)
+        self.prompt_view.setMinimumHeight(150)
+        prompt_body.addWidget(self.prompt_view)
+        col.addWidget(prompt_zone)
+        col.addStretch(1)
+
         BRIDGE.payload.connect(self._on)
         self._sync_replacement_model_ui()
         self._refresh_replacement_models()
         self._sync_person_controls(False)
         self._sync_audio_controls()
+        self._sync_swap_ledger()
+
+    def _sync_swap_ledger(self, *_args):
+        """把每个槽位的真实状态写到台账行上,并算出"现在还差什么"。
+        判断口径与 start_generation 的拦截条件一致,避免这里说可以、点下去被拦。"""
+        if not (hasattr(self, "row_person") and hasattr(self, "ready")):
+            return
+        no_person = bool(self.no_person_mode.isChecked())
+        has_face = bool(self._face_paths or self._face_url or self._virtual_url)
+        blockers = []
+
+        if no_person:
+            self.row_person.set_state("keep", "纯产品视频：不换人物，也不做换脸。", pill_text="不换人")
+        elif has_face:
+            unconfirmed = []
+            if not self.person_full_body.isChecked():
+                unconfirmed.append("正脸全身照确认")
+            if not self.face_authorized.isChecked():
+                unconfirmed.append("授权确认")
+            if unconfirmed:
+                self.row_person.set_state("owe", "还要勾选：%s。" % "、".join(unconfirmed))
+                blockers.append("、".join(unconfirmed))
+            else:
+                self.row_person.set_state("swap", "原片主角 → 你上传的人物。")
+        else:
+            self.row_person.set_state("owe", "必须上传 1 张清晰正脸全身照，或改勾『纯产品视频』。")
+            blockers.append("主角正脸全身照")
+
+        if self._product_paths or self._product_urls:
+            self.row_product.set_state("swap", "原片产品 → 你上传的 %d 张产品图。" % max(
+                len(self._product_paths), len(self._product_urls)))
+        else:
+            self.row_product.set_state("keep", "未上传：保留原片产品不动。")
+
+        if self._scene_path or self._scene_url:
+            self.row_scene.set_state("swap", "原片场景 → 你上传的场景图。")
+        else:
+            self.row_scene.set_state("keep", "未上传：保留原片场景不动。")
+
+        if self._selected_audio_mode() == "uploaded" and not self._replacement_audio_path:
+            blockers.append("完整配音音频")
+
+        if not (self._source or {}).get("sourceVideoPath"):
+            self.ready.set_state("keep", "先从『分解视频』把一条原片送进来。")
+        elif blockers:
+            self.ready.set_state("owe", "还差：%s。" % "；".join(blockers))
+        elif not (self._job or {}).get("segments"):
+            self.ready.set_state("swap", "素材齐了，先生成替换方案，确认片段后再执行生成。")
+        else:
+            self.ready.set_state("done", "方案已就绪，可以执行替换生成。")
 
     def _sync_person_controls(self, checked):
         enabled = not bool(checked)
@@ -14590,6 +16400,7 @@ class VideoReplacementPage(BasePage):
             self.model_lab.setText("纯产品视频模式：无需上传人脸，不执行换脸。")
         elif not (self._face_paths or self._virtual_url):
             self.model_lab.setText("未选择人物；请上传 1 张清晰正脸全身照。")
+        self._sync_swap_ledger()
 
     def _selected_audio_mode(self):
         widget = getattr(self, "audio_mode", None)
@@ -14817,6 +16628,7 @@ class VideoReplacementPage(BasePage):
             self.refresh_segments()
             self.b_start.setEnabled(True)
             self._set_generation_feedback(False)
+            self._sync_swap_ledger()
         elif tag == "video_replace_comic_frame_done" and d.get("jobId") == self._job.get("id"):
             self._busy = False
             self._job.update(d.get("job") or {})
@@ -14833,6 +16645,7 @@ class VideoReplacementPage(BasePage):
                 self._face_url = ""
                 self.model_lab.setText("已生成虚拟模特形象")
                 self.status.setText("虚拟模特已就绪")
+                self._sync_swap_ledger()
             else:
                 self.status.setText("虚拟模特生成失败：" + _localize_replacement_display_text(d.get("error") or "")[:120])
         elif tag == "video_replace_progress" and d.get("jobId") == self._job.get("id"):
@@ -14907,6 +16720,7 @@ class VideoReplacementPage(BasePage):
         self.b_review.setEnabled(False)
         self._set_generation_feedback(False)
         self._sync_audio_controls()
+        self._sync_swap_ledger()
 
     def retry_source_transcription(self):
         if self._busy:
@@ -14990,6 +16804,7 @@ class VideoReplacementPage(BasePage):
             self._product_paths = list(paths[:3])
             self._product_urls = []
             self.product_lab.setText("已选择: " + "、".join(os.path.basename(p) for p in self._product_paths))
+            self._sync_swap_ledger()
 
     def pick_face(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -15005,6 +16820,7 @@ class VideoReplacementPage(BasePage):
             self._virtual_url = ""
             self.person_full_body.setChecked(False)
             self.model_lab.setText("已选择主角正脸全身照：%s" % os.path.basename(self._face_paths[0]))
+            self._sync_swap_ledger()
 
     def pick_scene(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -15013,6 +16829,7 @@ class VideoReplacementPage(BasePage):
             self._scene_path = path
             self._scene_url = ""
             self.b_scene.setText("场景: " + os.path.basename(path))
+            self._sync_swap_ledger()
 
     def pick_replacement_audio(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -15022,6 +16839,7 @@ class VideoReplacementPage(BasePage):
         self._replacement_audio_path = path
         self._replacement_audio_url = ""
         self._sync_audio_controls()
+        self._sync_swap_ledger()
         self.status.setText("正在上传完整配音音频…")
         self.b_replacement_audio.setEnabled(False)
 
@@ -15263,7 +17081,7 @@ class VideoReplacementPage(BasePage):
             "outputPath": "",
             "assetId": "",
         }
-        return _replacement_hybrid_pipeline().build_plan(job)
+        return _replacement_pipeline_for_job(job).build_plan(job)
 
     def start_generation(self):
         if self._busy:
@@ -15310,6 +17128,8 @@ class VideoReplacementPage(BasePage):
             self._collect_plan_edits()
         except Exception as exc:
             self._warn_generation_blocked(str(exc))
+            return
+        if not self._confirm_visual_analysis_failure():
             return
         audio_mode = self._selected_audio_mode()
         if is_comic_mode:
@@ -15482,7 +17302,58 @@ class VideoReplacementPage(BasePage):
                     "message": "替换生成失败（错误编号 %s）:%s" % (error_id or "-", str(exc)[:120]),
                     "job": _replacement_public_job(failure_job),
                 })
+        if video_replacement_service_shared():
+            self._ensure_service_adapter()
+            run_bg(self._start_shared_service_job)
+            return
         run_bg(work)
+
+    def _ensure_service_adapter(self):
+        adapter = getattr(self, "_service_adapter", None)
+        if adapter is None:
+            adapter = ReplacementServiceAdapter(data_dir=data_dir())
+            self._service_adapter = adapter
+        return adapter
+
+    def _emit_service_progress(self, job_id, stage, message, segment_index, segments):
+        """Translate a shared-service pipeline progress callback into the
+        existing ``video_replace_progress`` BRIDGE event (same payload shape as
+        the legacy path). Only scrubbed, page-side data is emitted."""
+        job = self._job if isinstance(self._job, dict) else {}
+        segment = None
+        if segment_index is not None:
+            for item in (job.get("segments") or []):
+                if int(item.get("index") or 0) == int(segment_index or 0):
+                    segment = item
+                    break
+        timing = _replacement_timing_snapshot(job, segment, stage=stage)
+        prompt = ""
+        if segment_index is not None:
+            for item in segments or []:
+                if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                    prompt = str((item or {}).get("prompt") or "")
+                    break
+        BRIDGE.payload.emit("video_replace_progress", {
+            "jobId": job_id,
+            "stage": timing.get("stage") or stage or "",
+            "message": message or _replacement_stage_label(stage),
+            "timing": timing,
+            "segments": segments or [],
+            "prompt": prompt,
+        })
+
+    def _start_shared_service_job(self):
+        """Route generation through the shared ReplacementService adapter.
+
+        Qt only forwards plan overrides and reads job state back from job.json
+        via the adapter; it never mutates provider task IDs or billing refs."""
+        job = self._job if isinstance(self._job, dict) else {}
+        overrides = dict(getattr(self, "_service_overrides", None) or {})
+        return self._service_adapter.execute(
+            str(job.get("id") or ""),
+            overrides,
+            progress=self._emit_service_progress,
+        )
 
     def _run_job_segments(self, job, selected_segments):
         if _replacement_job_mode(job) == "comic_project":
@@ -15540,325 +17411,31 @@ class VideoReplacementPage(BasePage):
             })
 
     def _run_comic_project_segments(self, job, selected_segments, emit_progress):
-        adapter = ComicProjectAdapter()
-        segments = job.get("segments") or []
-        selected_segments = list(selected_segments or [])
-        job["status"] = "running"
-        if not job.get("comicProjectId"):
-            emit_progress(None, "comic_project", "创建漫剧项目…")
-            created = adapter.create_project(job)
-            project_id = _comic_extract_id(created)
-            if not project_id:
-                raise RuntimeError("comic_project_id_missing")
-            job["comicProjectId"] = int(project_id)
-            job["comicProjectUrl"] = _comic_base_url() + "/comic-drama/editor?projectId=%s" % project_id
-            _save_replacement_job(job)
-        project_id = int(job.get("comicProjectId") or 0)
-        if any(not segment.get("comicStoryboardId") for segment in segments):
-            emit_progress(None, "comic_project", "读取漫剧项目分镜…")
-            storyboards = _comic_storyboards_from_payload(adapter.get_project(project_id))
-            if storyboards:
-                _comic_assign_storyboard_ids(job, storyboards)
-                _save_replacement_job(job)
-        if any(not segment.get("comicStoryboardId") for segment in segments):
-            emit_progress(None, "comic_project", "分析剧本并生成分镜…")
-            analyzed = adapter.analyze_project(int(project_id))
-            storyboards = _comic_storyboards_from_payload(analyzed)
-            if storyboards:
-                _comic_assign_storyboard_ids(job, storyboards)
-            if any(not segment.get("comicStoryboardId") for segment in segments):
-                analyze_task_id = _comic_extract_task_id(analyzed)
-                if analyze_task_id:
-                    adapter.wait_task_done(
-                        analyze_task_id,
-                        cancel_check=_replacement_cancel_check(job),
-                        progress=lambda _attempt, _payload: emit_progress(
-                            None, "comic_project", "分析剧本并生成分镜…"
-                        ),
-                    )
-                storyboards = _comic_storyboards_from_payload(adapter.get_project(project_id))
-                _comic_assign_storyboard_ids(job, storyboards)
-            _save_replacement_job(job)
-        if not job.get("comicAssets") and hasattr(adapter, "upsert_manual_assets"):
-            emit_progress(None, "comic_assets", "写入人物、场景和道具到漫剧项目库…")
-            job["comicAssets"] = adapter.upsert_manual_assets(int(project_id), job)
-            _save_replacement_job(job)
-        elif not job.get("comicAssets"):
-            job["comicAssets"] = {}
-        assets = job.get("comicAssets") or {}
-        total = len(segments)
-        for seg in selected_segments:
-            if self._cancel_requested or _replacement_cancel_requested(job):
-                _mark_replacement_job_canceled(job)
-                return
-            storyboard_id = seg.get("comicStoryboardId")
-            frame_billings = []
-            video_billing = {}
-            try:
-                if not storyboard_id:
-                    raise RuntimeError("comic_storyboard_id_missing:segment_%s" % (seg.get("index") or "?"))
-                existing_video_url = _comic_absolute_media_url(seg.get("videoUrl") or "")
-                if existing_video_url:
-                    emit_progress(
-                        seg,
-                        "comic_download_video",
-                        "片段 %s/%s：恢复已生成视频…" % (seg.get("index"), total),
-                    )
-                    remote_storyboard = _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-                    start_frame_url, end_frame_url = _comic_storyboard_frame_urls(remote_storyboard)
-                    seg["startFrameUrl"] = _comic_absolute_media_url(
-                        seg.get("startFrameUrl") or start_frame_url
-                    )
-                    seg["endFrameUrl"] = _comic_absolute_media_url(
-                        seg.get("endFrameUrl") or end_frame_url
-                    )
-                    seg["flowchartUrl"] = seg.get("startFrameUrl") or seg.get("flowchartUrl") or ""
-                    _comic_download_frame_image(job, seg, "start", seg.get("startFrameUrl"), adapter)
-                    _comic_download_frame_image(job, seg, "end", seg.get("endFrameUrl"), adapter)
-                    if _comic_recover_completed_media(job, seg, adapter):
-                        _save_replacement_job(job)
-                        emit_progress(seg, "done", "片段 %s/%s：视频完成" % (seg.get("index"), total))
-                        continue
-                seg["status"] = "running"
-                seg["stage"] = "comic_update_storyboard"
-                emit_progress(seg, "comic_update_storyboard", "片段 %s/%s：写入口播稿和素材绑定…" % (seg.get("index"), total))
-                adapter.update_storyboard(int(storyboard_id), job, seg, assets)
-                for stale_audio_key in (
-                    "audioUrl", "audioDurationSeconds", "audioPrepareStatus", "audioWarning"
-                ):
-                    seg.pop(stale_audio_key, None)
-                seg["stage"] = "comic_generate_flowchart"
-                emit_progress(seg, "comic_generate_flowchart", "片段 %s/%s：生成首尾帧…" % (seg.get("index"), total))
-                recovered_frame_urls = []
-                recovered_image_payload = {}
-                try:
-                    image_task = adapter.submit_storyboard_image(int(storyboard_id), job, seg)
-                    image_task_ids = _comic_extract_task_ids(image_task)
-                except Exception as submit_exc:
-                    if not _comic_generation_submit_can_recover(submit_exc):
-                        raise
-                    recovered = _comic_recover_storyboard_media(
-                        adapter, project_id, storyboard_id, "image", submit_exc
-                    )
-                    image_task_ids = list(recovered.get("task_ids") or [])
-                    if not image_task_ids and recovered.get("task_id"):
-                        image_task_ids = [recovered.get("task_id")]
-                    recovered_frame_urls = [
-                        _comic_absolute_media_url(value)
-                        for value in (recovered.get("frame_urls") or [])
-                        if value
-                    ]
-                    if not recovered_frame_urls and recovered.get("url"):
-                        recovered_frame_urls = [_comic_absolute_media_url(recovered.get("url"))]
-                    recovered_image_payload = recovered.get("payload") or {}
-                    seg["comicRecoveryStatus"] = "recovered"
-                    seg["comicRecoveryReason"] = str(submit_exc)[:180]
-                    emit_progress(
-                        seg,
-                        "comic_generate_flowchart",
-                        "片段 %s/%s：远程已接收，正在回查首尾帧任务…" % (seg.get("index"), total),
-                    )
-                if not image_task_ids and not recovered_frame_urls:
-                    raise RuntimeError("comic_image_task_id_missing:storyboard_%s" % storyboard_id)
-                seg["startFrameTaskId"] = image_task_ids[0] if image_task_ids else ""
-                seg["endFrameTaskId"] = image_task_ids[1] if len(image_task_ids) > 1 else ""
-                seg["flowchartTaskId"] = seg["startFrameTaskId"]
-                frame_urls = list(recovered_frame_urls[:2])
-                frame_payloads = [recovered_image_payload] if recovered_image_payload else []
-                if recovered_image_payload:
-                    recovered_task_id = (
-                        (image_task_ids or [""])[0]
-                        or _comic_extract_task_id(recovered_image_payload)
-                    )
-                    frame_billings.append(_settle_comic_keyframe_actual_billing(
-                        job, seg, recovered_image_payload, frame_index=1,
-                        task_id=recovered_task_id,
-                    ))
-                for frame_index, image_task_id in enumerate(image_task_ids[:2]):
-                    if frame_index < len(frame_urls) and frame_urls[frame_index]:
-                        continue
-                    frame_url, frame_payload = adapter.wait_task_result(
-                        image_task_id,
-                        cancel_check=_replacement_cancel_check(job),
-                        progress=lambda _attempt, _payload, s=seg: emit_progress(
-                            s, "comic_generate_flowchart", "片段 %s/%s：首尾帧生成中…" % (s.get("index"), total)
-                        ),
-                    )
-                    while len(frame_urls) <= frame_index:
-                        frame_urls.append("")
-                    frame_urls[frame_index] = _comic_absolute_media_url(frame_url)
-                    frame_payloads.append(frame_payload)
-                    frame_billings.append(_settle_comic_keyframe_actual_billing(
-                        job, seg, frame_payload, frame_index=frame_index + 1,
-                        task_id=image_task_id,
-                    ))
-                if len(frame_urls) < 2 or not frame_urls[1]:
-                    remote_storyboard = _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-                    remote_frame_urls = _comic_storyboard_frame_urls(remote_storyboard)
-                    for frame_index, frame_url in enumerate(remote_frame_urls):
-                        if frame_url and (len(frame_urls) <= frame_index or not frame_urls[frame_index]):
-                            while len(frame_urls) <= frame_index:
-                                frame_urls.append("")
-                            frame_urls[frame_index] = frame_url
-                frame_urls = (frame_urls + ["", ""])[:2]
-                seg["startFrameUrl"] = frame_urls[0]
-                seg["endFrameUrl"] = frame_urls[1]
-                seg["flowchartUrl"] = frame_urls[0]
-                seg["flowchartResult"] = _comic_response_data(frame_payloads[0]) if frame_payloads else {}
-                seg["comicFrameResults"] = [
-                    _comic_response_data(payload) for payload in frame_payloads
-                ]
-                seg["comicFrameBillings"] = list(frame_billings)
-                _comic_download_frame_image(job, seg, "start", seg.get("startFrameUrl"), adapter)
-                _comic_download_frame_image(job, seg, "end", seg.get("endFrameUrl"), adapter)
-                if _comic_model_is_seedance(_comic_video_model(job)):
-                    emit_progress(
-                        seg,
-                        "comic_colored_pencil_refs",
-                        "片段 %s/%s：生成隐藏彩铅参考图…" % (seg.get("index"), total),
-                    )
-                    _prepare_comic_colored_pencil_references(job, seg)
-                _save_replacement_job(job)
-                seg["stage"] = "comic_generate_video"
-                emit_progress(seg, "comic_generate_video", "片段 %s/%s：生成视频…" % (seg.get("index"), total))
-                recovered_video_url = ""
-                recovered_video_payload = {}
-                video_url = ""
-                video_payload = {}
-                video_models = _comic_project_video_model_candidates(job)
-                safety_fallback_active = False
-                last_video_exc = None
-                for video_model_index, video_model in enumerate(video_models):
-                    job["comicVideoModel"] = video_model
-                    job["model"] = video_model
-                    seg["model"] = video_model
-                    recovered_video_url = ""
-                    recovered_video_payload = {}
-                    video_billing = {}
-                    try:
-                        video_task = adapter.submit_storyboard_video(int(storyboard_id), job, seg)
-                        video_task_id = _comic_extract_task_id(video_task)
-                    except Exception as submit_exc:
-                        if not _comic_generation_submit_can_recover(submit_exc):
-                            raise
-                        recovered = _comic_recover_storyboard_media(
-                            adapter, project_id, storyboard_id, "video", submit_exc
-                        )
-                        video_task_id = recovered.get("task_id") or ""
-                        recovered_video_url = recovered.get("url") or ""
-                        recovered_video_payload = recovered.get("payload") or {}
-                        seg["comicRecoveryStatus"] = "recovered"
-                        seg["comicRecoveryReason"] = str(submit_exc)[:180]
-                        emit_progress(
-                            seg,
-                            "comic_generate_video",
-                            "片段 %s/%s：远程已接收，正在回查视频任务…" % (seg.get("index"), total),
-                        )
-                    seg["comicVideoTaskId"] = video_task_id
-                    try:
-                        if recovered_video_url:
-                            video_url, video_payload = recovered_video_url, recovered_video_payload
-                        else:
-                            video_url, video_payload = adapter.wait_task_result(
-                                video_task_id,
-                                cancel_check=_replacement_cancel_check(job),
-                                progress=lambda _attempt, _payload, s=seg: emit_progress(
-                                    s,
-                                    "comic_generate_video",
-                                    _comic_task_progress_message(
-                                        _payload,
-                                        "片段 %s/%s：视频生成中…" % (s.get("index"), total),
-                                    ),
-                                ),
-                                tries=int(job.get("tries") or 240),
-                                sleep_sec=5,
-                            )
+        pipeline = _replacement_comic_pipeline()
+
+        def bridge_progress(job_id, stage, message, segment_index, segments):
+            actual_segment = None
+            prompt = ""
+            if segment_index is not None:
+                for item in (job.get("segments") or []):
+                    if int(item.get("index") or 0) == int(segment_index or 0):
+                        actual_segment = item
                         break
-                    except Exception as video_exc:
-                        last_video_exc = video_exc
-                        fallback_reason = _comic_seedance_safety_fallback_reason(video_exc)
-                        fallback_item = {
-                            "model": video_model,
-                            "taskId": video_task_id,
-                            "fallbackReason": fallback_reason,
-                            "error": str(video_exc)[:240],
-                        }
-                        seg.setdefault("comicVideoFallbacks", []).append(fallback_item)
-                        raise
-                else:
-                    if last_video_exc:
-                        raise last_video_exc
-                    raise RuntimeError("comic_video_task_id_missing:storyboard_%s" % storyboard_id)
-                fallback_metadata = _comic_task_fallback_metadata(video_payload)
-                requested_model = fallback_metadata.get("requestedModel") or str(job.get("model") or "").strip()
-                actual_model = fallback_metadata.get("actualModel") or requested_model
-                seg["requestedModel"] = requested_model
-                seg["actualModel"] = actual_model
-                seg["modelFallbackReason"] = fallback_metadata.get("modelFallbackReason") or ""
-                seg["modelFallbackApplied"] = bool(fallback_metadata.get("modelFallbackApplied"))
-                video_url = _comic_absolute_media_url(video_url)
-                if not video_url:
-                    raise RuntimeError("comic_video_url_missing")
-                video_billing = _settle_comic_video_actual_billing({}, job, seg, video_payload)
-                seg["comicVideoBilling"] = dict(video_billing)
-                seg["videoUrl"] = video_url
-                seg["comicVideoResult"] = _comic_response_data(video_payload)
-                seg["stage"] = "comic_download_video"
-                emit_progress(seg, "comic_download_video", "片段 %s/%s：下载视频结果…" % (seg.get("index"), total))
-                _comic_download_segment_video(job, seg, video_url, adapter)
-                _save_replacement_job(job)
-                emit_progress(seg, "done", "片段 %s/%s：视频完成" % (seg.get("index"), total))
-            except Exception as exc:
-                if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
-                    seg.update({"status": "cancel_requested", "stage": "cancel_requested",
-                                "stageLabel": "取消中", "etaSec": 0})
-                    _mark_replacement_job_canceled(job)
-                    return
-                error_id = _replacement_error_id(
-                    "video_replace_comic_segment_failed",
-                    exc,
-                    job_id=job.get("id") or "",
-                    segment_index=seg.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                )
-                failure_update = {
-                    "status": "failed",
-                    "stage": "failed",
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": _comic_task_failure_message({"data": {"errorMessage": str(exc)}})[:240],
-                    "errorId": error_id,
-                    "qcStatus": "failed",
-                }
-                if seg.get("stage") != "download_failed":
-                    failure_update["audioStatus"] = "failed"
-                seg.update(failure_update)
-                _save_replacement_job(job)
-                emit_progress(
-                    seg,
-                    "failed",
-                    "片段 %s/%s 生成失败，可单段重试" % (seg.get("index"), total),
-                )
-        failed = [s for s in segments if s.get("status") == "failed"]
-        if failed:
-            job["status"] = "partial"
-            job["diagnostics"] = _replacement_diagnostics_summary(job)
-            _save_replacement_job(job)
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
+            emit_progress(actual_segment, stage, message, prompt=prompt or ((actual_segment or {}).get("prompt") or ""))
+
+        result = pipeline.execute(job, selected_segments, progress=bridge_progress)
+        if result.get("status") == "partial":
+            failed = [segment for segment in (job.get("segments") or []) if segment.get("status") == "failed"]
             BRIDGE.payload.emit("video_replace_done", {
-                "jobId": job["id"],
+                "jobId": job.get("id") or "",
                 "message": "有 %d 个片段失败，可点击『重试失败片段』" % len(failed),
                 "job": job,
                 "failedSegments": failed,
             })
-            return
-        job["status"] = "awaiting_review"
-        _save_replacement_job(job)
-        BRIDGE.payload.emit("video_replace_progress", {
-            "jobId": job["id"],
-            "stage": "awaiting_review",
-            "message": "漫剧片段已生成，请审核后合成。",
-            "timing": _replacement_timing_snapshot(job, None, stage="awaiting_review"),
-            "segments": job.get("segments") or [],
-        })
 
     def _collect_plan_edits(self):
         segments = self._job.get("segments") or []
@@ -16136,223 +17713,72 @@ class VideoReplacementPage(BasePage):
         run_bg(work)
 
     def _run_comic_frame_regeneration(self, job, segment, frame_kind):
+        pipeline = _replacement_comic_pipeline()
         job = job if isinstance(job, dict) else {}
         segment = segment if isinstance(segment, dict) else {}
-        kind = str(frame_kind or "").strip().lower()
-        if kind not in ("start", "end"):
-            raise ValueError("comic_frame_kind_invalid")
-        project_id = int(job.get("comicProjectId") or 0)
-        storyboard_id = int(segment.get("comicStoryboardId") or 0)
-        if not project_id:
-            raise RuntimeError("comic_project_id_missing")
-        if not storyboard_id:
-            raise RuntimeError("comic_storyboard_id_missing")
-        adapter = ComicProjectAdapter()
-        # Refresh the remote project before writing the current script and asset bindings.
-        _comic_find_storyboard(adapter.get_project(project_id), storyboard_id)
-        assets = job.get("comicAssets") or {}
-        if not assets and hasattr(adapter, "upsert_manual_assets"):
-            assets = adapter.upsert_manual_assets(project_id, job)
-            job["comicAssets"] = assets
-        adapter.update_storyboard(storyboard_id, job, segment, assets, include_audio=False)
-        frame_index = 1 if kind == "start" else 2
-        submitted = adapter.submit_storyboard_image(
-            storyboard_id, job, segment, frame_index=frame_index
+        original_segments = job.get("segments") if isinstance(job.get("segments"), list) else None
+        original_skip_persist = job.get("_replacementSkipPersist")
+        has_target_segment = any(
+            int((item or {}).get("index") or 0) == int(segment.get("index") or 0)
+            for item in (original_segments or [])
+            if isinstance(item, dict)
         )
-        task_id = _comic_extract_task_id(submitted)
-        if not task_id:
-            raise RuntimeError("comic_frame_task_id_missing")
-        image_url, payload = adapter.wait_task_result(
-            task_id,
-            cancel_check=_replacement_cancel_check(job),
-        )
-        frame_billing = _settle_comic_keyframe_actual_billing(
-            job, segment, payload, frame_index=frame_index, task_id=task_id
-        )
-        segment["%sFrameBilling" % kind] = dict(frame_billing)
-        image_url = _comic_absolute_media_url(image_url)
-        if not image_url:
-            raise RuntimeError("comic_frame_url_missing")
-        path_key = "startFramePath" if kind == "start" else "endFramePath"
-        candidate = dict(segment)
-        candidate[path_key] = ""
-        image_path = _comic_download_frame_image(job, candidate, kind, image_url, adapter)
-        if not image_path:
-            raise RuntimeError("comic_frame_download_failed")
-        return _apply_comic_frame_regeneration_result(
-            segment, kind, task_id, image_url, image_path
-        )
+        if not has_target_segment:
+            job["segments"] = [segment]
+            job["_replacementSkipPersist"] = True
+        try:
+            result = pipeline.regenerate_frame(
+                job,
+                segment.get("index"),
+                frame_kind,
+            )
+        finally:
+            if not has_target_segment:
+                if original_segments is None:
+                    job.pop("segments", None)
+                else:
+                    job["segments"] = original_segments
+                if original_skip_persist is None:
+                    job.pop("_replacementSkipPersist", None)
+                else:
+                    job["_replacementSkipPersist"] = original_skip_persist
+        return result.get("segment") or segment
 
     def _run_comic_video_regeneration(self, job, selected_segments, allow_pending_recovery=False):
-        job = job if isinstance(job, dict) else {}
-        selected_segments = [segment for segment in (selected_segments or []) if isinstance(segment, dict)]
-        adapter = ComicProjectAdapter()
-        assets = job.get("comicAssets") or {}
-        total = len(job.get("segments") or selected_segments)
-        job["status"] = "running"
+        pipeline = _replacement_comic_pipeline()
+        segment_lookup = {
+            int(item.get("index") or 0): item
+            for item in (job.get("segments") or [])
+            if isinstance(item, dict)
+        }
 
-        def emit_progress(segment, stage, message):
-            timing = _replacement_timing_snapshot(job, segment, stage=stage)
+        def bridge_progress(job_id, stage, message, segment_index, segments):
+            actual_segment = segment_lookup.get(int(segment_index or 0)) if segment_index is not None else None
+            prompt = ""
+            if segment_index is not None:
+                for item in segments or []:
+                    if int((item or {}).get("index") or 0) == int(segment_index or 0):
+                        prompt = str((item or {}).get("prompt") or "")
+                        break
+            timing = _replacement_timing_snapshot(job, actual_segment, stage=stage)
             BRIDGE.payload.emit("video_replace_progress", {
-                "jobId": job.get("id") or "",
-                "stage": stage,
+                "jobId": job_id,
+                "stage": timing.get("stage") or stage or "",
                 "message": message,
                 "timing": timing,
-                "segments": job.get("segments") or selected_segments,
-                "prompt": (segment or {}).get("prompt") or "",
+                "segments": segments or [],
+                "prompt": prompt or ((actual_segment or {}).get("prompt") or ""),
             })
 
+        selected_segments = [segment for segment in (selected_segments or []) if isinstance(segment, dict)]
+        selected_indexes = [segment.get("index") for segment in selected_segments]
+        job["_comicAllowPendingVideoRecovery"] = bool(allow_pending_recovery)
+        try:
+            result = pipeline.retry(job, selected_indexes, progress=bridge_progress)
+        finally:
+            job.pop("_comicAllowPendingVideoRecovery", None)
         for segment in selected_segments:
-            if self._cancel_requested or _replacement_cancel_requested(job):
-                _mark_replacement_job_canceled(job)
-                return
-            storyboard_id = segment.get("comicStoryboardId")
-            new_task_id = ""
-            new_video_url = ""
-            download_started = False
-            video_billing = {}
-            pending_recovery = (
-                _comic_pending_video_recovery(segment)
-                if allow_pending_recovery and segment.get("status") == "download_failed"
-                else {}
-            )
-            missing_message = "" if pending_recovery else _comic_video_missing_frames_message(segment)
-            if missing_message:
-                error_id = _replacement_error_id(
-                    "video_replace_comic_video_frames_missing",
-                    RuntimeError("comic_video_frames_missing"),
-                    job_id=job.get("id") or "",
-                    segment_index=segment.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                )
-                segment.update({
-                    "status": "failed",
-                    "stage": "video_retry_blocked_missing_frames",
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": missing_message,
-                    "errorId": error_id or segment.get("errorId") or "",
-                    "retryPrompt": missing_message,
-                })
-                _save_replacement_job(job)
-                continue
-            try:
-                if pending_recovery:
-                    new_task_id = str(pending_recovery.get("taskId") or "").strip()
-                    new_video_url = str(pending_recovery.get("videoUrl") or "").strip()
-                    candidate = _comic_video_candidate_from_pending(segment, pending_recovery)
-                    download_started = True
-                    segment.update({
-                        "status": "running",
-                        "stage": "comic_download_video",
-                        "stageLabel": _replacement_stage_label("comic_download_video"),
-                    })
-                    _save_replacement_job(job)
-                    emit_progress(
-                        segment,
-                        "comic_download_video",
-                        "片段 %s/%s：恢复下载并校验已生成视频…" % (
-                            segment.get("index"), total
-                        ),
-                    )
-                    _comic_download_segment_video(job, candidate, new_video_url, adapter)
-                    candidate.pop("pendingComicVideoRecovery", None)
-                    candidate.pop("comicRecoveryStatus", None)
-                    candidate.pop("comicRecoveryReason", None)
-                    segment.update(candidate)
-                    segment.pop("pendingComicVideoRecovery", None)
-                    _save_replacement_job(job)
-                    emit_progress(
-                        segment,
-                        "done",
-                        "片段 %s/%s：视频完成" % (segment.get("index"), total),
-                    )
-                    json_log(
-                        _CLIENT_JSON_LOGGER,
-                        "video_replace_comic_regeneration_completed",
-                        job_id=str(job.get("id") or ""),
-                        project_id=job.get("comicProjectId") or "",
-                        segment_index=segment.get("index") or "",
-                        media_kind="video",
-                    )
-                    continue
-                if not storyboard_id:
-                    raise RuntimeError("comic_storyboard_id_missing")
-                archived = _archive_comic_media_attempt(segment, "video")
-                if archived:
-                    history = list(segment.get("retryHistory") or [])
-                    history.append(archived)
-                    segment["retryHistory"] = history
-                segment.update({
-                    "status": "generating_video",
-                    "stage": "comic_update_storyboard",
-                    "stageLabel": _replacement_stage_label("comic_update_storyboard"),
-                })
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    "comic_update_storyboard",
-                    "片段 %s/%s：同步当前口播稿、素材和声音设置…" % (
-                        segment.get("index"), total
-                    ),
-                )
-                adapter.update_storyboard(
-                    int(storyboard_id), job, segment, assets, include_audio=True
-                )
-                segment["stage"] = "comic_generate_video"
-                emit_progress(
-                    segment,
-                    "comic_generate_video",
-                    "片段 %s/%s：重新生成视频…" % (segment.get("index"), total),
-                )
-                submitted = adapter.submit_storyboard_video(int(storyboard_id), job, segment)
-                new_task_id = _comic_extract_task_id(submitted)
-                if not new_task_id:
-                    raise RuntimeError("comic_video_task_id_missing")
-                new_video_url, video_payload = adapter.wait_task_result(
-                    new_task_id,
-                    cancel_check=_replacement_cancel_check(job),
-                    progress=lambda _attempt, _payload, s=segment: emit_progress(
-                        s,
-                        "comic_generate_video",
-                        _comic_task_progress_message(
-                            _payload,
-                            "片段 %s/%s：视频生成中…" % (s.get("index"), total),
-                        ),
-                    ),
-                    tries=int(job.get("tries") or 240),
-                    sleep_sec=5,
-                )
-                new_video_url = _comic_absolute_media_url(new_video_url)
-                if not new_video_url:
-                    raise RuntimeError("comic_video_url_missing")
-                video_billing = _settle_comic_video_actual_billing(
-                    {}, job, segment, video_payload
-                )
-                segment["comicVideoBilling"] = dict(video_billing)
-                pending_recovery = _comic_pending_video_recovery_metadata(
-                    job, new_task_id, new_video_url, video_payload
-                )
-                segment["pendingComicVideoRecovery"] = pending_recovery
-                _save_replacement_job(job)
-                candidate = _comic_video_candidate_from_pending(segment, pending_recovery)
-                download_started = True
-                emit_progress(
-                    segment,
-                    "comic_download_video",
-                    "片段 %s/%s：下载并校验新视频…" % (segment.get("index"), total),
-                )
-                _comic_download_segment_video(job, candidate, new_video_url, adapter)
-                candidate.pop("comicRecoveryStatus", None)
-                candidate.pop("comicRecoveryReason", None)
-                candidate.pop("pendingComicVideoRecovery", None)
-                segment.update(candidate)
-                segment.pop("pendingComicVideoRecovery", None)
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    "done",
-                    "片段 %s/%s：视频完成" % (segment.get("index"), total),
-                )
+            if segment.get("status") == "done":
                 json_log(
                     _CLIENT_JSON_LOGGER,
                     "video_replace_comic_regeneration_completed",
@@ -16361,65 +17787,7 @@ class VideoReplacementPage(BasePage):
                     segment_index=segment.get("index") or "",
                     media_kind="video",
                 )
-            except Exception as exc:
-                if self._cancel_requested or _replacement_cancel_requested(job) or _replacement_cancel_exception(exc):
-                    segment.update({
-                        "status": "cancel_requested",
-                        "stage": "cancel_requested",
-                        "stageLabel": "取消中",
-                    })
-                    _mark_replacement_job_canceled(job)
-                    return
-                error_id = _replacement_error_id(
-                    "video_replace_comic_video_regeneration_failed",
-                    exc,
-                    job_id=job.get("id") or "",
-                    segment_index=segment.get("index") or "",
-                    storyboard_id=storyboard_id or "",
-                    task_id=new_task_id,
-                    download_started=download_started,
-                )
-                failure_status = "download_failed" if download_started else "failed"
-                if failure_status == "download_failed" and pending_recovery:
-                    pending_recovery["downloadAttempts"] = int(
-                        pending_recovery.get("downloadAttempts") or 0
-                    ) + 1
-                    pending_recovery["lastDownloadAttemptAt"] = time.time()
-                    pending_recovery["lastErrorId"] = error_id
-                    pending_recovery["downloadStatus"] = "failed"
-                    segment["pendingComicVideoRecovery"] = pending_recovery
-                if new_task_id or new_video_url:
-                    history = list(segment.get("retryHistory") or [])
-                    history.append({
-                        "operationType": "comic_video_regeneration_attempt",
-                        "operationAt": time.time(),
-                        "mediaKind": "video",
-                        "taskId": new_task_id,
-                        "urlSummary": _comic_media_url_summary(new_video_url),
-                        "status": failure_status,
-                        "errorId": error_id,
-                    })
-                    segment["retryHistory"] = history
-                segment.update({
-                    "status": failure_status,
-                    "stage": failure_status,
-                    "stageLabel": _replacement_stage_label("failed"),
-                    "error": (
-                        "远程视频已生成，本地获取失败"
-                        if failure_status == "download_failed"
-                        else "comic_video_regeneration_failed"
-                    ),
-                    "errorId": error_id,
-                    "qcStatus": "failed",
-                })
-                _save_replacement_job(job)
-                emit_progress(
-                    segment,
-                    failure_status,
-                    "片段 %s/%s 视频重新生成失败（错误编号 %s）" % (
-                        segment.get("index"), total, error_id or "-"
-                    ),
-                )
+            elif segment.get("status") in ("failed", "download_failed"):
                 json_log(
                     _CLIENT_JSON_LOGGER,
                     "video_replace_comic_regeneration_failed",
@@ -16427,33 +17795,19 @@ class VideoReplacementPage(BasePage):
                     project_id=job.get("comicProjectId") or "",
                     segment_index=segment.get("index") or "",
                     media_kind="video",
-                    error_id=error_id or "",
+                    error_id=segment.get("errorId") or "",
                 )
-
-        failed = [
-            segment for segment in (job.get("segments") or selected_segments)
-            if segment.get("status") in ("failed", "download_failed")
-        ]
-        if failed:
-            job["status"] = "partial"
-            job["diagnostics"] = _replacement_diagnostics_summary(job)
-            _save_replacement_job(job)
+        if result.get("status") == "partial":
+            failed = [
+                segment for segment in (job.get("segments") or [])
+                if segment.get("status") in ("failed", "download_failed")
+            ]
             BRIDGE.payload.emit("video_replace_done", {
                 "jobId": job.get("id") or "",
                 "message": "有 %d 个片段的视频仍需处理" % len(failed),
                 "job": job,
                 "failedSegments": failed,
             })
-            return
-        job["status"] = "awaiting_review"
-        _save_replacement_job(job)
-        BRIDGE.payload.emit("video_replace_progress", {
-            "jobId": job.get("id") or "",
-            "stage": "awaiting_review",
-            "message": "漫剧视频已重新生成，请审核后合成。",
-            "timing": _replacement_timing_snapshot(job, None, stage="awaiting_review"),
-            "segments": job.get("segments") or selected_segments,
-        })
 
     def regenerate_selected_segment(self):
         row = self.table.currentRow() if hasattr(self, "table") else -1
@@ -16639,6 +17993,26 @@ class VideoReplacementPage(BasePage):
     def _warn_generation_blocked(self, message):
         self.status.setText(message)
         QtWidgets.QMessageBox.warning(self, "替换生成", message)
+
+    def _confirm_visual_analysis_failure(self):
+        """Ask before generating on a breakdown whose visual analysis failed."""
+        failure = _breakdown_visual_failure(self._job.get("breakdownAnalysis") or {})
+        if not failure:
+            return True
+        error_id = str(failure.get("errorId") or "").strip()
+        message = (
+            "源视频的视觉分析没有成功%s，本次片段缺少画面依据，"
+            "生成的首尾帧和视频只能依赖抽帧时间轴与口播稿，质量会明显下降。\n\n"
+            "建议先重新分解源视频。仍要继续生成吗？"
+        ) % (("（错误编号 %s）" % error_id) if error_id and error_id != "-" else "")
+        self.status.setText("视觉分析未成功，画面依据缺失。")
+        return QtWidgets.QMessageBox.question(
+            self,
+            "替换生成",
+            message,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        ) == QtWidgets.QMessageBox.Yes
 
     def _show_generation_result(self, message, ok):
         status = str(self._job.get("status") or "")
@@ -17730,11 +19104,107 @@ def _workflow_save_script_artifact(ctx, kind, text):
     return path
 
 
-def _wf_download(url, path):
-    r = requests.get(url, timeout=300, verify=True)
-    r.raise_for_status()  # 非 2xx(签名过期403/5xx/HTML错误页)直接抛错,别把错误页当成 mp4 存下来入队
-    with open(path, "wb") as f:
-        f.write(r.content)
+_WF_DOWNLOAD_RETRY_STATUS = (408, 429, 500, 502, 503, 504)
+
+
+def _wf_download_should_retry(exc):
+    """只重试「请求根本没送达/连接被掐断」这类瞬时故障。
+
+    绝不重试 403 —— 那是签名过期,手里只有一个死 URL,重试一百次还是 403,
+    而且会掩盖真实原因。注意 HTTPError 也是 RequestException 的子类,
+    所以必须先按类分流,不能用 RequestException 一把梭。
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = getattr(getattr(exc, "response", None), "status_code", 0)
+        return int(status or 0) in _WF_DOWNLOAD_RETRY_STATUS
+    return isinstance(exc, (
+        requests.exceptions.SSLError,          # 本次事故:SSLEOFError,TLS 被中途掐断
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.ContentDecodingError,
+    ))
+
+
+def _wf_download(url, path, retries=2, backoff=2.0, cancel_check=None):
+    """下载生成结果。跨公网拉几十 MB 的成品,TLS 偶尔被掐断是常态,
+    单次失败就把已生成(且已计费)的成品判死刑代价太大,所以带退避重试。
+
+    写盘走 .part + os.replace:流式下载中途失败留下的半截文件会骗过调用方
+    「文件已存在且非空就跳过重下」的判断。
+    """
+    attempts = max(1, int(retries or 0) + 1)
+    part = path + ".part"
+    last = None
+    for i in range(attempts):
+        if callable(cancel_check) and cancel_check():
+            raise RuntimeError("lk888_task_cancelled")
+        session = requests.Session()
+        session.trust_env = False      # 不吃系统代理:本地代理/TLS 拦截正是 SSLEOFError 的典型成因
+        try:
+            with session.get(url, timeout=300, verify=True, stream=True) as r:
+                r.raise_for_status()   # 非 2xx(签名过期403/5xx/HTML错误页)直接抛,别把错误页当 mp4 存下来
+                with open(part, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        if chunk:
+                            f.write(chunk)
+            os.replace(part, path)
+            if i:
+                log("wf download recovered after %d retries" % i)
+            return path
+        except Exception as ex:        # 包含写盘 OSError:那类不重试,下面的判定会放行到 raise
+            last = ex
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
+            if i == attempts - 1 or not _wf_download_should_retry(ex):
+                raise
+            log("wf download retry %d/%d: %s" % (i + 1, attempts - 1, type(ex).__name__))
+            time.sleep(backoff * (i + 1))
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+    raise last if last else RuntimeError("download_failed")
+
+
+def _replacement_source_extension(url):
+    ext = os.path.splitext(urlparse(str(url or "")).path)[1].lower()
+    return ext if ext in (".mp4", ".mov", ".webm", ".m4v") else ".mp4"
+
+
+def _replacement_web_download_source(source_url, job_dir):
+    """Direct-URL source downloader for the shared replacement service.
+
+    Reuses the breakdown/reference download path so production direct-URL
+    prepare works: it downloads into the job dir with the same helper the
+    reference-video analysis uses (``_wf_download``, which raises on non-2xx so
+    HTML/expired-signature error bodies are never stored), then validates the
+    media via ``_breakdown_source_validation`` before returning. Invalid media
+    is rejected and the partial file removed. Returns the local video path;
+    never logs the URL or the absolute path.
+    """
+    url = str(source_url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("replacement_invalid_source_url")
+    out_dir = os.path.abspath(str(job_dir or "").strip())
+    if not out_dir:
+        raise ValueError("replacement_source_job_dir_required")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(
+        out_dir, "source-%s%s" % (uuid.uuid4().hex[:12], _replacement_source_extension(url))
+    )
+    _wf_download(url, path)
+    validation = _breakdown_source_validation(path) or {}
+    if not validation.get("ok"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise ValueError(str(validation.get("code") or "replacement_source_media_invalid"))
     return path
 
 
@@ -19573,6 +21043,13 @@ def update_prodgen(pid, **kw):
     save_prodgen()
 
 
+def _prodgen_entry_by_id(pid):
+    for e in PRODGEN:
+        if e.get("id") == pid:
+            return e
+    return {}
+
+
 def prodgen_video_pending_entry(entry):
     source_id = str((entry or {}).get("id") or "").strip()
     pending_id = str((entry or {}).get("pendingPublishId") or "").strip()
@@ -19839,7 +21316,9 @@ def _central_library_image_to_data_url(value):
         )
     except Exception:
         return ""
-    if not same_origin or not target.path.startswith("/api/library/file/"):
+    # 失配时这里返回空串,参考图会被静默丢弃、用户看不到任何报错,所以判断必须
+    # 跟着 CENTRAL 的 path 走,不能写死字面量。
+    if not same_origin or not target.path.startswith(central_library_file_prefix(central)):
         return ""
     with _SLOCK:
         token = _SHARED.get("token") or ""
@@ -19863,6 +21342,39 @@ def _central_library_image_to_data_url(value):
         raise RuntimeError("video_replace_reference_not_image")
     import base64 as _b64
     return "data:%s;base64,%s" % (content_type, _b64.b64encode(content).decode("ascii"))
+
+
+# 只属于「这一次生成」的运行态字段。regen 复制条目时必须剔除,其余字段(含各模型自己的动态参数)一律带走。
+_PRODGEN_RUNTIME_KEYS = (
+    "id", "status", "files", "error", "ts", "rawError", "saved",
+    "expandedPrompt", "modelPrompt", "visiblePrompt",
+    "publishMaterialId", "pendingPublishId",
+    # 必须在这里:regen 是黑名单复制,漏掉它「再次生成」出来的新条目会带着上一条的结果 URL,
+    # 用户点「恢复下载」就会拿到上一次的视频 —— 静默的错误结果,比报错难查得多。
+    "pendingDownloadRecovery",
+)
+
+
+def _prodgen_download_error_text(raw):
+    """下载失败的用户文案。原始串里带 host、路径甚至签名,不能直接甩给用户
+    (_prodgen_user_error_text 的 token 表也认不出 SSL 那一类)。"""
+    low = str(raw or "").lower()
+    if "403" in low or "expired" in low or "signature" in low:
+        return "结果链接已过期，请重新生成。"
+    if any(k in low for k in ("ssl", "unexpected_eof", "max retries", "connection broken",
+                              "timed out", "timeout", "connection")):
+        return "已生成成功，本地下载失败（网络中断），可点『恢复下载』重试（不再扣费）"
+    return "已生成成功，本地下载失败，可点『恢复下载』重试（不再扣费）"
+
+
+def _prodgen_download_recovery(entry):
+    """条目上「远程已生成、本地没拿到」的恢复信息。只有同时拿到结果 URL 才算数。"""
+    pending = (entry or {}).get("pendingDownloadRecovery")
+    if not isinstance(pending, dict):
+        return {}
+    if not str(pending.get("resultUrl") or "").strip():
+        return {}
+    return pending
 
 
 def _prodgen_entry_ref_limit(entry):
@@ -19956,6 +21468,33 @@ def _prodgen_video_reference_url(path, title=""):
     if not _is_remote_fetchable_media_url(url):
         raise RuntimeError("参考视频上传失败:未拿到远程模型可读取的视频URL")
     return url
+
+
+_PRODGEN_MEDIA_LABEL = {"video": "参考视频", "audio": "参考音频"}
+
+
+def _prodgen_media_reference_urls(paths, media, title=""):
+    """把本地视频/音频上传成公网直链。失败必须抛,不能静默少传素材。"""
+    media = str(media or "").strip() or "video"
+    label = _PRODGEN_MEDIA_LABEL.get(media, "参考素材")
+    urls = []
+    for path in _agent_media_url_list(paths):
+        if not os.path.isfile(path):
+            raise RuntimeError("%s上传失败:文件不存在" % label)
+        try:
+            url, _meta = upload_asset_url(
+                path,
+                "Agent%s-%s" % (label, os.path.basename(path)),
+                media,
+                metadata={"source": "agent_%s_reference" % media, "title": str(title or "")[:80]},
+            )
+        except Exception as exc:
+            raise RuntimeError("%s上传失败:%s" % (label, str(exc)[:140])) from exc
+        url = str(url or "").strip()
+        if not _is_remote_fetchable_media_url(url):
+            raise RuntimeError("%s上传失败:未拿到远程模型可读取的URL" % label)
+        urls.append(url)
+    return urls
 
 
 def _prodgen_refs_desc(refs, is_video=False):
@@ -20092,6 +21631,29 @@ def _prodgen_direct_model_prompt(user_desc, style_hint="", ref_desc="", referenc
     return "\n".join(part for part in parts if part)
 
 
+def _prodgen_remember_result(entry, url, task_id, model, targets):
+    """在下载**之前**把结果 URL 和 task_id 落盘。
+
+    扣费发生在 lk888 返回结果那一刻(中心服反代按实际用量结算),比下载早。
+    所以下载失败时钱已经花了,而客户端的 refund_cap 对这类能力是空操作 —— 不落盘就等于白扣。
+    同时存 task_id:签名 URL 会过期,过期后只能拿 task_id 重新换一条新鲜的。
+    """
+    pid = (entry or {}).get("id")
+    if not pid:
+        return
+    update_prodgen(pid, pendingDownloadRecovery={
+        "status": "completed",
+        "createdAt": time.time(),
+        "taskId": str(task_id or ""),
+        "resultUrl": str(url or ""),
+        "model": str(model or ""),
+        "mode": (entry or {}).get("mode") or "",
+        "targets": [str(t) for t in (targets or [])],
+        "downloadAttempts": 0,
+        "lastError": "",
+    })
+
+
 def _prodgen_run_image(entry, emit=None):
     display_prompt = _prodgen_visible_prompt(entry) or "商品"
     prompt = display_prompt
@@ -20128,7 +21690,12 @@ def _prodgen_run_image(entry, emit=None):
     for k in range(cnt):
         p = os.path.join(data_dir(), "prodimg_%d_%d_%s.png" % (int(time.time()), k + 1, os.urandom(3).hex()))
         payload = _agent_image_payload(model, model_prompt, size=size, image_urls=image_urls)
-        url = lk888_media_task(model, payload, ["png", "jpg", "jpeg", "webp"], tries=150)
+        payload = _agent_apply_entry_params(payload, entry)
+        # 已经下好的 files 一并记下来:出 2 张时第 2 张下载失败,第 1 张也还没落过盘。
+        url = lk888_media_task(model, payload, ["png", "jpg", "jpeg", "webp"], tries=150,
+                               exclude_urls=image_urls,
+                               on_result=lambda u, task_id: _prodgen_remember_result(
+                                   entry, u, task_id, model, files + [p]))
         _wf_download(url, p)
         files.append(p)
     return files
@@ -20173,21 +21740,34 @@ def _prodgen_run_video(entry, emit=None):
             refs[:media["image_limit"]],
             display_prompt,
         )
-    reference_video_url = ""
-    if media["video_required"] and not str(entry.get("referenceVideo") or "").strip():
+    reference_videos = _agent_media_url_list(entry.get("referenceVideos") or entry.get("referenceVideo"))
+    reference_audios = _agent_media_url_list(entry.get("referenceAudios") or entry.get("referenceAudio"))
+    reference_video_url = []
+    reference_audio_url = []
+    if media["video_required"] and not reference_videos:
         raise RuntimeError("需要上传参考视频")
-    if media["video_limit"] > 0 and str(entry.get("referenceVideo") or "").strip():
+    if media["audio_required"] and not reference_audios:
+        raise RuntimeError("需要上传参考音频")
+    if media["video_limit"] > 0 and reference_videos:
         if emit:
             emit("phase", {"phaseText": "正在上传参考视频给视频模型…"})
-        reference_video_url = _prodgen_video_reference_url(
-            entry.get("referenceVideo"), display_prompt)
+        reference_video_url = _prodgen_media_reference_urls(
+            reference_videos[:media["video_limit"]], "video", display_prompt)
+    if media["audio_limit"] > 0 and reference_audios:
+        if emit:
+            emit("phase", {"phaseText": "正在上传参考音频给视频模型…"})
+        reference_audio_url = _prodgen_media_reference_urls(
+            reference_audios[:media["audio_limit"]], "audio", display_prompt)
     payload = _agent_video_payload(
-        model, model_prompt, dur, ar, reference_urls, reference_video_url)
+        model, model_prompt, dur, ar, reference_urls, reference_video_url, reference_audio_url)
+    payload = _agent_apply_entry_params(payload, entry)
+    p = os.path.join(data_dir(), "prodvid_%d_%s.mp4" % (int(time.time()), os.urandom(3).hex()))
     url = lk888_media_task(
         model,
         payload,
-        ["mp4", "mov"], tries=150)
-    p = os.path.join(data_dir(), "prodvid_%d_%s.mp4" % (int(time.time()), os.urandom(3).hex()))
+        ["mp4", "mov"], tries=150,
+        exclude_urls=list(reference_urls or []) + list(reference_video_url) + list(reference_audio_url),
+        on_result=lambda u, task_id: _prodgen_remember_result(entry, u, task_id, model, [p]))
     _wf_download(url, p)
     return [p]
 
@@ -20404,12 +21984,16 @@ def load_comment_risk_state():
 
 
 def _xhs_safety_account_key(account):
-    refs = _account_risk_refs(account if isinstance(account, dict) else {})
-    for ref in refs:
-        text = str(ref or "").strip()
-        if text and text.lower() != "douyin-self":
-            return text
-    return "xhs-self"
+    # 与执行器 api_server._xhs_safety_account_id 对齐:用稳定账号 id 作键,
+    # 空或 douyin-self 归一到 xhs-self。不再用 set 顺序(不确定)挑第一个 ref,
+    # 否则可能取到账号名,导致暂停状态/今日用量在风控中心读不到对应记录。
+    account = account if isinstance(account, dict) else {}
+    aid = str(
+        account.get("localAccountId") or account.get("id") or account.get("accountId") or ""
+    ).strip()
+    if not aid or aid.lower() == "douyin-self":
+        return "xhs-self"
+    return aid
 
 
 def _xhs_safety_usage_text(account, kind, state=None):
@@ -20436,12 +22020,16 @@ def _xhs_safety_cooldown_text(account, state=None):
 
 
 def _douyin_comment_account_key(account):
-    refs = _account_risk_refs(account if isinstance(account, dict) else {})
-    for ref in refs:
-        text = str(ref or "").strip()
-        if text and text.lower() != "xhs-self":
-            return text
-    return "douyin-self"
+    # 与执行器 api_server._douyin_comment_account_id 对齐:用稳定账号 id 作键,
+    # 空归一到 douyin-self。不再用 set 顺序(不确定)挑第一个 ref,
+    # 否则可能取到账号名/handle,导致今日评论/冷却/风控暂停在风控中心读不到对应记录。
+    account = account if isinstance(account, dict) else {}
+    aid = str(
+        account.get("localAccountId") or account.get("id") or account.get("accountId") or ""
+    ).strip()
+    if not aid or aid.lower() == "xhs-self":
+        return "douyin-self"
+    return aid
 
 
 def _douyin_comment_account_usage(account, state=None):
@@ -20539,6 +22127,8 @@ def _localize_download_task_error(error):
         return XHS_LOGIN_EXPIRED_HINT
     if text == "local_browser_offline":
         return "本地客户端未在线，请先启动并登录本地客户端。"
+    if text == "download_exception":
+        return "视频下载失败，请稍后重试。"
     return text
 
 
@@ -20839,6 +22429,21 @@ def _ensure_video_breakdown_report_sections(report, data):
     return "\n\n".join(parts), repaired
 
 
+def _breakdown_visual_status_label(analysis):
+    failure = _breakdown_visual_failure(analysis)
+    if not failure:
+        return "ok"
+    label = {
+        "failed": "失败",
+        "empty": "无可用关键帧",
+        "skipped": "已跳过",
+    }.get(str(failure.get("status") or ""), str(failure.get("status") or "-"))
+    error_id = str(failure.get("errorId") or "").strip()
+    if error_id and error_id != "-":
+        return "%s（错误编号 %s）" % (label, error_id)
+    return label
+
+
 def _video_breakdown_markdown(data):
     data = data or {}
     meta = data.get("meta") or {}
@@ -20857,9 +22462,19 @@ def _video_breakdown_markdown(data):
         "- OCR: %s" % (ocr.get("status") or "-"),
         "- OCR 引擎: %s" % (ocr.get("engine") or "-"),
         "- 音频转写: %s" % (transcript.get("status") or "-"),
+        "- 视觉分析: %s" % _breakdown_visual_status_label(data),
         "- 重试次数: %s" % int(transcript.get("retryCount") or 0),
-        "",
     ]
+    # 转写失败时必须给出原因。只写一个 "failed" 会把"服务地址配错了"和"这条视频
+    # 本来就没人说话"混为一谈,现场只能靠猜。
+    if (transcript.get("status") or "") == "failed":
+        reason = str(transcript.get("message") or "").strip()
+        code = str(transcript.get("code") or "").strip()
+        if reason:
+            lines.append("- 转写失败原因: %s" % reason)
+        if code:
+            lines.append("- 转写失败代码: %s" % code)
+    lines.append("")
     if transcript.get("truncated"):
         total_duration = float(meta.get("duration") or transcript.get("duration") or 0)
         analyzed_through = float(
@@ -21221,6 +22836,33 @@ def _replacement_strip_source_subtitle_dialogue(text):
     return _replacement_excerpt("\n".join(cleaned).strip(), 2400)
 
 
+_REPLACEMENT_DIAGNOSTIC_NOISE_RE = re.compile(
+    r"https?://"
+    r"|\b[A-Za-z0-9-]+\.(?:net|com|cn|org|io|dev)\b"
+    r"|\berrorId\b|\berr-[0-9a-f]{6,}\b"
+    r"|Traceback|[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b"
+    r"|Max retries|ConnectionPool"
+    r"|\b(?:host|port|url|status_code|timeout)\s*="
+    r"|\.(?:jpg|jpeg|png|webp|gif|bmp|mp4|mov|json|log|py)\b"
+    r"|/v\d+/"
+    r"|模型分析失败|分析失败（|生成失败（|请求失败（",
+    re.I,
+)
+
+
+def _replacement_strip_diagnostic_noise(text):
+    """Drop error text, endpoints and抽帧文件清单 before they can reach a prompt.
+
+    Breakdown evidence is model input, not a log: anything that looks like a
+    stack trace, an API endpoint or a frame-file listing is never画面描述.
+    """
+    kept = [
+        line for line in str(text or "").splitlines()
+        if line.strip() and not _REPLACEMENT_DIAGNOSTIC_NOISE_RE.search(line)
+    ]
+    return "\n".join(kept).strip()
+
+
 def _replacement_time_value_to_seconds(value):
     import re as _re
     text = str(value or "").strip()
@@ -21310,7 +22952,9 @@ def _replacement_current_shot_constraints(segment, analysis, limit=900):
         except (TypeError, ValueError):
             end = start + 8.0
     report = str(analysis.get("report") or "")
-    section = _markdown_section(report, "时间轴镜头拆解") or str(analysis.get("frameNotes") or "")
+    section = _replacement_strip_diagnostic_noise(
+        _markdown_section(report, "时间轴镜头拆解") or str(analysis.get("frameNotes") or "")
+    )
     headers = []
     rows = []
     fallback_lines = []
@@ -21350,7 +22994,11 @@ def _replacement_current_shot_constraints(segment, analysis, limit=900):
         rows = ["- " + _replacement_strip_source_subtitle_dialogue(" ".join(fallback_lines))]
     body = "\n".join(row for row in rows if row).strip()
     if not body:
-        body = _replacement_strip_source_subtitle_dialogue(analysis.get("visual") or analysis.get("frameNotes") or "")
+        body = _replacement_strip_diagnostic_noise(
+            _replacement_strip_source_subtitle_dialogue(
+                analysis.get("visual") or analysis.get("frameNotes") or ""
+            )
+        )
     if not body:
         return ""
     return _replacement_excerpt(
@@ -21369,7 +23017,9 @@ def _replacement_safe_breakdown_evidence(segment, analysis, limit=900):
     ]
     cleaned = []
     for part in parts:
-        value = _replacement_strip_source_subtitle_dialogue(part)
+        value = _replacement_strip_diagnostic_noise(
+            _replacement_strip_source_subtitle_dialogue(part)
+        )
         if value:
             cleaned.append(value)
     text = "\n".join(cleaned).strip()
@@ -22196,16 +23846,32 @@ def _build_hybrid_video_edit_request(job, segment, source_video_url):
     ])).strip()
     duration = max(1, min(int(round(float(segment.get("duration") or 8))), 15))
     candidates = _replacement_model_candidates(job)
+    # LK888 契约:所有模型特定参数(含参考图)必须放进 params 才会被上游读到;
+    # 顶层 image_urls 保留只为向后兼容旧调用方/测试。不同模型 upload 字段名不同
+    # (hailuo-h3/kwvideo-v2 是 `image_url` 单数、viduq3 是 `images` 复数),
+    # 都塞进 params 里让上游按 schema 各取所需。refs 为空时不下发,避免让 LK888
+    # 把空数组当成"提供了但为空"的输入触发别的校验。
+    params = {
+        "duration": duration,
+        "resolution": job.get("resolution") or "720p",
+        "aspect_ratio": job.get("aspectRatio") or "9:16",
+    }
+    if refs:
+        params["image_url"] = refs
+        params["images"] = refs
+        params["image_urls"] = refs
+        params["reference_images"] = refs
+    # audioReferenceUrl 由 _prepare_replacement_audio_reference 预生成(TTS/上传裁切),
+    # 只在候选模型支持 audio_url upload 参数时才 pre-gen。这里只搬进 payload,
+    # 具体塞哪个 params 字段名由 _replacement_remote_video_payload_for_model 按模型决定。
+    audio_ref = str(segment.get("audioReferenceUrl") or "").strip()
     return candidates[0], {
         "prompt": prompt[:1800],
         "source_video_url": source_url,
         "image_urls": refs,
+        "audio_reference_url": audio_ref,
         "model_candidates": candidates,
-        "params": {
-            "duration": duration,
-            "resolution": job.get("resolution") or "720p",
-            "aspect_ratio": job.get("aspectRatio") or "9:16",
-        },
+        "params": params,
     }
 
 
@@ -22213,15 +23879,37 @@ def _replacement_remote_video_payload(payload):
     payload = dict(payload or {})
     payload.pop("source_video_url", None)
     payload.pop("model_candidates", None)
+    # audio_reference_url 只是 build 阶段的载具,发往 LK888 时按模型改名(hailuo-h3 -> params.audio_url);
+    # 不支持 audio 参考的模型不能把它带在顶层,否则 LK888 会报 unknown param。
+    payload.pop("audio_reference_url", None)
     return payload
 
 
+# 支持 params.audio_url 参考音频的 LK888 模型集合。加新模型请同步 grep 一遍
+# _prepare_replacement_audio_reference 的 gate,两处必须一致。
+_LK888_REPLACEMENT_AUDIO_REF_MODELS = frozenset((
+    "hailuo-h3-quannengcankao",
+))
+
+
 def _replacement_remote_video_payload_for_model(payload, model):
+    audio_ref = str((payload or {}).get("audio_reference_url") or "").strip()
     remote = _replacement_remote_video_payload(payload)
     params = dict(remote.get("params") or {})
     model_name = str(model or "").strip().lower()
     if "happyhorse" in model_name:
         params["resolution"] = _lk888_video_edit_resolution(params.get("resolution") or "720p", model)
+    elif model_name == "hailuo-h3-quannengcankao":
+        # LK888 hailuo-h3 只接受 "768P" 或 "2K";通用默认 "720p"/"1080p" 会 400。
+        current = str(params.get("resolution") or "").strip().lower()
+        if current in ("2k", "1440p", "2160p", "4k", "1080p", "1080P".lower()):
+            params["resolution"] = "2K"
+        else:
+            params["resolution"] = "768P"
+    if audio_ref and model_name in _LK888_REPLACEMENT_AUDIO_REF_MODELS:
+        # LK888 hailuo-h3 spec:audio_url 字段名单数、值是数组,「最多 3 段总 ≤15 秒」。
+        # 目前只塞 1 段(单个片段的 TTS/上传音频裁切),后续要多段合成时改这里。
+        params["audio_url"] = [audio_ref]
     remote["params"] = params
     return remote
 
@@ -23429,6 +25117,42 @@ def _replacement_segment_audio_url_for_lipsync(job, segment):
     return sound_url
 
 
+def _prepare_replacement_audio_reference(job, segment):
+    """当主候选模型支持参考音色(hailuo-h3),提前生成 TTS 或取上传音频,
+    结果写入 segment["audioReferenceUrl"] 供 _build_hybrid_video_edit_request 读取。
+
+    只在 audioMode 是 tts/uploaded 且主候选就是 hailuo-h3 时触发。
+    如果 TTS 生成失败,吞掉异常继续跑视频生成(降级为不带音色参考,不是硬失败),
+    以免"想要更好的音色一致性"反而把整段生成搞挂。
+    """
+    job = job or {}
+    segment = segment or {}
+    audio_mode = _replacement_audio_mode(job)
+    if audio_mode not in ("tts", "uploaded"):
+        return ""
+    try:
+        candidates = _replacement_model_candidates(job)
+    except Exception:
+        return ""
+    if not candidates:
+        return ""
+    primary = str(candidates[0] or "").strip().lower()
+    if primary not in _LK888_REPLACEMENT_AUDIO_REF_MODELS:
+        return ""
+    existing = str(segment.get("audioReferenceUrl") or "").strip()
+    if _is_remote_fetchable_media_url(existing):
+        return existing
+    try:
+        url = _replacement_segment_audio_url_for_lipsync(job, segment)
+    except Exception as exc:
+        log("replacement audio ref pre-gen failed, continuing without: %s" % exc)
+        return ""
+    if not _is_remote_fetchable_media_url(url):
+        return ""
+    segment["audioReferenceUrl"] = url
+    return url
+
+
 def _replacement_video_lipsync_model(job=None):
     value = str((job or {}).get("videoLipSyncModel") or "").strip()
     if value:
@@ -24412,6 +26136,9 @@ def _run_hybrid_non_talking_segment(job, segment):
             except Exception:
                 pass
         _prepare_replacement_product_anchor(job, segment, out_dir)
+        # 主候选是 hailuo-h3 且是 AI 配音/上传配音模式时,预生成音频作为 audio_url 参考,
+        # 让模型按目标音色/节奏生成视频。降级失败不阻塞后续视频生成。
+        _prepare_replacement_audio_reference(job, segment)
         model, payload = _build_hybrid_video_edit_request(job, segment, source_url)
         candidates = list(payload.get("model_candidates") or [model])
         edited_url = ""
@@ -25863,34 +27590,62 @@ def _transcribe_breakdown_audio(video_path, out_dir=None, only_ranges=None, prog
                 "transcribedThroughSec": exported.get("limit"),
                 "truncated": exported.get("truncated", False),
                 "message": "音频导出失败，已继续使用画面与 OCR 分析。"}
-    cfg = lk888_config()
-    base = (cfg.get("base_url") or "").rstrip("/")
-    key = cfg.get("api_key") or ""
-    if not base or not key:
-        return {"status": "failed", "code": "lk888_not_configured", "text": "",
+    def _transcribe_degraded(code, message):
+        return {"status": "failed", "code": code, "text": "",
                 "segments": [], "chunks": [], "failedRanges": export_failures,
                 "errors": export_errors,
                 "duration": exported.get("duration"),
                 "transcribedThroughSec": exported.get("limit"),
                 "truncated": exported.get("truncated", False),
-                "message": "远程转写未配置，已继续使用画面与 OCR 分析。"}
-    result = transcribe_audio_chunks(
-        chunks=exported.get("chunks") or [],
-        base_url=base,
-        api_key=key,
-        model=model,
-        timeout=timeout,
-        retries=retries,
-        proxies=_lk_proxies(cfg),
-        only_ranges=only_ranges,
-        progress=progress,
-        logger=_CLIENT_JSON_LOGGER,
-        billing_context={
-            "scenario": "video_breakdown",
-            "stage": "audio_transcription",
-            "detail": "audio extraction and speech transcription",
-        },
-    )
+                "message": message}
+
+    # lk888_config() 和 transcribe_audio_chunks() 都会走 validate_service_url(),
+    # 服务地址不是 HTTPS 且非回环时抛 ValueError。转写只是分解的一个子步骤,画面
+    # 与 OCR 分析并不依赖它 —— 让这个异常冒出去会把整份报告变成"分解失败",用户
+    # 一无所得。这里降级为"这一步失败",但**必须把原因带回报告**,否则配置问题会
+    # 被"音频转写: failed"五个字盖掉,现场无从排查。
+    try:
+        cfg = lk888_config()
+        base = (cfg.get("base_url") or "").rstrip("/")
+        key = cfg.get("api_key") or ""
+        if not base or not key:
+            return _transcribe_degraded(
+                "lk888_not_configured", "远程转写未配置，已继续使用画面与 OCR 分析。")
+        result = transcribe_audio_chunks(
+            chunks=exported.get("chunks") or [],
+            base_url=base,
+            api_key=key,
+            model=model,
+            timeout=timeout,
+            retries=retries,
+            proxies=_lk_proxies(cfg),
+            only_ranges=only_ranges,
+            progress=progress,
+            logger=_CLIENT_JSON_LOGGER,
+            billing_context={
+                "scenario": "video_breakdown",
+                "stage": "audio_transcription",
+                "detail": "audio extraction and speech transcription",
+            },
+        )
+    except ValueError as exc:
+        raw_log = json_log(
+            _CLIENT_JSON_LOGGER,
+            "video_breakdown_transcribe_service_invalid",
+            exc=exc,
+            code="transcribe_service_url_invalid",
+        )
+        try:
+            error_id = (json.loads(raw_log) or {}).get("errorId") or ""
+        except Exception:
+            error_id = ""
+        # 异常文案来自校验函数本身(如 "remote service URL must use https; ..."),
+        # 不含地址或密钥,可以直接展示给运维。
+        return _transcribe_degraded(
+            "transcribe_service_url_invalid",
+            "远程转写服务地址不合法：%s%s，已继续使用画面与 OCR 分析。"
+            % (str(exc)[:160], ("（errorId %s）" % error_id) if error_id else ""),
+        )
     remote_failures = list(result.get("failedRanges") or [])
     remote_errors = list(result.get("errors") or remote_failures)
     failed_ranges = export_failures + remote_failures
@@ -26028,9 +27783,47 @@ _PROD_ACT = ("QPushButton{background:transparent;border:1px solid rgba(255,255,2
              "padding:6px 13px;color:#98a2b6;font-size:12px;font-weight:600;}"
              "QPushButton:hover{color:#ffffff;border-color:#6b6ff5;background:rgba(99,102,241,0.10);}"
              "QPushButton:disabled{color:#4b5568;border-color:rgba(255,255,255,0.045);}")
-REF_SLOT_W = 112
-REF_SLOT_H = 56
-REF_SLOT_RADIUS = 13
+# lk888 风格下拉胶囊:每项按能力着色,尾部 ▾ 表示点开是菜单,不再盲目轮换。
+_PROD_MENU_PILL_TPL = ("QPushButton{background:%(bg)s;border:1px solid %(bd)s;border-radius:15px;"
+                       "padding:7px 14px;color:%(fg)s;font-size:12px;font-weight:600;}"
+                       "QPushButton:hover{background:%(hbg)s;border-color:%(hbd)s;color:#ffffff;}"
+                       "QPushButton:disabled{background:rgba(255,255,255,0.03);"
+                       "border-color:rgba(255,255,255,0.05);color:#586074;}")
+_PROD_COST_CHIP = ("QPushButton{background:rgba(246,201,69,0.10);border:1px solid rgba(246,201,69,0.32);"
+                   "border-radius:13px;padding:5px 12px;color:#efc45f;font-size:11.5px;font-weight:600;}"
+                   "QPushButton:hover{background:rgba(246,201,69,0.18);border-color:rgba(246,201,69,0.60);}")
+_PROD_SEND_BTN = ("QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2ee0c6,stop:1 #22a8d8);"
+                  "border:0;border-radius:23px;}"
+                  "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #55ecd6,stop:1 #3cc0e8);}")
+# 参考图槽改成 lk888 的方形缩略图,和右侧提示词并排而不是独占一整行。
+# 宽度取 84:刚好放得下槽下面「点击替换 / 右键删除」一整行,不会把「除」挤到第三行。
+REF_SLOT_W = 84
+REF_SLOT_H = 84
+REF_SLOT_RADIUS = 14
+
+
+def _prod_menu_pill_style(accent):
+    """按强调色生成下拉胶囊样式(lk888 输入框里每个参数一种颜色)。"""
+    return _PROD_MENU_PILL_TPL % {
+        "bg": _rgba(accent, 0.10), "bd": _rgba(accent, 0.34), "fg": accent,
+        "hbg": _rgba(accent, 0.20), "hbd": _rgba(accent, 0.62),
+    }
+
+
+def _menu_pill_label(text):
+    """下拉胶囊文案:尾部补 ▾,让用户知道点开是菜单而不是切到下一项。"""
+    return "%s  ▾" % str(text or "")
+
+
+def _prod_menu(parent):
+    """Agent.模式统一的深色下拉菜单。"""
+    menu = QtWidgets.QMenu(parent)
+    menu.setStyleSheet(
+        "QMenu{background:#101522;color:#edf2ff;border:1px solid #283149;padding:6px;}"
+        "QMenu::item{padding:7px 18px 7px 12px;border-radius:8px;}"
+        "QMenu::item:selected{background:rgba(99,102,241,0.18);}"
+    )
+    return menu
 
 
 def _grad_circle(size, c1, c2, glyph="", selected=False):
@@ -26276,11 +28069,16 @@ class GenCard(QtWidgets.QFrame):
             chips.addWidget(_chip_pill("video", "时长: %ds" % int(e.get("duration") or 5)))
         else:
             chips.addWidget(_chip_pill("ratio", "图片比例: " + _fmt_ratio(e.get("aspectLabel"))))
-            chips.addWidget(_chip_pill("sparkle", "图片质量: 自适应"))
+        # 本次真正发出去的模型参数。比例/时长上面已经有了,这里只补其余的。
+        # (原先这里是一句写死的「图片质量: 自适应」,不管实际发的是什么都这么显示。)
+        for meta in (e.get("paramsMeta") or []):
+            if not isinstance(meta, dict) or meta.get("role") in ("aspect", "duration"):
+                continue
+            chips.addWidget(_chip_pill("sparkle", "%s: %s" % (
+                meta.get("label") or meta.get("name"), meta.get("valueLabel") or meta.get("value"))))
         model_text = str(e.get("modelLabel") or _lk888_model_label(e.get("model")) or "").strip()
         if model_text:
             chips.addWidget(_chip_pill("sparkle", "模型: " + model_text))
-        chips.addWidget(_chip_pill("layers", "设置分组"))
         chips.addStretch()
         self.lay.addLayout(chips)
         # ---- 结果 ----
@@ -26288,6 +28086,13 @@ class GenCard(QtWidgets.QFrame):
             self._build_gen_panel(e)
         elif st == "失败":
             self.lay.addWidget(self._note("生成失败：" + _prodgen_user_error_text(e.get("error")), "#ef5555"))
+        elif st == "下载失败":
+            # 远程已经出片、费用已经产生,别用红色报错吓人,重点是告诉用户还能捞回来。
+            pending = _prodgen_download_recovery(e)
+            tries = int(pending.get("downloadAttempts") or 0)
+            self.lay.addWidget(self._note(
+                str(e.get("error") or "已生成成功，本地下载失败。")
+                + ("（已尝试 %d 次）" % tries if tries > 1 else ""), "#f0a24b"))
         elif st == "已中断":
             self.lay.addWidget(self._note("已中断(客户端重启),点『再次生成』重跑。", "#8b93a3"))
         else:  # 完成
@@ -26325,6 +28130,11 @@ class GenCard(QtWidgets.QFrame):
             else:
                 foot.addWidget(_icon_text_btn("publish", "加入发布", _PROD_ACT, "#22c55e", 14,
                                               cb=lambda: self.page.add_to_publish(self.entry)))
+        if _prodgen_download_recovery(e) and st == "下载失败":
+            # 放在「再次生成」前面:再次生成会重开一个 LK888 任务再花一次钱,
+            # 而这条路只是把已经付过费的成品重新拉下来。
+            foot.addWidget(_icon_text_btn("download", "恢复下载", _PROD_ACT, "#f0a24b", 14,
+                                          cb=lambda: self.page.recover_download(self.entry), disabled=busy))
         foot.addWidget(_icon_text_btn("edit", "重新编辑", _PROD_ACT, "#98a2b6", 14,
                                       cb=lambda: self.page.reedit(self.entry), disabled=busy))
         foot.addWidget(_icon_text_btn("refresh", "再次生成", _PROD_ACT, "#98a2b6", 14,
@@ -26537,11 +28347,151 @@ class PromptConfirmDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class AgentMoreParamsDialog(QtWidgets.QDialog):
+    """「更多参数」抽屉:按当前模型 schema 逐个渲染它自己的参数。
+
+    每个字段的说明文字放在控件下方**页面内可见**,不用 tooltip —— 客户端全局禁用 setToolTip,
+    而且这些说明(价格减半、字数上限、语速范围)正是用户填表的依据,藏进悬停框等于没搬过来。
+    """
+
+    def __init__(self, form, values, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("更多参数 · %s" % (form.get("display_name") or form.get("model") or ""))
+        self.setMinimumWidth(560)
+        self.setStyleSheet(
+            "QDialog{background:#0b0e17;}"
+            "QLabel{color:%s;background:transparent;}"
+            "QComboBox,QLineEdit,QPlainTextEdit{background:rgba(255,255,255,0.05);color:%s;"
+            "border:1px solid rgba(255,255,255,0.12);border-radius:9px;padding:6px 10px;font-size:13px;}"
+            "QComboBox:hover,QLineEdit:hover,QPlainTextEdit:hover{border-color:#6b6ff5;}"
+            "QComboBox QAbstractItemView{background:#101522;color:#edf2ff;"
+            "selection-background-color:rgba(99,102,241,0.30);border:1px solid #283149;}"
+            % (TK["text"], TK["text"]))
+        self._form = form
+        self._fields = _agent_form_drawer_fields(form)
+        self._editors = {}
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 16)
+        outer.setSpacing(10)
+        head = QtWidgets.QLabel("这些参数由所选模型自己声明。留「默认」的不会发给模型。")
+        head.setWordWrap(True)
+        head.setStyleSheet("color:#6b7488;font-size:11.5px;background:transparent;")
+        outer.addWidget(head)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;}")
+        host = QtWidgets.QWidget()
+        host.setStyleSheet("background:transparent;")
+        body = QtWidgets.QVBoxLayout(host)
+        body.setContentsMargins(0, 0, 12, 0)
+        body.setSpacing(14)
+        for field in self._fields:
+            body.addWidget(self._make_row(field, values.get(field["name"], field.get("default"))))
+        body.addStretch()
+        scroll.setWidget(host)
+        outer.addWidget(scroll, 1)
+        self.resize(600, min(720, 190 + 96 * max(1, len(self._fields))))
+
+        row = QtWidgets.QHBoxLayout()
+        row.addStretch()
+        reset = QtWidgets.QPushButton("全部恢复默认")
+        reset.setStyleSheet(_PROD_ACT)
+        reset.setCursor(QtCore.Qt.PointingHandCursor)
+        reset.clicked.connect(self._reset_all)
+        row.addWidget(reset)
+        cancel = QtWidgets.QPushButton("取消")
+        cancel.setStyleSheet(_PROD_ACT)
+        cancel.setCursor(QtCore.Qt.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        ok = QtWidgets.QPushButton("确定")
+        ok.setCursor(QtCore.Qt.PointingHandCursor)
+        ok.setStyleSheet("QPushButton{background:%s;border:0;border-radius:10px;padding:7px 20px;"
+                         "color:#ffffff;font-size:12px;font-weight:700;}" % TK["accent"])
+        ok.clicked.connect(self.accept)
+        row.addWidget(ok)
+        outer.addLayout(row)
+
+    def _make_row(self, field, value):
+        cell = QtWidgets.QWidget()
+        cell.setStyleSheet("background:transparent;")
+        col = QtWidgets.QVBoxLayout(cell)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(5)
+        title = QtWidgets.QLabel(field["label"] + ("　*必填" if field["required"] else ""))
+        title.setStyleSheet("font-size:12.5px;font-weight:600;background:transparent;")
+        col.addWidget(title)
+        if field["kind"] in ("choice", "toggle"):
+            editor = QtWidgets.QComboBox()
+            editor.setCursor(QtCore.Qt.PointingHandCursor)
+            if not field["required"]:
+                editor.addItem("默认(不指定)", AGENT_PARAM_UNSET)
+            for opt in field["options"]:
+                editor.addItem(opt["label"], opt["value"])
+            index = editor.findData(str(value) if value is not None else "")
+            editor.setCurrentIndex(index if index >= 0 else 0)
+            editor.setEnabled(bool(field["enabled"]))
+        elif field["raw_type"] == "textarea":
+            editor = QtWidgets.QPlainTextEdit()
+            editor.setPlainText("" if value in (None, AGENT_PARAM_UNSET) else str(value))
+            editor.setFixedHeight(70)
+        else:
+            editor = QtWidgets.QLineEdit()
+            editor.setText("" if value in (None, AGENT_PARAM_UNSET) else str(value))
+            editor.setPlaceholderText("留空则不发送")
+        col.addWidget(editor)
+        self._editors[field["name"]] = editor
+        if field["description"]:
+            note = QtWidgets.QLabel(field["description"])
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#7b8598;font-size:11px;background:transparent;")
+            col.addWidget(note)
+        return cell
+
+    def _reset_all(self):
+        for field in self._fields:
+            editor = self._editors.get(field["name"])
+            default = field.get("default")
+            if isinstance(editor, QtWidgets.QComboBox):
+                index = editor.findData(str(default) if default is not None else "")
+                editor.setCurrentIndex(index if index >= 0 else 0)
+            elif isinstance(editor, QtWidgets.QPlainTextEdit):
+                editor.setPlainText("" if default in (None, AGENT_PARAM_UNSET) else str(default))
+            elif editor is not None:
+                editor.setText("" if default in (None, AGENT_PARAM_UNSET) else str(default))
+
+    def values(self):
+        """只返回**与默认值不同**的项。用户没动过的参数不会进条目,也就不会改变请求。"""
+        out = {}
+        for field in self._fields:
+            editor = self._editors.get(field["name"])
+            if isinstance(editor, QtWidgets.QComboBox):
+                value = editor.currentData()
+            elif isinstance(editor, QtWidgets.QPlainTextEdit):
+                value = editor.toPlainText().strip()
+            elif editor is not None:
+                value = editor.text().strip()
+            else:
+                continue
+            if value in (None, "", AGENT_PARAM_UNSET):
+                continue
+            if str(value) == str(field.get("default")):
+                continue
+            out[field["name"]] = str(value)
+        return out
+
+
 class ProductGenPage(BasePage):
     """Agent.模式:对话式生成流。上方一条条生成卡(提示词+参数+结果+操作),
     下方输入区(参考图 / 图像·视频模式 / 比例 / 数量 / 发送)。真实调用 LK888 模型目录。"""
 
     MAX_REFS = 4
+    COUNTS = (1, 2)
+    # 参考图怎么用由 _ref_hint_text() 按当前模式补在后面,这里不重复写死。
+    BASE_HINT = "描述画面中的物体、风格及文字排版,注重指令精准与细节还原。"
     ASPECTS = [("横版 16:9", "1536x1024", "16:9"), ("方形 1:1", "1024x1024", "1:1"),
                ("竖版 9:16", "1024x1536", "9:16")]
     STYLES = [
@@ -26560,7 +28510,10 @@ class ProductGenPage(BasePage):
         self._mode = "image"
         self._ref = ""
         self._refs = []
-        self._reference_video = ""
+        # 视频/音频都可能要传多个(wan2.7-xuxie 的 clips 上限 10)。
+        # _reference_video 是取首个的属性别名,历史条目与老代码不用改。
+        self._media_files = {"video": [], "audio": []}
+        self._media_slot_buttons = {}   # 顶部显眼的视频/音频上传槽,按当前模型契约重建
         self.ref_buttons = []
         self._cards = {}
         self._style = 0
@@ -26576,6 +28529,11 @@ class ProductGenPage(BasePage):
         self._models_loading = False
         self._prompt_optimizing = False
         self._prompt_opt_req = ""
+        # 按模型 schema 渲染参数区所需的状态
+        self._forms = {}            # (model, mode) -> FORM
+        self._param_values = {}     # model -> {参数名: 取值}
+        self._role_values = {}      # 角色 -> 取值,换模型时沿用(选了 16:9 换个模型还是 16:9)
+        self._schema_pending = set()
         self.nav_aliases = ("🛍️ 商品图和视频生成", "🛍️ Agent.模式")
         self.v.addWidget(make_header("Agent.模式",
                                      "对话式生成:描述需求 + 多张图片，可按 LK888 分类模型生成图片或视频"))
@@ -26592,28 +28550,46 @@ class ProductGenPage(BasePage):
         self.msgs.addStretch()
         self.scroll.setWidget(host)
         self.v.addWidget(self.scroll, 1)
-        # ---- 输入区(精致 composer) ----
+        # ---- 输入区(lk888 风格 composer:参考图在左、提示词在右、底部一排下拉胶囊) ----
         comp = QtWidgets.QFrame()
         comp.setObjectName("prodComposer")
         comp.setStyleSheet("QFrame#prodComposer{background:%s;border:1px solid %s;border-radius:18px;}"
                            % (("#ffffff" if is_light() else "#0b0e17"),
                               (TK["cardBorder"] if is_light() else "#222b3e")))
         cv = QtWidgets.QVBoxLayout(comp)
-        cv.setContentsMargins(16, 13, 16, 14)
-        cv.setSpacing(12)
-        # (已按用户要求删掉模型/风格头像圆一行)
-        # 行1:提示语
-        self.hint = QtWidgets.QLabel("描述画面中的物体、风格及文字排版,注重指令精准与细节还原。"
-                                     "图片模式第1张为待修改图；视频模式上传图片全部作为参考图。")
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color:#6b7488;font-size:11.5px;background:transparent;border:0;")
-        cv.addWidget(self.hint)
-        # 行3:参考图槽独立成行，避免挤压多行提示词输入区。
+        cv.setContentsMargins(16, 11, 16, 14)
+        cv.setSpacing(10)
+        # 行1:右上角工具条(清空输入 / 清空参考图 / 计费徽章),对齐 lk888 输入框头部。
+        tools = QtWidgets.QHBoxLayout()
+        tools.setSpacing(7)
+        tools.addStretch()
+        tools.addWidget(_round_icon_btn("close", 28, "#8b93a3", cb=lambda: self.inp.clear(), tip="清空输入"))
+        tools.addWidget(_round_icon_btn("trash", 28, "#8b93a3", cb=self.clear_ref, tip="清空参考图"))
+        self.cost_chip = QtWidgets.QPushButton()
+        self.cost_chip._no_press_scale = True
+        self.cost_chip.setIcon(QtGui.QIcon(_draw_icon("bolt", 13, "#efc45f")))
+        self.cost_chip.setIconSize(QtCore.QSize(13, 13))
+        self.cost_chip.setCursor(QtCore.Qt.PointingHandCursor)
+        self.cost_chip.setStyleSheet(_PROD_COST_CHIP)
+        self.cost_chip.setToolTip("")
+        self.cost_chip.clicked.connect(self._show_billing_note)
+        tools.addWidget(self.cost_chip)
+        tools.addWidget(_round_icon_btn("info", 28, "#8b93a3", cb=self._show_billing_note, tip="计费说明"))
+        cv.addLayout(tools)
+        # 行2:参考图方槽在左,提示语 + 多行输入在右(lk888 把两者并排,不再各占一整行)。
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(13)
         ref_strip = QtWidgets.QHBoxLayout()
-        ref_strip.setSpacing(9)
+        ref_strip.setSpacing(8)
         self.ref_strip = ref_strip
         self._rebuild_ref_slots()
-        cv.addLayout(ref_strip)
+        body.addLayout(ref_strip)
+        prompt_col = QtWidgets.QVBoxLayout()
+        prompt_col.setSpacing(5)
+        self.hint = QtWidgets.QLabel(self.BASE_HINT)
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet("color:#6b7488;font-size:11.5px;background:transparent;border:0;")
+        prompt_col.addWidget(self.hint)
         self.inp = QtWidgets.QPlainTextEdit()
         self.inp.setPlaceholderText("给我描述你想要的素材…")
         self.inp.setMinimumHeight(78)
@@ -26623,55 +28599,85 @@ class ProductGenPage(BasePage):
         self.inp.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.inp.setStyleSheet("QPlainTextEdit{background:transparent;border:0;color:%s;font-size:14.5px;"
                                "selection-background-color:#6366f1;padding:0;}" % TK["text"])
-        cv.addWidget(self.inp)
+        self.inp.textChanged.connect(self._autosize_input)
+        prompt_col.addWidget(self.inp)
+        self._autosize_input()
+        body.addLayout(prompt_col, 1)
+        cv.addLayout(body)
+        self._apply_ref_hint(self._ref_hint_text())
         divl = QtWidgets.QFrame()
         divl.setFixedHeight(1)
         divl.setStyleSheet("background:rgba(255,255,255,0.06);border:0;")
         cv.addWidget(divl)
-        # 行4:综合最优 / 1条 / 比例 胶囊 + 右侧圆形图标 + 圆形发送
+        # 行3:模式分段 + 参数下拉胶囊 + 右侧圆形工具 + 圆形发送
         ctl = QtWidgets.QHBoxLayout()
         ctl.setSpacing(8)
         self.b_img = _icon_text_btn("image", "图片模式", _PROD_PILL_SEL, "#ffffff", 15, cb=lambda: self._mode_set("image"))
         self.b_vid = _icon_text_btn("video", "视频模式", _PROD_PILL, "#aab3c5", 15, cb=lambda: self._mode_set("video"))
         ctl.addWidget(self.b_img)
         ctl.addWidget(self.b_vid)
-        self.b_style = _icon_text_btn("sparkle", self.STYLES[0][0], _PROD_PILL, "#c9a8ff", 15, cb=self._cycle_style)
+        self.b_style = _icon_text_btn("sparkle", _menu_pill_label(self.STYLES[0][0]),
+                                      _prod_menu_pill_style("#c9a8ff"), "#c9a8ff", 15, cb=self._pick_style)
         ctl.addWidget(self.b_style)
-        self.b_count = _icon_text_btn("layers", "1 条", _PROD_PILL, "#aab3c5", 15, cb=self._cycle_count)
+        self.b_count = _icon_text_btn("layers", _menu_pill_label("1 条"),
+                                      _prod_menu_pill_style("#e0b45a"), "#e0b45a", 15, cb=self._pick_count)
         ctl.addWidget(self.b_count)
-        self.b_aspect = _icon_text_btn("ratio", self.ASPECTS[0][0], _PROD_PILL, "#aab3c5", 15, cb=self._cycle_aspect)
+        self.b_aspect = _icon_text_btn("ratio", _menu_pill_label(self.ASPECTS[0][0]),
+                                       _prod_menu_pill_style("#7fd1e8"), "#7fd1e8", 15, cb=self._pick_aspect)
         ctl.addWidget(self.b_aspect)
-        self.b_duration = _icon_text_btn("video", "5 秒", _PROD_PILL, "#aab3c5", 15, cb=self._cycle_video_duration)
+        self.b_duration = _icon_text_btn("video", _menu_pill_label("5 秒"),
+                                         _prod_menu_pill_style("#8ea2ff"), "#8ea2ff", 15, cb=self._pick_video_duration)
         self.b_duration.setEnabled(False)
         ctl.addWidget(self.b_duration)
-        self.b_model = _icon_text_btn("sparkle", "LK888 模型", _PROD_PILL, "#9bd4ff", 15, cb=self._pick_model)
+        self.b_model = _icon_text_btn("sparkle", _menu_pill_label("LK888 模型"),
+                                      _prod_menu_pill_style("#9bd4ff"), "#9bd4ff", 15, cb=self._pick_model)
         ctl.addWidget(self.b_model)
+        self.b_more = _icon_text_btn("grid", _menu_pill_label("更多参数"),
+                                     _prod_menu_pill_style("#9aa6bf"), "#9aa6bf", 15, cb=self._open_more_params)
+        ctl.addWidget(self.b_more)
         ctl.addStretch()
         self.optimize_btn = _icon_text_btn("sparkle", "提示词优化", _PROD_PILL, "#c9a8ff", 15, cb=self.optimize_prompt)
         self.optimize_btn.setToolTip("")
         ctl.addWidget(self.optimize_btn)
         ctl.addWidget(_round_icon_btn("grid", 40, "#8b93a3", cb=self.pick_from_assets, tip="从资产库选参考图"))
-        ctl.addWidget(_round_icon_btn("trash", 40, "#8b93a3", cb=lambda: self.inp.clear(), tip="清空输入"))
         ctl.addWidget(_round_icon_btn("plus", 40, "#8b93a3", cb=self.pick_ref, tip="上传图片"))
         self.ref_video_btn = _round_icon_btn(
-            "video", 40, "#8b93a3", cb=self.pick_reference_video,
-            tip="上传动作控制参考视频")
+            "video", 40, "#8b93a3", cb=lambda: self.pick_media_files("video"),
+            tip="上传参考视频")
         self.ref_video_btn.setVisible(False)
         ctl.addWidget(self.ref_video_btn)
+        self.ref_audio_btn = _round_icon_btn(
+            "volume", 40, "#8b93a3", cb=lambda: self.pick_media_files("audio"),
+            tip="上传参考音频")
+        self.ref_audio_btn.setVisible(False)
+        ctl.addWidget(self.ref_audio_btn)
         self.send_btn = QtWidgets.QPushButton()
         self.send_btn.setFixedSize(46, 46)
         self.send_btn.setIcon(QtGui.QIcon(_draw_icon("arrowup", 22, "#ffffff")))
         self.send_btn.setIconSize(QtCore.QSize(22, 22))
         self.send_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.send_btn.clicked.connect(self.send)
-        self.send_btn.setStyleSheet(
-            "QPushButton{background:%s;border:0;border-radius:23px;}"
-            "QPushButton:hover{background:%s;}" % (TK["accent"], TK["accent2"]))
+        self.send_btn.setStyleSheet(_PROD_SEND_BTN)
         ctl.addWidget(self.send_btn)
         cv.addLayout(ctl)
+        # 该模型还有哪些参数暂时接不进请求 —— 只读说明,不画假控件。
+        self.param_note = QtWidgets.QLabel("")
+        self.param_note.setWordWrap(True)
+        self.param_note.setVisible(False)
+        self.param_note.setStyleSheet("color:#7a6f4e;font-size:11px;background:transparent;border:0;")
+        cv.addWidget(self.param_note)
+        self.media_note = QtWidgets.QLabel("")
+        self.media_note.setWordWrap(True)
+        self.media_note.setVisible(False)
+        self.media_note.setStyleSheet("color:#7fd1e8;font-size:11px;background:transparent;border:0;")
+        self.media_note.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.media_note.customContextMenuRequested.connect(lambda _p: self._clear_all_media())
+        cv.addWidget(self.media_note)
         self.model_meta = QtWidgets.QLabel("LK888 模型目录待同步")
         self.model_meta.setStyleSheet("color:#6b7488;font-size:11.5px;background:transparent;border:0;")
         cv.addWidget(self.model_meta)
+        self._sync_cost_chip()
+        self._sync_param_bar()
         self.v.addWidget(comp)
         BRIDGE.payload.connect(self._on)
 
@@ -26679,6 +28685,8 @@ class ProductGenPage(BasePage):
         load_prodgen()
         load_pending()
         self._ensure_model_catalog()
+        self._refresh_cost_chip()
+        self._request_model_schema(self._current_model(), self._mode)
         # 清空并重建生成流
         while self.msgs.count() > 1:
             it = self.msgs.takeAt(0)
@@ -26715,6 +28723,156 @@ class ProductGenPage(BasePage):
     def _current_model(self, mode=None):
         return self._video_model if (mode or self._mode) == "video" else self._image_model
 
+    # ---- 按模型 schema 渲染参数区 ----
+    def _current_form(self, mode=None):
+        """当前模型的表单描述。只读缓存(不发网络),拿不到 schema 时是 legacy 兜底表单。"""
+        mode = mode or self._mode
+        model = self._current_model(mode)
+        key = (model, mode)
+        form = self._forms.get(key)
+        if form is None:
+            form = _agent_schema_form_for_ui(model, mode)
+            self._forms[key] = form
+        return form
+
+    def _request_model_schema(self, model, mode):
+        """后台取 schema,回来再刷参数区。UI 线程永远不发网络。"""
+        model = str(model or "").strip()
+        if not model or model in self._schema_pending:
+            return
+        self._schema_pending.add(model)
+
+        def work():
+            try:
+                _lk888_model_schema(model)
+            except Exception as e:                      # 兜底:取 schema 失败绝不能影响页面
+                log("agent schema fetch %s: %s" % (model, e))
+            BRIDGE.payload.emit("prodgen_model_schema", {"model": model, "mode": mode})
+        run_bg(work)
+
+    def _model_values(self, model=None):
+        return self._param_values.setdefault(str(model or self._current_model()), {})
+
+    def _field_value(self, field, model=None):
+        """字段当前取值。优先用户在本模型上选过的,其次同角色跨模型沿用(换模型后 16:9 还是 16:9),
+        最后才是该字段自己的默认值。"""
+        values = self._model_values(model)
+        if field["name"] in values:
+            return values[field["name"]]
+        role = field["role"]
+        if role != "other" and role in self._role_values:
+            want = self._role_values[role]
+            for opt in field["options"]:
+                if opt["value"] == want:
+                    return want
+        return field.get("default")
+
+    def _set_field_value(self, field, value, model=None):
+        self._model_values(model)[field["name"]] = value
+        if field["role"] != "other":
+            self._role_values[field["role"]] = value
+
+    def _field_label_for(self, field, value):
+        for opt in field["options"]:
+            if opt["value"] == str(value):
+                return opt["label"]
+        if value == AGENT_PARAM_UNSET:
+            return "默认"
+        return str(value or "默认")
+
+    def _pick_field(self, button, field):
+        """按 schema 的 options 弹菜单。可选字段额外给一个「默认」项 —— 选它就整个不发这个参数,
+        和 lk888 上没碰过这个控件是一回事。"""
+        options = list(field["options"])
+        values = [o["value"] for o in options]
+        labels = [o["label"] for o in options]
+        if not field["required"]:
+            values.insert(0, AGENT_PARAM_UNSET)
+            labels.insert(0, "默认(不指定)")
+        current = str(self._field_value(field))
+        index = values.index(current) if current in values else 0
+
+        def pick(i):
+            self._set_field_value(field, values[i])
+            self._sync_param_bar()
+
+        self._menu_choice(button, labels, index, pick)
+
+    def _bind_role_pill(self, button, role, icon):
+        """把一个胶囊绑到当前模型的某个语义角色上。模型没有这个参数 → 整条胶囊消失。"""
+        if button is None:
+            return None
+        field = _agent_form_role_field(self._current_form(), role)
+        if field is None:
+            button.setVisible(False)
+            return None
+        button.setVisible(True)
+        button.setEnabled(bool(field["enabled"]))
+        button.setIcon(QtGui.QIcon(_draw_icon(icon, 15, "#7fd1e8" if role == "aspect" else "#8ea2ff")))
+        button.setText("  " + _menu_pill_label("%s %s" % (
+            field["label"], self._field_label_for(field, self._field_value(field)))))
+        return field
+
+    def _sync_param_bar(self):
+        """参数区随模型变化:比例/时长胶囊按角色绑定,提示语用模型自己的 input_hint。
+        暂时接不进请求的参数只作为只读清单列出来,绝不画点了不影响请求的假控件。"""
+        form = self._current_form()
+        self._bind_role_pill(getattr(self, "b_aspect", None), "aspect", "ratio")
+        self._bind_role_pill(getattr(self, "b_duration", None), "duration", "video")
+        if getattr(self, "b_count", None) is not None:
+            self.b_count.setVisible(self._mode == "image")
+        self._apply_ref_hint(self._ref_hint_text())
+        drawer = _agent_form_drawer_fields(form)
+        if getattr(self, "b_more", None) is not None:
+            changed = self._changed_extra_params()
+            self.b_more.setVisible(bool(drawer))
+            self.b_more.setText("  " + _menu_pill_label(
+                "更多参数 %d" % len(changed) if changed else "更多参数 %d 项" % len(drawer)))
+            self.b_more.setStyleSheet(_prod_menu_pill_style("#e0b45a" if changed else "#9aa6bf"))
+            self.b_more.setIcon(QtGui.QIcon(_draw_icon("grid", 15, "#e0b45a" if changed else "#9aa6bf")))
+        if getattr(self, "param_note", None) is not None:
+            changed = self._changed_extra_params()
+            if changed:
+                labels = []
+                for name, value in changed.items():
+                    field = _agent_form_field(form, name)
+                    if field is not None:
+                        labels.append("%s=%s" % (field["label"], self._field_label_for(field, value)))
+                self.param_note.setText("已改动的模型参数：%s" % "、".join(labels))
+            elif form.get("source") == "legacy":
+                self.param_note.setText("未取到该模型的参数说明，暂按通用参数显示。")
+            else:
+                self.param_note.setText("")
+            self.param_note.setVisible(bool(self.param_note.text()))
+
+    def _changed_extra_params(self):
+        """抽屉里被改成非默认值的参数。只有这些会进条目、进请求。"""
+        form = self._current_form()
+        values = self._model_values()
+        out = {}
+        for field in _agent_form_drawer_fields(form):
+            value = values.get(field["name"])
+            if value in (None, "", AGENT_PARAM_UNSET):
+                continue
+            if str(value) == str(field.get("default")):
+                continue
+            out[field["name"]] = value
+        return out
+
+    def _open_more_params(self):
+        form = self._current_form()
+        if not _agent_form_drawer_fields(form):
+            return
+        dlg = AgentMoreParamsDialog(form, self._model_values(), self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        picked = dlg.values()
+        values = self._model_values()
+        for field in _agent_form_drawer_fields(form):
+            values.pop(field["name"], None)          # 抽屉是这批参数的唯一来源,先清再写
+        values.update(picked)
+        self._sync_param_bar()
+
     def _model_rows(self, mode=None):
         if (mode or self._mode) == "video":
             return self._video_models or _lk888_fallback_models_by_type("video")
@@ -26729,9 +28887,11 @@ class ProductGenPage(BasePage):
             self._video_model = name
         else:
             self._image_model = name
+        self._forms.pop((name, mode), None)      # 换模型必须重算表单,别拿上一个模型的参数糊上去
         if mode == self._mode:
             self._set_refs(self._refs)
         self._sync_model_ui()
+        self._request_model_schema(name, mode)
 
     def _sync_model_ui(self):
         rows = self._model_rows()
@@ -26743,7 +28903,7 @@ class ProductGenPage(BasePage):
         label = _lk888_model_label(cur, rows) or "LK888 模型"
         if getattr(self, "b_model", None) is not None:
             prefix = "视频模型" if self._mode == "video" else "图像模型"
-            self.b_model.setText("  %s · %s" % (prefix, label[:20]))
+            self.b_model.setText("  " + _menu_pill_label("%s · %s" % (prefix, label[:20])))
             self.b_model.setToolTip("")
         if getattr(self, "model_meta", None) is not None:
             ic = len(self._image_models or [])
@@ -26752,14 +28912,50 @@ class ProductGenPage(BasePage):
             if not self._models_loaded:
                 base = "LK888 模型目录待同步"
             self.model_meta.setText(base + " · 当前使用 " + label)
-        if getattr(self, "ref_video_btn", None) is not None:
-            media = _agent_video_media_requirements(cur) if self._mode == "video" else {}
-            supports_reference_video = (
-                self._mode == "video" and int(media.get("video_limit") or 0) > 0
-            )
-            self.ref_video_btn.setVisible(supports_reference_video)
-            self.ref_video_btn.setToolTip("")
-        self._sync_duration_ui()
+        media = _agent_video_media_requirements(cur) if self._mode == "video" else {}
+        for kind, button in (("video", getattr(self, "ref_video_btn", None)),
+                             ("audio", getattr(self, "ref_audio_btn", None))):
+            if button is None:
+                continue
+            limit = int(media.get("%s_limit" % kind) or 0) if self._mode == "video" else 0
+            button.setVisible(limit > 0)
+            button.setToolTip("")
+            if limit <= 0:
+                self._media_files[kind] = []          # 换到不收这类素材的模型就清掉,别偷偷带着
+            else:
+                self._media_files[kind] = list(self._media_files.get(kind) or [])[:limit]
+                chosen = len(self._media_files[kind])
+                accent = "#2ee0c6" if chosen else "#8b93a3"
+                button.setIcon(QtGui.QIcon(_draw_icon(
+                    "video" if kind == "video" else "volume", 16, accent)))
+                button.setAccessibleName("%s(已选 %d/%d)" % (
+                    self._media_field_label(kind), chosen, limit))
+        self._sync_param_bar()
+        self._sync_media_note()
+
+    def _sync_media_note(self):
+        """把已选的视频/音频文件名列出来。上传控件是圆钮,不写出来用户不知道选了什么。"""
+        note = getattr(self, "media_note", None)
+        if note is None:
+            return
+        bits = []
+        for kind in ("video", "audio"):
+            files = self._media_files.get(kind) or []
+            if not files:
+                continue
+            limit = self._media_limit(kind)
+            names = "、".join(os.path.basename(p) for p in files[:3])
+            if len(files) > 3:
+                names += " 等 %d 个" % len(files)
+            bits.append("%s %d/%d：%s" % (self._media_field_label(kind), len(files), limit, names))
+        required = []
+        if self._mode == "video":
+            req = _agent_video_media_requirements(self._current_model("video"))
+            for kind in ("video", "audio"):
+                if req.get("%s_required" % kind) and not (self._media_files.get(kind) or []):
+                    required.append("该模型必须上传%s" % self._media_field_label(kind))
+        note.setText("　".join(required + bits))
+        note.setVisible(bool(note.text()))
 
     def _current_video_duration_slots(self):
         return _agent_video_duration_slots(self._video_model)
@@ -26770,8 +28966,7 @@ class ProductGenPage(BasePage):
         slots = self._current_video_duration_slots()
         if self.duration_i >= len(slots):
             self.duration_i = 0
-        self.b_duration.setText("  %d 秒" % self._current_video_duration())
-        self.b_duration.setEnabled(self._mode == "video" and len(slots) > 1)
+        self._sync_param_bar()
 
     def _pick_model(self):
         rows = self._model_rows()
@@ -26780,12 +28975,7 @@ class ProductGenPage(BasePage):
             return
         mode = self._mode
         cur = self._current_model(mode)
-        menu = QtWidgets.QMenu(self)
-        menu.setStyleSheet(
-            "QMenu{background:#101522;color:#edf2ff;border:1px solid #283149;padding:6px;}"
-            "QMenu::item{padding:7px 18px 7px 12px;border-radius:8px;}"
-            "QMenu::item:selected{background:rgba(99,102,241,0.18);}"
-        )
+        menu = _prod_menu(self)
         title = menu.addAction("选择%s模型" % ("视频" if mode == "video" else "图像"))
         title.setEnabled(False)
         menu.addSeparator()
@@ -26799,7 +28989,37 @@ class ProductGenPage(BasePage):
                 act.setChecked(name == cur)
                 act.setToolTip("")
                 act.triggered.connect(lambda _=False, nm=name, md=mode: self._set_current_model(nm, md))
-        menu.exec(QtGui.QCursor.pos())
+        menu.exec(self.b_model.mapToGlobal(QtCore.QPoint(0, self.b_model.height() + 4)))
+
+    def _sync_cost_chip(self):
+        """右上角计费徽章:显示云豆余额。Agent.模式走服务端按 LK888 实际用量结算,
+        提交前拿不到确定单价,所以这里给余额 + 计费说明,不显示会误导人的预估价。"""
+        chip = getattr(self, "cost_chip", None)
+        if chip is None:
+            return
+        with _SLOCK:
+            bal = _SHARED.get("balance")
+        try:
+            chip.setText("  余额 %.2f 云豆" % float(bal))
+        except (TypeError, ValueError):
+            chip.setText("  云豆余额待同步")
+
+    def _refresh_cost_chip(self):
+        self._sync_cost_chip()
+
+        def work():
+            fetch_balance()
+            BRIDGE.payload.emit("prodgen_balance", {})
+        run_bg(work)
+
+    def _show_billing_note(self):
+        QtWidgets.QMessageBox.information(
+            self, "计费说明",
+            "Agent.模式按 LK888 实际用量结算：\n"
+            "· 生成成功后由中心服按本次模型的真实消耗从云豆余额扣除；\n"
+            "· 生成失败按同一引用退款，不会重复扣费；\n"
+            "· 不同模型、分辨率、条数和视频时长的单价不同，越高清越贵。\n\n"
+            "余额和逐笔明细可在『账户中心』查看。")
 
     def _add_card(self, entry):
         card = GenCard(entry, self)
@@ -26822,36 +29042,90 @@ class ProductGenPage(BasePage):
                                     else "描述你想要的视频素材…")
         self._style_ref_slot()
         self._sync_model_ui()
+        self._sync_cost_chip()
 
-    def _cycle_aspect(self):
-        self.aspect_i = (self.aspect_i + 1) % len(self.ASPECTS)
-        self.b_aspect.setText("  " + self.ASPECTS[self.aspect_i][0])
+    def _autosize_input(self):
+        """输入框随内容在 78~138 之间长高。空着时不撑满,composer 才有 lk888 那种紧凑感。"""
+        doc = self.inp.document()
+        doc.setTextWidth(max(1, self.inp.viewport().width()))
+        self.inp.setFixedHeight(max(78, min(138, int(doc.size().height()) + 12)))
 
-    def _cycle_count(self):
-        self.count_i = (self.count_i + 1) % 2
-        self.b_count.setText("  %d 条" % (self.count_i + 1))
+    def _menu_choice(self, button, options, current_index, on_pick):
+        """在胶囊正下方弹出选项菜单(lk888 输入框的下拉行为)。options 为展示文案列表。"""
+        menu = _prod_menu(self)
+        for i, text in enumerate(options):
+            act = menu.addAction(str(text))
+            act.setCheckable(True)
+            act.setChecked(i == current_index)
+            act.setToolTip("")
+            act.triggered.connect(lambda _=False, idx=i: on_pick(idx))
+        menu.exec(button.mapToGlobal(QtCore.QPoint(0, button.height() + 4)))
+
+    def _pick_aspect(self):
+        field = _agent_form_role_field(self._current_form(), "aspect")
+        if field is None:
+            return
+        self._pick_field(self.b_aspect, field)
+
+    def _select_aspect(self, i):
+        """保留下标入口:ASPECTS 仍是没有 schema 时的兜底档位。"""
+        self.aspect_i = max(0, min(int(i or 0), len(self.ASPECTS) - 1))
+        field = _agent_form_role_field(self._current_form(), "aspect")
+        if field is not None:
+            want = self.ASPECTS[self.aspect_i][2]
+            for opt in field["options"]:
+                if opt["value"] == want:
+                    self._set_field_value(field, want)
+                    break
+        self._sync_param_bar()
+
+    def _pick_count(self):
+        self._menu_choice(self.b_count, ["%d 条" % n for n in self.COUNTS], self.count_i, self._select_count)
+
+    def _select_count(self, i):
+        self.count_i = max(0, min(int(i or 0), len(self.COUNTS) - 1))
+        self.b_count.setText("  " + _menu_pill_label("%d 条" % self.COUNTS[self.count_i]))
 
     def _current_video_duration(self):
+        field = _agent_form_role_field(self._current_form("video"), "duration")
+        if field is not None:
+            try:
+                return int(float(self._field_value(field)))
+            except (TypeError, ValueError):
+                pass
         slots = self._current_video_duration_slots()
         try:
             return int(slots[self.duration_i])
         except (IndexError, TypeError):
             return slots[0]
 
-    def _cycle_video_duration(self):
-        slots = self._current_video_duration_slots()
-        self.duration_i = (self.duration_i + 1) % len(slots)
-        self.b_duration.setText("  %d 秒" % self._current_video_duration())
+    def _pick_video_duration(self):
+        field = _agent_form_role_field(self._current_form(), "duration")
+        if field is None:
+            return
+        self._pick_field(self.b_duration, field)
 
-    def _cycle_style(self):
-        self._select_style((self._style + 1) % len(self.STYLES))
+    def _select_duration(self, i):
+        slots = self._current_video_duration_slots()
+        self.duration_i = max(0, min(int(i or 0), len(slots) - 1))
+        field = _agent_form_role_field(self._current_form(), "duration")
+        if field is not None:
+            want = str(slots[self.duration_i])
+            for opt in field["options"]:
+                if opt["value"] == want:
+                    self._set_field_value(field, want)
+                    break
+        self._sync_param_bar()
+
+    def _pick_style(self):
+        self._menu_choice(self.b_style, [s[0] for s in self.STYLES], self._style, self._select_style)
 
     def _select_style(self, i):
         self._style = i
         for d in self._dots:
             d.set_selected(d.idx == i)
         if getattr(self, "b_style", None) is not None:
-            self.b_style.setText("  " + self.STYLES[i][0])
+            self.b_style.setText("  " + _menu_pill_label(self.STYLES[i][0]))
 
     def _set_refs(self, refs):
         cleaned = []
@@ -26916,10 +29190,13 @@ class ProductGenPage(BasePage):
                           "QPushButton:hover{border-color:#6b6ff5;}"
                           % REF_SLOT_RADIUS)
         lab = QtWidgets.QLabel("%s\n%s" % (self._ref_label(i), "点击替换 / 右键删除"))
-        lab.setAlignment(QtCore.Qt.AlignCenter)
-        lab.setStyleSheet("color:#8b93a3;font-size:9.5px;background:transparent;border:0;")
+        lab.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+        lab.setWordWrap(True)
+        lab.setFixedWidth(REF_SLOT_W)
+        lab.setStyleSheet("color:#8b93a3;font-size:8.5px;background:transparent;border:0;")
         v.addWidget(btn, 0, QtCore.Qt.AlignHCenter)
         v.addWidget(lab)
+        v.addStretch()
         self.ref_buttons.append(btn)
         return cell
 
@@ -26940,33 +29217,101 @@ class ProductGenPage(BasePage):
                           "background:rgba(255,255,255,0.03);padding:0;}"
                           "QPushButton:hover{border-color:#6b6ff5;background:rgba(99,102,241,0.08);}"
                           % REF_SLOT_RADIUS)
-        lab = QtWidgets.QLabel("添加图片")
-        lab.setAlignment(QtCore.Qt.AlignCenter)
-        lab.setStyleSheet("color:#8b93a3;font-size:10px;background:transparent;border:0;")
+        lab = QtWidgets.QLabel("参考图")
+        lab.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+        lab.setFixedWidth(REF_SLOT_W)
+        lab.setStyleSheet("color:#8b93a3;font-size:9.5px;background:transparent;border:0;")
         v.addWidget(btn, 0, QtCore.Qt.AlignHCenter)
         v.addWidget(lab)
+        v.addStretch()
         self.ref_buttons.append(btn)
         return cell
 
     def _rebuild_ref_slots(self):
         _clear_layout(self.ref_strip)
         self.ref_buttons = []
+        self._media_slot_buttons = {}
         for i, path in enumerate(self._refs):
-            self.ref_strip.addWidget(self._make_ref_cell(path, i), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            self.ref_strip.addWidget(self._make_ref_cell(path, i), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         limit = _prodgen_entry_ref_limit({"mode": self._mode, "model": self._current_model()})
         if len(self._refs) < limit:
-            self.ref_strip.addWidget(self._make_ref_add_cell(), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        if self._refs:
-            if self._mode == "video" and _agent_video_is_first_last_frame_model(self._current_model()):
-                hint_text = "首尾帧模型：只使用首帧和尾帧两张图。"
-            else:
-                hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"
-                             if self._mode == "video"
-                             else "图片模式：第1张为待修改图，第2张起为参考图。")
-            hint = QtWidgets.QLabel(hint_text)
-            hint.setStyleSheet("color:#6b7488;font-size:11px;background:transparent;border:0;")
-            self.ref_strip.addWidget(hint, 0, QtCore.Qt.AlignVCenter)
-        self.ref_strip.addStretch()
+            self.ref_strip.addWidget(self._make_ref_add_cell(), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        # 视频/音频:模型 schema 声明了就在参考图旁边给一个显眼的带标签槽位,
+        # 不再只藏在右下角那排容易被挤出屏幕的小圆钮里
+        #(用户反馈:HappyHorse 视频编辑「必选视频却找不到上传入口」)。
+        if self._mode == "video":
+            for kind in ("video", "audio"):
+                if self._media_limit(kind) > 0:
+                    self.ref_strip.addWidget(
+                        self._make_media_cell(kind), 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self._apply_ref_hint(self._ref_hint_text())
+
+    def _make_media_cell(self, kind):
+        """顶部显眼的视频/音频上传槽,与参考图并排。仅当模型契约声明该类上传时才建。"""
+        req = _agent_video_media_requirements(self._current_model("video"))
+        limit = max(0, int(req.get("%s_limit" % kind) or 0))
+        required = bool(req.get("%s_required" % kind))
+        files = [p for p in (self._media_files.get(kind) or []) if str(p or "").strip()]
+        chosen = len(files)
+        field = self._media_field_label(kind)
+        cell = QtWidgets.QWidget()
+        cell.setStyleSheet("background:transparent;")
+        v = QtWidgets.QVBoxLayout(cell)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        btn = QtWidgets.QPushButton()
+        btn.setFixedSize(REF_SLOT_W, REF_SLOT_H)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+        btn.clicked.connect(lambda _=False, k=kind: self.pick_media_files(k))
+        btn.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        btn.customContextMenuRequested.connect(lambda _p, k=kind: self.clear_media_files(k))
+        accent = "#2ee0c6" if chosen else "#7b86a0"
+        btn.setIcon(QtGui.QIcon(_draw_icon("video" if kind == "video" else "volume", 28, accent)))
+        btn.setIconSize(QtCore.QSize(28, 28))
+        border = "#2ee0c6" if chosen else ("#f0a05a" if required else "rgba(255,255,255,0.20)")
+        btn.setStyleSheet("QPushButton{border:2px dashed %s;border-radius:%dpx;"
+                          "background:rgba(255,255,255,0.03);padding:0;}"
+                          "QPushButton:hover{border-color:#6b6ff5;background:rgba(99,102,241,0.08);}"
+                          % (border, REF_SLOT_RADIUS))
+        if chosen:
+            cap = ("%s ✓%d" % (field, chosen)) if limit > 1 else (field + " ✓")
+            cap += "\n点击换/右键清"
+        else:
+            cap = field + ("（必选）" if required else "（可选）")
+        lab = QtWidgets.QLabel(cap)
+        lab.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+        lab.setWordWrap(True)
+        lab.setFixedWidth(REF_SLOT_W)
+        color = "#2ee0c6" if chosen else ("#f0a05a" if required else "#8b93a3")
+        lab.setStyleSheet("color:%s;font-size:8.5px;background:transparent;border:0;" % color)
+        v.addWidget(btn, 0, QtCore.Qt.AlignHCenter)
+        v.addWidget(lab)
+        v.addStretch()
+        self._media_slot_buttons[kind] = btn
+        return cell
+
+    def _ref_hint_text(self):
+        """参考图用法说明。lk888 输入框把这段并进提示语,不再单独占一格挤压参考图行。"""
+        if not self._refs:
+            return ""
+        if self._mode == "video" and _agent_video_is_first_last_frame_model(self._current_model()):
+            hint_text = "首尾帧模型：只使用首帧和尾帧两张图。"
+        else:
+            hint_text = ("视频模式：上传图片全部作为参考图，不会当作待修改图。"
+                         if self._mode == "video"
+                         else "图片模式：第1张为待修改图，第2张起为参考图。")
+        return hint_text
+
+    def _current_input_hint(self):
+        """提示语优先用模型自己的 input_hint(lk888 输入框里那段「温馨提示」),拿不到才回落通用文案。"""
+        text = str((self._current_form() or {}).get("input_hint") or "").strip()
+        return " ".join(text.split()) if text else self.BASE_HINT
+
+    def _apply_ref_hint(self, hint_text):
+        hint = getattr(self, "hint", None)
+        if hint is None:  # __init__ 里先建参考图槽再建提示语,首次调用时还没有控件
+            return
+        hint.setText(self._current_input_hint() + ("  " + hint_text if hint_text else ""))
 
     def _style_ref_slot(self):
         self._rebuild_ref_slots()
@@ -26979,6 +29324,63 @@ class ProductGenPage(BasePage):
 
     def clear_ref(self):
         self._set_refs([])
+
+    @property
+    def _reference_video(self):
+        """首个参考视频。历史代码和条目字段 referenceVideo 都按单值理解,保持兼容。"""
+        return (self._media_files.get("video") or [""])[0]
+
+    @_reference_video.setter
+    def _reference_video(self, value):
+        text = str(value or "").strip()
+        self._media_files["video"] = [text] if text else []
+
+    MEDIA_FILTERS = {
+        "video": ("选择参考视频", "视频 (*.mp4 *.mov *.webm *.m4v)"),
+        "audio": ("选择参考音频", "音频 (*.mp3 *.wav *.m4a *.aac *.ogg *.flac)"),
+    }
+
+    def _media_limit(self, media):
+        req = _agent_video_media_requirements(self._current_model("video"))
+        return max(0, int(req.get("%s_limit" % media) or 0))
+
+    def _media_field_label(self, media):
+        """按模型 schema 里那个上传参数自己的名字显示,而不是写死「参考视频」。"""
+        for upload in self._current_form("video").get("uploads") or []:
+            if upload.get("media") == media:
+                return upload.get("label") or _PRODGEN_MEDIA_LABEL.get(media, "参考素材")
+        return _PRODGEN_MEDIA_LABEL.get(media, "参考素材")
+
+    def pick_media_files(self, media):
+        limit = self._media_limit(media)
+        if limit <= 0:
+            return
+        title, pattern = self.MEDIA_FILTERS.get(media, ("选择文件", "文件 (*.*)"))
+        if limit == 1:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, "", pattern)
+            paths = [path] if path else []
+        else:
+            paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, title, "", pattern)
+        if not paths:
+            return
+        current = list(self._media_files.get(media) or [])
+        for path in paths:
+            path = str(path or "").strip()
+            if path and path not in current:
+                current.append(path)
+        self._media_files[media] = current[:limit]
+        self._style_ref_slot()
+        self._sync_model_ui()
+
+    def clear_media_files(self, media):
+        self._media_files[media] = []
+        self._style_ref_slot()
+        self._sync_model_ui()
+
+    def _clear_all_media(self):
+        self._media_files = {"video": [], "audio": []}
+        self._style_ref_slot()
+        self._sync_model_ui()
 
     def pick_reference_video(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -27043,7 +29445,10 @@ class ProductGenPage(BasePage):
         self.duration_i = slots.index(duration) if duration in slots else 0
         self.b_duration.setText("  %d 秒" % self._current_video_duration())
         self._set_refs(entry.get("refs") or ([entry.get("ref")] if entry.get("ref") else []))
-        self._reference_video = str(entry.get("referenceVideo") or "").strip()
+        self._media_files = {
+            "video": _agent_media_url_list(entry.get("referenceVideos") or entry.get("referenceVideo")),
+            "audio": _agent_media_url_list(entry.get("referenceAudios") or entry.get("referenceAudio")),
+        }
         self._sync_model_ui()
         try:
             self.inp.setFocus()
@@ -27056,12 +29461,33 @@ class ProductGenPage(BasePage):
             return
         self._send_confirmed(prompt)
 
+    def _aspect_entry_fields(self):
+        """把用户在比例胶囊上选的值,折成条目里既有的三个字段 (aspectLabel, size, aspect_ratio)。
+        请求的形状一点没变,变的只是「可选的值来自模型自己」。
+
+        图片模式的请求只认 size,所以这里必须保证 size 与显示的比例一致 ——
+        用 _AGENT_SIZE_TO_ASPECT 的反向表推,和 _agent_aspect_from_size 同源,不会出现界面说 16:9、上游收到 3:2。
+        """
+        field = _agent_form_role_field(self._current_form(), "aspect")
+        if field is None:
+            return self.ASPECTS[self.aspect_i]
+        value = self._field_value(field)
+        if value in (None, "", AGENT_PARAM_UNSET):
+            return self.ASPECTS[self.aspect_i]
+        value = str(value)
+        label = self._field_label_for(field, value)
+        if field["name"] == "size" or "x" in value.lower():
+            # 字段本身就是像素档位(gpt-image-2 的 size),原样传下去,不做二次翻译。
+            return label, value, _agent_aspect_from_size(value, self.ASPECTS[self.aspect_i][2])
+        size = _agent_size_from_aspect(value) or self.ASPECTS[self.aspect_i][1]
+        return label, size, value
+
     def _send_confirmed(self, prompt):
         prompt = str(prompt or "").strip()
         if not prompt:
             return
         # 扣费集中到 _start(送生成前扣、失败退),send/regen 共用同一处,避免『再次生成』绕过计费。
-        lb, size, ar = self.ASPECTS[self.aspect_i]
+        lb, size, ar = self._aspect_entry_fields()
         sname, sprompt, _c = self.STYLES[self._style]
         entry = {
             "id": "pg_%d" % int(time.time() * 1000),
@@ -27070,11 +29496,16 @@ class ProductGenPage(BasePage):
             "visiblePrompt": prompt,
             "style": sprompt, "styleName": sname,
             "aspectLabel": lb, "size": size, "aspect_ratio": ar,
-            "count": (self.count_i + 1) if self._mode == "image" else 1,
+            "count": self.COUNTS[self.count_i] if self._mode == "image" else 1,
             "duration": self._current_video_duration(),
+            # 用户在「更多参数」里显式改过的模型参数。没改过就是空字典,请求与今天逐字节一致。
+            "params": dict(self._changed_extra_params()),
+            "paramsMeta": _agent_params_meta(self._current_form(), self._model_values()),
             "refs": list(self._refs),
             "ref": (self._refs[0] if self._refs else ""),
-            "referenceVideo": self._reference_video,
+            "referenceVideo": self._reference_video,          # 单值,兼容历史条目与重跑
+            "referenceVideos": list(self._media_files.get("video") or []),
+            "referenceAudios": list(self._media_files.get("audio") or []),
             "model": (self._image_model if self._mode == "image" else self._video_model),
             "modelLabel": _lk888_model_label(self._image_model if self._mode == "image" else self._video_model,
                                              self._image_models if self._mode == "image" else self._video_models),
@@ -27147,12 +29578,63 @@ class ProductGenPage(BasePage):
                 update_prodgen(pid, status="完成", files=files, error="")
                 BRIDGE.payload.emit("prodgen", {"id": pid, "status": "完成", "files": files})
             except Exception as ex:
-                refund_cap(cap, ref)  # 生成失败:退回本次扣费
+                # 媒体能力由服务端按 task_id 结算,本地这行是空操作;真正决定要不要退的是下面的分支。
+                refund_cap(cap, ref)
                 raw_error = str(ex)[:240]
+                # 远程已经出片、只是本地没下载下来:钱已经花了,别把它标成「失败」让用户重生成再花一次。
+                pending = _prodgen_download_recovery(_prodgen_entry_by_id(pid))
+                if pending:
+                    attempts = int(pending.get("downloadAttempts") or 0) + 1
+                    pending = dict(pending, downloadAttempts=attempts, lastError=raw_error[:160])
+                    user_error = "已生成成功，本地下载失败，可点『恢复下载』重试（不再扣费）"
+                    log("prodgen download failed (attempt %d): %s" % (attempts, raw_error))
+                    update_prodgen(pid, status="下载失败", error=user_error, rawError=raw_error,
+                                   pendingDownloadRecovery=pending)
+                    BRIDGE.payload.emit("prodgen", {"id": pid, "status": "下载失败", "error": user_error})
+                    return
                 user_error = _prodgen_user_error_text(raw_error)
                 log("prodgen generation failed: %s" % raw_error)
                 update_prodgen(pid, status="失败", error=user_error, rawError=raw_error)
                 BRIDGE.payload.emit("prodgen", {"id": pid, "status": "失败", "error": user_error})
+        run_bg(work)
+
+    def recover_download(self, entry):
+        """只重下,不重生成。
+
+        故意不走 _start:那条路会重新调 _prodgen_generate,也就是**再开一个 LK888 任务、再花一次钱**。
+        远程成品已经产生过费用了,恢复下载不该再产生任何费用。
+        """
+        pid = (entry or {}).get("id")
+        pending = _prodgen_download_recovery(entry)
+        if not (pid and pending):
+            return
+        url = str(pending.get("resultUrl") or "")
+        targets = [t for t in (pending.get("targets") or []) if str(t or "").strip()]
+        if not targets:
+            return
+        update_prodgen(pid, status="生成中", error="")
+        BRIDGE.payload.emit("prodgen", {"id": pid, "status": "生成中",
+                                        "stage": "phase", "phaseText": "正在重新下载已生成的结果…"})
+
+        def work():
+            try:
+                path = targets[-1]
+                _wf_download(url, path)
+                files = [t for t in targets if os.path.isfile(t)]
+                update_prodgen(pid, status="完成", files=files, error="",
+                               pendingDownloadRecovery=None)
+                BRIDGE.payload.emit("prodgen", {"id": pid, "status": "完成", "files": files})
+            except Exception as ex:
+                raw = str(ex)[:240]
+                attempts = int(pending.get("downloadAttempts") or 0) + 1
+                log("prodgen download recovery failed (attempt %d): %s" % (attempts, raw))
+                update_prodgen(pid, status="下载失败",
+                               error=_prodgen_download_error_text(raw),
+                               rawError=raw,
+                               pendingDownloadRecovery=dict(pending, downloadAttempts=attempts,
+                                                            lastError=raw[:160]))
+                BRIDGE.payload.emit("prodgen", {"id": pid, "status": "下载失败",
+                                                "error": _prodgen_download_error_text(raw)})
         run_bg(work)
 
     def _on(self, tag, d):
@@ -27171,6 +29653,17 @@ class ProductGenPage(BasePage):
             dlg = PromptConfirmDialog(data.get("prompt") or self.inp.toPlainText().strip(), self)
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 self._send_confirmed(dlg.value())
+            return
+        if tag == "prodgen_balance":
+            self._sync_cost_chip()
+            return
+        if tag == "prodgen_model_schema":
+            data = d or {}
+            model = str(data.get("model") or "")
+            self._schema_pending.discard(model)
+            self._forms.pop((model, str(data.get("mode") or "")), None)
+            if model == self._current_model():
+                self._sync_param_bar()
             return
         if tag == "prodgen_models":
             data = d or {}
@@ -27249,8 +29742,10 @@ class ProductGenPage(BasePage):
             self._scroll_bottom()
 
     def regen(self, entry):
-        ne = {k: entry.get(k) for k in ("mode", "prompt", "aspectLabel", "size", "aspect_ratio",
-                                        "count", "ref", "refs", "model", "modelLabel", "style", "styleName")}
+        # 白名单改黑名单:原来只抄 12 个字段,视频的 duration 和 referenceVideo 每次「再次生成」都被丢掉,
+        # 参数动态化后每个模型的字段又各不相同,白名单更不可能列全。
+        ne = {k: copy.deepcopy(v) for k, v in (entry or {}).items() if k not in _PRODGEN_RUNTIME_KEYS}
+        ne["refs"] = list(ne.get("refs") or [])
         ne["id"] = "pg_%d" % int(time.time() * 1000)
         ne["status"] = "生成中"
         ne["files"] = []
@@ -28052,10 +30547,16 @@ class RiskControlPage(BasePage):
             sp.setValue(int(RISK.get(key) or sp.value()))
 
         def work():
-            _c, j = api("GET", "/api/accounts")
-            arr = j if isinstance(j, list) else ((j or {}).get("value") or (j or {}).get("accounts") or [])
+            # 小红书账号来源于本地浏览器,不在中心服 /api/accounts 里;
+            # 用账号矩阵同款(本地+中心)合并口径,风控中心才能显示小红书账号健康。
+            try:
+                accounts = load_account_matrix_rows()
+            except Exception:
+                _c, j = api("GET", "/api/accounts")
+                arr = j if isinstance(j, list) else ((j or {}).get("value") or (j or {}).get("accounts") or [])
+                accounts = clean_accounts(arr if isinstance(arr, list) else [])
             BRIDGE.payload.emit("risk_accounts", {
-                "accounts": clean_accounts(arr if isinstance(arr, list) else []),
+                "accounts": accounts,
                 "riskEvents": load_account_risk_events(),
             })
         run_bg(work)
@@ -28075,9 +30576,8 @@ class RiskControlPage(BasePage):
         for x in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
-            name = x.get("name") or x.get("nickname") or x.get("id") or "-"
-            plat = "抖音" if str(x.get("platform") or "").lower() == "douyin" else (
-                "小红书" if "xhs" in str(x.get("platform") or "").lower() else (x.get("platform") or "-"))
+            name = account_display_name(x)
+            plat = _account_platform_label(x)
             status = str(x.get("status") or x.get("state") or "-")
             summary = _account_risk_summary(x, stored_events)
             risk = summary.get("risk") or "-"
@@ -30238,29 +32738,26 @@ class LoginView(QtWidgets.QWidget):
         self._card_layout = cv
         cv.setContentsMargins(32, 30, 32, 28)
         cv.setSpacing(13)
-        title = QtWidgets.QLabel("登录 / 加入企业")
+        title = QtWidgets.QLabel("账号登录")
         title.setStyleSheet("color:#f4f7ff;font-size:21px;font-weight:800;background:transparent;")
-        self.sub = QtWidgets.QLabel("使用用户名和密码登录，或通过邀请码加入企业")
+        self.sub = QtWidgets.QLabel("使用漫剧账号密码登录 AI爆款复刻")
         self.sub.setStyleSheet("color:rgba(160,172,196,0.9);font-size:12.5px;background:transparent;")
         cv.addWidget(title)
         cv.addWidget(self.sub)
         cv.addSpacing(4)
-        # 顶部切换:登录 / 加入企业；注册入口保留内部兼容但不在首页暴露。
-        tabrow = QtWidgets.QHBoxLayout()
-        tabrow.setSpacing(8)
-        self.tab_login = QtWidgets.QPushButton("登录")
-        self.tab_reg = QtWidgets.QPushButton("注册")
-        self.tab_invite = QtWidgets.QPushButton("加入企业")
+        # 登录页只暴露账号登录；注册/邀请控件保留为隐藏对象兼容既有内部流程。
+        self.tab_login = QtWidgets.QPushButton("登录", card)
+        self.tab_reg = QtWidgets.QPushButton("注册", card)
+        self.tab_invite = QtWidgets.QPushButton("加入企业", card)
+        self.tab_login.setVisible(False)
         self.tab_reg.setVisible(False)
+        self.tab_invite.setVisible(False)
         for tb in (self.tab_login, self.tab_reg, self.tab_invite):
             tb.setCursor(QtCore.Qt.PointingHandCursor)
             tb.setMinimumHeight(34)
         self.tab_login.clicked.connect(lambda: self._set_mode("login"))
         self.tab_reg.clicked.connect(lambda: self._set_mode("register"))
         self.tab_invite.clicked.connect(lambda: self._set_mode("invite"))
-        tabrow.addWidget(self.tab_login, 1)
-        tabrow.addWidget(self.tab_invite, 1)
-        cv.addLayout(tabrow)
         self.invite_code_row = QtWidgets.QWidget()
         self.invite_code_row.setStyleSheet("background:transparent;")
         invite_code_layout = QtWidgets.QHBoxLayout(self.invite_code_row)
@@ -31078,12 +33575,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._page_widgets.append(page)
                 self._page_hosts.append(host)
                 b = NavButton(name)
-                if name == SAME_STYLE_REPLACEMENT_NAV:
-                    attach_hover_info(
-                        b,
-                        "同款替换",
-                        SAME_STYLE_REPLACEMENT_TOOLTIP,
-                    )
                 b.clicked.connect(lambda _=False, i=idx: self._nav(i))
                 nvl.addWidget(b)
                 self.nav_btns.append(b)

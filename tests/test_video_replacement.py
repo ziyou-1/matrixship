@@ -1162,6 +1162,57 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             self.assertEqual(segment["audioMixStatus"], "not_requested")
             self.assertTrue(old_video.is_file())
 
+    def test_comic_run_job_segments_uses_shared_pipeline_execute(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._cancel_requested = False
+        job = {
+            "id": "job-comic-shared-execute",
+            "replacementMode": "comic_project",
+            "comicProjectId": 88,
+            "segments": [{"index": 1, "status": "planned"}],
+        }
+        pipeline = mock.Mock()
+        pipeline.execute.return_value = job
+        bridge = type("BridgeStub", (), {
+            "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
+        })()
+
+        with mock.patch.object(self.client, "_replacement_comic_pipeline", return_value=pipeline), \
+                mock.patch.object(self.client, "BRIDGE", bridge):
+            page._run_job_segments(job, job["segments"])
+
+        pipeline.execute.assert_called_once_with(
+            job,
+            job["segments"],
+            progress=mock.ANY,
+        )
+
+    def test_comic_video_regeneration_uses_shared_pipeline_retry(self):
+        page = self.client.VideoReplacementPage.__new__(self.client.VideoReplacementPage)
+        page._cancel_requested = False
+        segment = {"index": 3, "status": "failed", "comicStoryboardId": 201}
+        job = {
+            "id": "job-comic-shared-retry",
+            "replacementMode": "comic_project",
+            "comicProjectId": 88,
+            "segments": [segment],
+        }
+        pipeline = mock.Mock()
+        pipeline.retry.return_value = job
+        bridge = type("BridgeStub", (), {
+            "payload": type("PayloadStub", (), {"emit": staticmethod(lambda *_args: None)})()
+        })()
+
+        with mock.patch.object(self.client, "_replacement_comic_pipeline", return_value=pipeline), \
+                mock.patch.object(self.client, "BRIDGE", bridge):
+            page._run_comic_video_regeneration(job, [segment], allow_pending_recovery=True)
+
+        pipeline.retry.assert_called_once_with(
+            job,
+            [3],
+            progress=mock.ANY,
+        )
+
     def test_comic_retry_entries_use_video_only_runner_and_keep_legacy_runner(self):
         src = CLIENT.read_text(encoding="utf-8")
         retry_block = src[
@@ -1962,6 +2013,95 @@ class VideoReplacementHelpersTest(unittest.TestCase):
         self.assertTrue(all(item["sourceEnd"] == 32.0 for item in planned))
         self.assertTrue(all(item["sourceDuration"] == 8.0 for item in planned))
 
+    def test_comic_duration_slot_books_next_whole_second_with_headroom(self):
+        with mock.patch.dict(self.client.os.environ, {}, clear=False):
+            self.client.os.environ.pop("VIDEO_REPLACE_COMIC_DURATION_SLOTS", None)
+            self.client.os.environ.pop("VIDEO_REPLACE_COMIC_DURATION_HEADROOM_SEC", None)
+            self.assertEqual(self.client._comic_video_duration_slot(11.4), 12)
+            self.assertEqual(self.client._comic_video_duration_slot(4.05), 5)
+            self.assertEqual(self.client._comic_video_duration_slot(2.0), 4)
+            self.assertEqual(self.client._comic_video_duration_slot(20.0), 15)
+            self.assertEqual(self.client._comic_video_duration_slot(0.0), 4)
+
+    def test_comic_duration_slot_env_restores_coarse_ladder(self):
+        with mock.patch.dict(
+                self.client.os.environ,
+                {"VIDEO_REPLACE_COMIC_DURATION_SLOTS": "4,8,12,15"},
+        ):
+            self.assertEqual(self.client._comic_video_duration_slot(11.4), 12)
+            self.assertEqual(self.client._comic_video_duration_slot(12.1), 15)
+            self.assertEqual(self.client._comic_video_duration_slot(4.05), 8)
+
+    def test_comic_segment_video_duration_does_not_restack_headroom(self):
+        segment = {"videoDurationSec": 12, "speechDurationSec": 11.4}
+
+        first = self.client._comic_segment_video_duration(segment)
+        second = self.client._comic_segment_video_duration(dict(segment, videoDurationSec=first))
+
+        self.assertEqual(first, 12)
+        self.assertEqual(second, 12)
+
+    def test_comic_planner_books_measured_tts_seconds_instead_of_estimate(self):
+        segment = {
+            "index": 1,
+            "start": 0.0,
+            "end": 8.0,
+            "duration": 8.0,
+            "script": "不玩套路，618提前购，看完能帮你省下好几万。",
+            "prompt": "人物面向镜头介绍产品",
+        }
+
+        with mock.patch.object(
+                self.client, "_comic_measure_script_duration", return_value=11.4
+        ) as measure:
+            planned = self.client._comic_plan_script_segments(
+                [segment], job={"id": "job-1", "voiceId": "xiaosi"}
+            )
+
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(measure.call_count, 1)
+        self.assertEqual(planned[0]["speechDurationSec"], 11.4)
+        self.assertEqual(planned[0]["speechDurationSource"], "measured")
+        self.assertEqual(planned[0]["videoDurationSec"], 12)
+        self.assertEqual(planned[0]["duration"], 12.0)
+        self.assertGreater(planned[0]["speechEstimatedSec"], 0)
+
+    def test_comic_planner_falls_back_to_estimate_when_tts_measure_fails(self):
+        segment = {
+            "index": 1,
+            "duration": 8.0,
+            "script": "不玩套路，618提前购，看完能帮你省下好几万。",
+            "prompt": "人物面向镜头介绍产品",
+        }
+
+        with mock.patch.object(
+                self.client, "lk888_tts_voice", side_effect=RuntimeError("tts down")
+        ):
+            planned = self.client._comic_plan_script_segments([segment], job={"id": "job-2"})
+
+        self.assertEqual(len(planned), 1)
+        self.assertEqual(planned[0]["speechDurationSource"], "estimated")
+        self.assertEqual(planned[0]["speechDurationSec"], planned[0]["speechEstimatedSec"])
+        self.assertGreater(planned[0]["videoDurationSec"], 0)
+
+    def test_comic_planner_skips_tts_measure_without_job(self):
+        segment = {"index": 1, "duration": 8.0, "script": "短句", "prompt": "画面"}
+
+        with mock.patch.object(self.client, "lk888_tts_voice") as tts:
+            planned = self.client._comic_plan_script_segments([segment])
+
+        tts.assert_not_called()
+        self.assertEqual(planned[0]["speechDurationSource"], "estimated")
+
+    def test_replacement_tts_estimate_default_speed_is_5_5_chars_per_sec(self):
+        with mock.patch.dict(self.client.os.environ, {}, clear=False):
+            self.client.os.environ.pop("VIDEO_REPLACE_TTS_CHARS_PER_SEC", None)
+            # 55 characters, no punctuation -> 55 / 5.5 == 10.0 seconds
+            self.assertEqual(
+                self.client._estimate_replacement_tts_duration_sec("产品卖点" * 13 + "省钱好"),
+                10.0,
+            )
+
     def test_comic_duration_payload_uses_upper_supported_slot_and_auto_script_uses_tts(self):
         job = {
             "audioMode": "auto",
@@ -2097,6 +2237,56 @@ class VideoReplacementHelpersTest(unittest.TestCase):
             project_payload["storyboards"][0]["audio_prompt"]["dialogue"]["text"],
             "这段最终口播稿只用于配音，不能写进画面提示词。",
         )
+
+    def test_failed_visual_analysis_text_never_reaches_replacement_prompts(self):
+        poisoned_visual = (
+            "视觉模型分析失败（errorId: err-c049b473454f4dc6）: "
+            "HTTPSConnectionPool(host='central.yunlingai.net', port=443): "
+            "Max retries exceeded with url: /lk888/v1/chat/completions\n"
+            "[1.24s] frame_01.jpg\n[2.47s] frame_02.jpg\n[3.71s] frame_03.jpg"
+        )
+        analysis = {
+            "report": "## 内容总览\n汽车销售口播视频，展厅中景讲解。\n",
+            "visual": poisoned_visual,
+            "frameNotes": "[1.24s] frame_01.jpg\n[2.47s] frame_02.jpg",
+        }
+        segment = {"index": 1, "start": 17.29, "end": 19.76}
+        video_prompt = self.client._build_replacement_prompt(segment, analysis, "", "")
+        prompts = [
+            video_prompt,
+            self.client._build_replacement_keyframe_prompt(segment, analysis, "", ""),
+            self.client._comic_visual_prompt_text({"index": 1, "prompt": video_prompt}),
+        ]
+
+        for prompt in prompts:
+            for leaked in (
+                    "视觉模型分析失败",
+                    "errorId",
+                    "central.yunlingai.net",
+                    "HTTPSConnectionPool",
+                    "Max retries",
+                    "/lk888/v1/chat/completions",
+                    "frame_01.jpg",
+            ):
+                self.assertNotIn(leaked, prompt)
+
+    def test_comic_visual_prompt_keeps_only_describable_chinese_lines(self):
+        segment = {
+            "index": 1,
+            "prompt": "\n".join([
+                "画面：展厅中景，主播站在展车旁讲解",
+                "err-c049b473454f4dc6",
+                "[1.24s] frame_01.jpg",
+                "SSLEOFError(8, '[SSL: ",
+                "https://cdn.example/start.png",
+            ]),
+        }
+
+        visual = self.client._comic_visual_prompt_text(segment)
+
+        self.assertIn("展厅中景", visual)
+        for leaked in ("err-c049b473454f4dc6", "frame_01.jpg", "SSLEOFError", "https://"):
+            self.assertNotIn(leaked, visual)
 
     def test_comic_uploaded_assets_replace_old_entities_in_visual_contract(self):
         segment = {

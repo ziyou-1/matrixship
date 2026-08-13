@@ -201,6 +201,13 @@ class UnifiedBillingTest(unittest.TestCase):
         self.assertEqual(self.state["ledger"][0]["actualAmount"], 0.0371)
 
     def test_maindb_capability_charge_converts_yundou_to_power(self):
+        """1 元 = 1 算力。
+
+        2026-08-06 之前这里断言的是 0.14 元 -> 1.4 算力(即 ×10)。那个倍率的依据是
+        "与漫剧 recharge_packages 一致:50元=500算力",但线上实际是 50元档=50算力,
+        用户按 1:1 买进却被矩阵侧按 10 倍扣 —— 本用例把错误的倍率钉成了正确行为,
+        所以这个十倍超收一直没被测试发现。
+        """
         fake = FakeMainDb(rowcount=1)
 
         with mock.patch.object(self.server, "maindb", fake), \
@@ -212,8 +219,8 @@ class UnifiedBillingTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(balance, 10.0)
         self.assertIsNone(err)
-        self.assertEqual(fake.calls[0][1], ("1.4", 42, "1.4"))
-        self.assertEqual(self.state["ledger"][0]["delta"], -1.4)
+        self.assertEqual(fake.calls[0][1], ("0.14", 42, "0.14"))
+        self.assertEqual(self.state["ledger"][0]["delta"], -0.14)
         self.assertEqual(self.state["ledger"][0]["yundouAmount"], 0.14)
         self.assertEqual(self.state["ledger"][0]["wallet"], "maindb_generic")
 
@@ -289,10 +296,14 @@ class UnifiedBillingTest(unittest.TestCase):
     def test_maindb_model_usage_logs_query_is_bounded_and_requests_overflow_row(self):
         source = load_maindb_module()
         rows = [{"id": 7, "request_id": "video:req-1"}]
+        # created_ts / refunded_ts 由数据库换算成 epoch。pymysql 返回的裸 datetime 会被
+        # billing_analytics._timestamp() 当成北京时间,而库里存 UTC,记录因此早 8 小时,
+        # 与 JSON 账本混排时新扣费会沉到旧记录下面(2026-08-06 账户中心首行对不上余额)。
         expected_sql = (
             "SELECT id, request_id, user_id, project_id, task_id, model_id, model_type, "
             "billing_method, amount, balance_before, balance_after, status, description, "
-            "created_at, refunded_at FROM model_usage_logs "
+            "created_at, refunded_at, UNIX_TIMESTAMP(created_at) AS created_ts, "
+            "UNIX_TIMESTAMP(refunded_at) AS refunded_ts FROM model_usage_logs "
             "WHERE user_id=%s AND created_at >= %s AND created_at < %s "
             "ORDER BY created_at DESC, id DESC LIMIT %s"
         )

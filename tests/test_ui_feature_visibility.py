@@ -182,7 +182,7 @@ class UiFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("self.b_replace.setVisible(video_replacement_enabled())", source)
         self.assertIn("go.setVisible(video_replacement_enabled())", source)
         self.assertIn("use_btn.setVisible(video_replacement_enabled())", source)
-        self.assertIn("SAME_STYLE_REPLACEMENT_TOOLTIP", source)
+        self.assertNotIn("SAME_STYLE_REPLACEMENT_TOOLTIP", source)
 
     def test_temporary_ui_flags_are_default_off_in_all_runtime_templates(self):
         flag_names = (

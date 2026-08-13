@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from urllib.parse import urlparse
 import os
 
 
@@ -39,9 +40,40 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
 
             self.assertEqual(self.client._find_video_file_from_download(result), str(video))
 
-    def test_central_defaults_to_local_loopback(self):
+    def test_central_defaults_to_public_production_server(self):
         with mock.patch.dict(os.environ, {
             "MATRIX_CENTRAL": "",
+            "CENTRAL_URL": "",
+        }, clear=False):
+            client = load_client()
+
+        # 安装包分发给普通用户,他们机器上没有中心服进程。默认指向 127.0.0.1 会让
+        # 登录页直接报 WinError 10061 / NewConnectionError(2026-08-04 线上事故)。
+        # 本机开发调试走 MATRIX_CENTRAL 覆盖,见下一条用例和 start-visible-client.bat。
+        #
+        # 必须是 HTTPS:明文会让密码和会话 token 过公网,还会被
+        # utils.video_transcription.validate_service_url() 拒绝而使分解失败。
+        # 必须是独立子域(path 为空):带路径前缀时,客户端里判断"URL 是否属于中心服"
+        # 的 path 比较会静默失配。下面两条断言把这两个性质都钉住。
+        self.assertEqual(client.CENTRAL, "https://central.yunlingai.net")
+        self.assertTrue(client.CENTRAL.startswith("https://"), "中心服默认地址必须是 HTTPS")
+        self.assertEqual(urlparse(client.CENTRAL).path, "", "中心服默认地址不得带路径前缀")
+
+    def test_central_library_file_prefix_tracks_the_central_path(self):
+        """URL 归属判断必须跟着 CENTRAL 的 path 走,不能写死字面量。"""
+        with mock.patch.dict(os.environ, {"MATRIX_CENTRAL": "", "CENTRAL_URL": ""}, clear=False):
+            client = load_client()
+        # 独立子域:与写死字面量完全等价
+        self.assertEqual(client.central_library_file_prefix(), "/api/library/file/")
+        # 万一将来又挂到带前缀的地址上,判断要自动跟上
+        self.assertEqual(
+            client.central_library_file_prefix(urlparse("https://example.com/matrix-central")),
+            "/matrix-central/api/library/file/",
+        )
+
+    def test_central_env_override_still_supports_local_development(self):
+        with mock.patch.dict(os.environ, {
+            "MATRIX_CENTRAL": "http://127.0.0.1:9080",
             "CENTRAL_URL": "",
         }, clear=False):
             client = load_client()
@@ -80,6 +112,19 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         self.assertEqual(
             self.client._video_breakdown_download_failure_text("douyin_detail_network_failed"),
             "抖音连接暂时失败，请重试",
+        )
+
+    def test_unexpected_download_error_is_localized_for_breakdown_status(self):
+        # An unexpected filesystem error is normalized server-side to the stable
+        # 'download_exception' code; the breakdown status shows a friendly line
+        # instead of a raw '[WinError 267] 目录名称无效' string.
+        self.assertEqual(
+            self.client._localize_download_task_error("download_exception"),
+            "视频下载失败，请稍后重试。",
+        )
+        self.assertEqual(
+            self.client._video_breakdown_download_failure_text("download_exception"),
+            "分解失败:下载未完成 视频下载失败，请稍后重试。",
         )
 
     def test_video_breakdown_markdown_contains_source_and_report(self):
@@ -240,6 +285,30 @@ class VideoBreakdownHelpersTest(unittest.TestCase):
         self.assertIn("今天测试这款粉底液", report)
         self.assertGreaterEqual(chat.call_args.kwargs["max_tokens"], 4200)
         self.assertEqual(message, "分析完成（已自动修复报告栏目）")
+
+    def test_breakdown_markdown_reports_visual_analysis_failure_with_error_id(self):
+        markdown = self.client._video_breakdown_markdown({
+            "meta": {"duration": 20, "width": 720, "height": 1280},
+            "visual": "",
+            "visualStatus": {
+                "status": "failed",
+                "errorId": "err-c049b473454f4dc6",
+                "code": "video_breakdown_vision_failed",
+                "message": "视觉模型分析失败，详情见结构化日志。",
+            },
+            "report": "## 内容总览\n产品口播视频。",
+        })
+
+        self.assertIn("- 视觉分析: 失败（错误编号 err-c049b473454f4dc6）", markdown)
+
+    def test_breakdown_markdown_reports_visual_analysis_ok_by_default(self):
+        markdown = self.client._video_breakdown_markdown({
+            "meta": {"duration": 20, "width": 720, "height": 1280},
+            "visual": "人物在室内展示产品。",
+            "report": "## 内容总览\n产品口播视频。",
+        })
+
+        self.assertIn("- 视觉分析: ok", markdown)
 
     def test_report_failure_fallback_keeps_all_sections_in_contract_order(self):
         data = {
