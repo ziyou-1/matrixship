@@ -1,5 +1,17 @@
 ﻿# Changelog
 
+## 2026-08-14 公网安装包默认开放同款替换与图文同款
+### Changed
+- `MATRIX_VIDEO_REPLACEMENT_ENABLED` 与 `MATRIX_XHS_ENABLED` 的代码默认值改为开启。公网安装包不注入环境变量、客户端也不读取 `.env`，因此新安装包默认可用“同款替换”和“图文同款”。
+- 内容采集页恢复“图文同款”按钮（由 `xhs_enabled()` 控制可见性）和 `note_replace()` 提交逻辑，采集 → 下载 → 图文同款的交接链路重新连通；非小红书链接仍只提示不发任务。
+- `backend/.env.example` 和 `docker-compose.prod.yml` 默认值同步改为 `1`。`MATRIX_PENDING_PUBLISH_UI_ENABLED` 和 `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` 保持默认 `0`。
+- OpenAPI 与 `docs/API_REFERENCE.md`、`docs/ARCHITECTURE.md`、`docs/DEPLOYMENT.md`、`docs/TROUBLESHOOTING.md` 改为描述“默认开启，`=0` 时返回 `platform_disabled`”。
+
+### Verification And Operations
+- 新增/更新 RED/GREEN 覆盖：同款替换默认开启且可显式关闭、侧栏默认可点击、账号矩阵默认含小红书、内容采集“图文同款”按钮的默认显示与关闭态隐藏、非小红书链接不提交任务、四个开关在配置模板与 Compose 中的默认值。
+- 全量测试 1372 用例，失败集合与改动前完全一致（本容器缺少 ffmpeg/`imageio_ffmpeg` 及 Windows 路径断言导致的既有失败）。
+- 无 API 路径或 JSON Schema、数据库、Docker 镜像结构及 `migration.sql` 变更。客户端重启生效；中心服若显式配置过 `=0` 必须一并改为 `1` 并重启，否则图文同款草稿同步和小红书发布仍被拒。回滚：把对应开关设回 `0` 并重启相关运行单元。
+
 ## 2026-08-03 账号矩阵新增账号修复 agent token_required
 ### Fixed
 - 本地浏览器 worker 转发 `douyin.login` / `xhs.login` 到本机执行引擎前，会重新读取当前 `MATRIX_AGENT_TOKEN` 或 `agent_token.txt`。新用户登录、账号隔离目录切换或 token 文件刷新后，不再继续使用 worker 初始化时缓存的旧 token，避免账号矩阵点击“添加账号”后显示“登录未完成:agent token_required”。

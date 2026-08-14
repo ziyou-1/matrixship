@@ -587,12 +587,13 @@ class XhsNoteFourImageSmokeTests(unittest.TestCase):
 
 
 class XhsNoteNativeFlowTests(unittest.TestCase):
-    def test_native_collection_hides_note_replace_button_but_keeps_handoff_handler(self):
+    def test_native_collection_keeps_note_replace_entry_and_handoff_handler(self):
         root = os.path.dirname(os.path.dirname(__file__))
         with open(os.path.join(root, "backend", "matrix_native_client.py"), encoding="utf-8") as f:
             src = f.read()
-        self.assertNotIn("b_note_replace", src)
-        self.assertNotIn("def note_replace", src)
+        self.assertIn("def note_replace", src)
+        self.assertIn("self.b_note_replace.setVisible(xhs_enabled())", src)
+        self.assertIn('submit_local_task("xhs.download", payload, 600)', src)
         self.assertIn('"c_note_replace"', src)
         self.assertIn('elif tag == "c_note_replace"', src)
         self.assertIn('BRIDGE.payload.emit("goto_nav", "🧩 图文同款")', src)
@@ -612,14 +613,34 @@ class XhsNoteNativeDisplayTests(unittest.TestCase):
     def setUp(self):
         self.client.BRIDGE = self.client.Bridge()
 
-    def test_content_page_hides_note_replacement_button(self):
+    def test_content_page_shows_note_replacement_button_by_default(self):
         page = self.client.ContentPage()
         try:
             button_texts = [
                 button.text()
                 for button in page.findChildren(self.client.QtWidgets.QPushButton)
             ]
-            self.assertNotIn("\u56fe\u6587\u540c\u6b3e", button_texts)
+            self.assertIn("\u56fe\u6587\u540c\u6b3e", button_texts)
+            self.assertTrue(page.b_note_replace.isVisibleTo(page))
+        finally:
+            page.deleteLater()
+
+    def test_content_page_hides_note_replacement_button_when_xhs_disabled(self):
+        with mock.patch.dict(os.environ, {"MATRIX_XHS_ENABLED": "0"}, clear=False):
+            page = self.client.ContentPage()
+        try:
+            self.assertFalse(page.b_note_replace.isVisibleTo(page))
+        finally:
+            page.deleteLater()
+
+    def test_note_replace_rejects_non_xhs_link_without_submitting_a_task(self):
+        page = self.client.ContentPage()
+        try:
+            page.url.setText("https://www.douyin.com/video/123")
+            with mock.patch.object(self.client, "submit_local_task") as submit:
+                page.note_replace()
+            submit.assert_not_called()
+            self.assertIn("\u4ec5\u652f\u6301\u5c0f\u7ea2\u4e66\u7b14\u8bb0", page.status.text())
         finally:
             page.deleteLater()
 

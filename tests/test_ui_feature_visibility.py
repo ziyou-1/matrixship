@@ -23,15 +23,27 @@ class UiFeatureVisibilityTest(unittest.TestCase):
         if cls.app is None:
             cls.app = cls.client.QtWidgets.QApplication([])
 
-    def test_temporary_ui_features_are_default_off_and_explicitly_restorable(self):
-        self.assertFalse(self.features.video_replacement_enabled({}))
-        self.assertFalse(self.features.pending_publish_ui_enabled({}))
-        self.assertFalse(self.features.digital_human_tts_upload_enabled({}))
+    def unset_flags(self, *names):
+        """Run with the named flags absent so packaged defaults are exercised."""
+        env = {key: value for key, value in os.environ.items() if key not in names}
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def test_same_style_replacement_is_default_on_and_explicitly_disablable(self):
+        self.assertTrue(self.features.video_replacement_enabled({}))
+        self.assertFalse(
+            self.features.video_replacement_enabled(
+                {"MATRIX_VIDEO_REPLACEMENT_ENABLED": "0"}
+            )
+        )
         self.assertTrue(
             self.features.video_replacement_enabled(
                 {"MATRIX_VIDEO_REPLACEMENT_ENABLED": "1"}
             )
         )
+
+    def test_remaining_temporary_ui_features_are_default_off_and_restorable(self):
+        self.assertFalse(self.features.pending_publish_ui_enabled({}))
+        self.assertFalse(self.features.digital_human_tts_upload_enabled({}))
         self.assertTrue(
             self.features.pending_publish_ui_enabled(
                 {"MATRIX_PENDING_PUBLISH_UI_ENABLED": "true"}
@@ -65,7 +77,12 @@ class UiFeatureVisibilityTest(unittest.TestCase):
             capabilities,
         )
 
-    def test_account_matrix_platforms_are_douyin_only_by_default(self):
+    def test_account_matrix_platforms_follow_the_xhs_gate(self):
+        with self.unset_flags("MATRIX_XHS_ENABLED"):
+            self.assertEqual(
+                self.client.account_matrix_platform_keys(),
+                ("douyin", "xhs"),
+            )
         with mock.patch.dict(
             os.environ,
             {"MATRIX_XHS_ENABLED": "0"},
@@ -123,8 +140,10 @@ class UiFeatureVisibilityTest(unittest.TestCase):
         finally:
             page.deleteLater()
 
-    def test_same_style_replacement_navigation_is_disabled_by_default(self):
+    def test_same_style_replacement_navigation_is_enabled_by_default(self):
         name = "🧬 同款替换"
+        with self.unset_flags("MATRIX_VIDEO_REPLACEMENT_ENABLED"):
+            self.assertTrue(self.client.nav_feature_enabled(name))
         with mock.patch.dict(
             os.environ,
             {"MATRIX_VIDEO_REPLACEMENT_ENABLED": "0"},
@@ -137,6 +156,21 @@ class UiFeatureVisibilityTest(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(self.client.nav_feature_enabled(name))
+
+    def test_same_style_replacement_sidebar_is_clickable_by_default(self):
+        name = "🧬 同款替换"
+        button = mock.Mock()
+        shell = type(
+            "Shell",
+            (),
+            {"nav_btns": [button], "_nav_names": [name]},
+        )()
+        with mock.patch.object(self.client, "nav_allowed", return_value=True), \
+                self.unset_flags("MATRIX_VIDEO_REPLACEMENT_ENABLED"):
+            self.client.MainWindow._apply_role_visibility(shell)
+
+        button.setVisible.assert_called_once_with(True)
+        button.setEnabled.assert_called_once_with(True)
 
     def test_same_style_replacement_sidebar_stays_visible_but_disabled(self):
         name = "🧬 同款替换"
@@ -177,36 +211,46 @@ class UiFeatureVisibilityTest(unittest.TestCase):
 
         shell._nav.assert_not_called()
 
-    def test_secondary_replacement_entries_are_hidden_by_default(self):
+    def test_secondary_replacement_entries_follow_the_replacement_gate(self):
         source = CLIENT.read_text(encoding="utf-8")
         self.assertIn("self.b_replace.setVisible(video_replacement_enabled())", source)
         self.assertIn("go.setVisible(video_replacement_enabled())", source)
         self.assertIn("use_btn.setVisible(video_replacement_enabled())", source)
         self.assertIn("SAME_STYLE_REPLACEMENT_TOOLTIP", source)
 
-    def test_temporary_ui_flags_are_default_off_in_all_runtime_templates(self):
-        flag_names = (
-            "MATRIX_VIDEO_REPLACEMENT_ENABLED",
-            "MATRIX_PENDING_PUBLISH_UI_ENABLED",
-            "MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED",
-        )
-        env_files = {
-            BACKEND / ".env.example": "{name}=0",
-            BACKEND / ".env.dev": "export {name}=0",
-            BACKEND / ".env.prod": "{name}=0",
+    def test_runtime_templates_match_the_shipped_flag_defaults(self):
+        defaults = {
+            "MATRIX_XHS_ENABLED": "1",
+            "MATRIX_VIDEO_REPLACEMENT_ENABLED": "1",
+            "MATRIX_PENDING_PUBLISH_UI_ENABLED": "0",
+            "MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED": "0",
         }
+        env_files = {
+            BACKEND / ".env.example": "{name}={value}",
+            BACKEND / ".env.dev": "export {name}={value}",
+            BACKEND / ".env.prod": "{name}={value}",
+        }
+        checked = 0
         for path, expected_pattern in env_files.items():
+            if not path.exists():
+                # .env.dev/.env.prod are deployment-local and not tracked in git.
+                continue
+            checked += 1
             contents = path.read_text(encoding="utf-8-sig")
-            for name in flag_names:
+            for name, value in defaults.items():
                 with self.subTest(path=path.name, flag=name):
-                    self.assertIn(expected_pattern.format(name=name), contents)
+                    self.assertIn(
+                        expected_pattern.format(name=name, value=value),
+                        contents,
+                    )
+        self.assertGreaterEqual(checked, 1, "no runtime env template was checked")
 
         compose = (ROOT / "docker-compose.prod.yml").read_text(
             encoding="utf-8-sig"
         )
-        for name in flag_names:
+        for name, value in defaults.items():
             with self.subTest(path="docker-compose.prod.yml", flag=name):
-                self.assertIn(f"{name}: ${{{name}:-0}}", compose)
+                self.assertIn(f"{name}: ${{{name}:-{value}}}", compose)
 
 
 if __name__ == "__main__":
