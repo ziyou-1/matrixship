@@ -25,11 +25,11 @@ def env_flag_enabled(name, env=None, default=False):
 
 
 def xhs_enabled(env=None):
-    return env_flag_enabled(XHS_ENABLED_ENV, env=env)
+    return env_flag_enabled(XHS_ENABLED_ENV, env=env, default=True)
 
 
 def video_replacement_enabled(env=None):
-    return env_flag_enabled(VIDEO_REPLACEMENT_ENABLED_ENV, env=env)
+    return env_flag_enabled(VIDEO_REPLACEMENT_ENABLED_ENV, env=env, default=True)
 
 
 def pending_publish_ui_enabled(env=None):

@@ -159,11 +159,12 @@ class OpenApiContractTest(unittest.TestCase):
         error_enum = document["components"]["schemas"]["DouyinDmInboxResponse"]["properties"]["error"]["enum"]
         self.assertNotIn("dm_inbox_messages_not_found", error_enum)
 
-    def test_xhs_openapi_documents_default_platform_disabled_gate(self):
+    def test_xhs_openapi_documents_the_platform_gate_and_disabled_surface(self):
         text = OPENAPI.read_text(encoding="utf-8")
         document = yaml.safe_load(text)
 
         self.assertIn("MATRIX_XHS_ENABLED=1", text)
+        self.assertIn("MATRIX_XHS_ENABLED=0", text)
         self.assertIn("platform_disabled", text)
         self.assertIn("deprecated: true", text[text.index("  /api/xhs/download:"):])
         for path in ("/api/xhs/download", "/api/finder/discover", "/api/publish/run"):

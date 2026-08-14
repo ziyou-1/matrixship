@@ -20,11 +20,17 @@
 - Database impact: none. `migration.sql` contains a no-op release note only.
 - Remote deploy evidence: `/root/AI-CanvasPro/server.py` was updated at `20260803_122102`; backup `/root/AI-CanvasPro/server.py.bak.minimax-h3-poll-20260803_122102`; previous SHA `581f254102277914742d15e0384f8c8aa94341e04e2756dc97108f715ecdfa89`; deployed SHA `5bd0ee530bd5c3629d1ec91b5f733e04deb33e6ef09eafd717660f070537b295`; `ai-canvas.service` active; port `8777` listening; `/login` returned 200.
 
-## 2026-08-03 抖音单平台运行开关
+## 2026-08-14 公网安装包默认开放同款替换与图文同款
 
-当前默认只开放抖音。`backend/.env.example`、`backend/.env.dev`、`backend/.env.prod` 和 `docker-compose.prod.yml` 均声明 `MATRIX_XHS_ENABLED=0`；本地客户端、本地执行器和中心服启动后会隐藏/拒绝小红书/XHS 入口、接口、平台适配器和任务类型。
+公网安装包不注入任何 `MATRIX_*` 变量，客户端也不读取 `.env`，因此安装包的行为由 `backend/platform_features.py` 里的代码默认值决定。`MATRIX_XHS_ENABLED` 和 `MATRIX_VIDEO_REPLACEMENT_ENABLED` 的代码默认值现在是开启，`backend/.env.example` 与 `docker-compose.prod.yml` 同步声明为 `1`。
 
-恢复小红书时设置 `MATRIX_XHS_ENABLED=1`，并重启三个运行单元：本地客户端、`backend/api_server.py` 本地执行器、`backend/central_server.py` 中心服。上线前必须重新执行小红书账号登录态、搜索、下载、评论、发布和图文同款冒烟；失败时把开关改回 `0` 并重启即可回滚到抖音单平台。
+中心服必须与客户端保持一致：用 `docker-compose.prod.yml` 部署时默认值已是 `1`；如果部署环境的 `.env.prod` 或编排系统里显式写了 `MATRIX_XHS_ENABLED=0` / `MATRIX_VIDEO_REPLACEMENT_ENABLED=0`，需要一并改为 `1` 并重启中心服，否则客户端可见的图文同款草稿同步和小红书素材发布会在中心服侧被 `platform_disabled` 拒绝。
+
+上线前执行冒烟：同款替换真实生成一次；小红书账号登录态、搜索、下载、评论、发布和图文同款（内容采集页“图文同款”按钮 → 预览 → 保存草稿 → 素材发布可见）各一次。
+
+## 2026-08-03 抖音单平台运行开关（已改为默认开放小红书）
+
+关闭小红书时设置 `MATRIX_XHS_ENABLED=0`，并重启三个运行单元：本地客户端、`backend/api_server.py` 本地执行器、`backend/central_server.py` 中心服。之后本地客户端隐藏小红书入口，本地执行器、中心服和平台适配器对 XHS 路由与任务类型返回 `platform_disabled`；改回 `1` 并重启同样三个运行单元即可恢复。
 
 历史小红书账号不需要保留。清理前先 dry-run：
 
@@ -34,25 +40,27 @@
 
 确认只命中小红书 profile/账号行后去掉 `--dry-run` 执行。该脚本不删除抖音账号目录、素材库或媒体文件；数据库结构无变化，`migration.sql` 仅记录 no-op 发布说明。
 
-## 2026-08-03 临时原生界面功能开关
+## 2026-08-03 原生界面功能开关（默认值已更新）
 
-`dev`、`staging`、`prod` 均应由各自环境文件或编排系统显式注入以下非敏感开关。仓库模板和生产 Compose 默认值均为 `0`：
+`dev`、`staging`、`prod` 均应由各自环境文件或编排系统显式注入以下非敏感开关。仓库模板和生产 Compose 的默认值：
 
 ```text
-MATRIX_VIDEO_REPLACEMENT_ENABLED=0
+MATRIX_XHS_ENABLED=1
+MATRIX_VIDEO_REPLACEMENT_ENABLED=1
 MATRIX_PENDING_PUBLISH_UI_ENABLED=0
 MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED=0
 ```
 
-| 开关 | `0` 的生产行为 | 恢复步骤 |
+| 开关 | 默认生产行为 | 取反步骤 |
 | --- | --- | --- |
-| `MATRIX_VIDEO_REPLACEMENT_ENABLED` | 同款替换侧栏置灰并显示“功能完善中，敬请期待”；三个次级跳转隐藏 | 设为 `1`，重启本地客户端，验证侧栏和三个入口后再执行真实生成冒烟 |
-| `MATRIX_PENDING_PUBLISH_UI_ENABLED` | 隐藏待发布队列标签页，保留现有队列文件和后台逻辑 | 设为 `1`，重启本地客户端，验证旧队列仍可读取 |
-| `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` | 隐藏 TTS 上传和声音预览，自动 TTS 不变 | 设为 `1`，重启本地客户端，验证上传、预览和自动 TTS 两条路径 |
+| `MATRIX_VIDEO_REPLACEMENT_ENABLED=1` | 同款替换侧栏可点击；分解视频、工作流助手、资产库三个次级跳转可见 | 设为 `0`，重启本地客户端，侧栏置灰并显示“功能完善中，敬请期待” |
+| `MATRIX_XHS_ENABLED=1` | 内容采集“图文同款”按钮、图文同款导航、小红书账号与发布平台可用 | 设为 `0`，重启本地客户端、本地执行器和中心服，全部小红书入口隐藏并返回 `platform_disabled` |
+| `MATRIX_PENDING_PUBLISH_UI_ENABLED=0` | 隐藏待发布队列标签页，保留现有队列文件和后台逻辑 | 设为 `1`，重启本地客户端，验证旧队列仍可读取 |
+| `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED=0` | 隐藏 TTS 上传和声音预览，自动 TTS 不变 | 设为 `1`，重启本地客户端，验证上传、预览和自动 TTS 两条路径 |
 
-这三个开关只改变原生客户端可见性；Compose 中的同名变量用于保持统一配置契约，不改变中心服接口。`MATRIX_XHS_ENABLED` 仍是跨本地客户端、本地执行器和中心服的独立平台开关，切换它必须重启三个运行单元。
+后两个开关只改变原生客户端可见性；Compose 中的同名变量用于保持统一配置契约，不改变中心服接口。`MATRIX_XHS_ENABLED` 是跨本地客户端、本地执行器和中心服的平台开关，切换它必须重启三个运行单元。
 
-发布前登记上一稳定客户端包及 SHA-256；中心服镜像结构未变，仍保留上一稳定镜像 Tag。若启用任一隐藏功能后的观察窗口错误率超过 1%，立即把对应开关恢复为 `0` 并重启客户端；XHS 能力异常则把 `MATRIX_XHS_ENABLED` 恢复为 `0` 并重启三个运行单元。此次没有 API 路径/JSON Schema、OpenAPI、数据库表、Docker 镜像结构或 `migration.sql` 行为变更。
+发布前登记上一稳定客户端包及 SHA-256；中心服镜像结构未变，仍保留上一稳定镜像 Tag。若默认开放的同款替换或图文同款在观察窗口的错误率超过 1%，立即把 `MATRIX_VIDEO_REPLACEMENT_ENABLED` 恢复为 `0` 并重启客户端；XHS 能力异常则把 `MATRIX_XHS_ENABLED` 恢复为 `0` 并重启三个运行单元。此次没有 API 路径/JSON Schema、OpenAPI、数据库表、Docker 镜像结构或 `migration.sql` 行为变更。
 
 ## 2026-07-30 账户中心账单看板发布与回滚门禁
 

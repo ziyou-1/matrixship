@@ -396,7 +396,7 @@ paths:
   /api/publish/run:
     post:
       summary: Publish a local material with an optional title override from the native publish table
-      description: Default production surface is Douyin-only. Requests that select Xiaohongshu/XHS are rejected with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the service is restarted.
+      description: Xiaohongshu/XHS ships enabled (MATRIX_XHS_ENABLED=1 by default). Requests that select Xiaohongshu/XHS are rejected with error=platform_disabled only when MATRIX_XHS_ENABLED=0 is set and the service is restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -528,7 +528,7 @@ paths:
     post:
       summary: Download and import a Xiaohongshu note
       deprecated: true
-      description: Disabled by default. The local executor and central server return 404 with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the relevant services are restarted.
+      description: Enabled by default (MATRIX_XHS_ENABLED=1). The local executor and central server return 404 with error=platform_disabled only when MATRIX_XHS_ENABLED=0 is set and the relevant services are restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -539,7 +539,7 @@ paths:
               $ref: "#/components/schemas/XhsDownloadRequest"
       responses:
         "200":
-          description: Download and material import completed only when MATRIX_XHS_ENABLED=1
+          description: Download and material import completed while MATRIX_XHS_ENABLED=1 (the shipped default)
           content:
             application/json:
               schema:
@@ -918,7 +918,7 @@ paths:
   /api/finder/discover:
     post:
       summary: Discover intent leads from enabled platform comments
-      description: Default production surface is Douyin-only. Requests with platform=xhs/xiaohongshu/rednote are rejected with error=platform_disabled unless MATRIX_XHS_ENABLED=1 is set and the service is restarted.
+      description: Xiaohongshu/XHS ships enabled (MATRIX_XHS_ENABLED=1 by default). Requests with platform=xhs/xiaohongshu/rednote are rejected with error=platform_disabled only when MATRIX_XHS_ENABLED=0 is set and the service is restarted.
       security:
         - bearerAuth: []
       requestBody:
@@ -2069,7 +2069,7 @@ components:
       additionalProperties: true
     XhsDownloadRequest:
       type: object
-      description: Disabled by default; accepted only when MATRIX_XHS_ENABLED=1.
+      description: Accepted while MATRIX_XHS_ENABLED=1, which is the shipped default.
       anyOf:
         - required: [url]
         - required: [noteUrl]
@@ -2121,7 +2121,7 @@ components:
       additionalProperties: true
     XhsDownloadSuccess:
       type: object
-      description: Response emitted only when MATRIX_XHS_ENABLED=1.
+      description: Response emitted while MATRIX_XHS_ENABLED=1, which is the shipped default.
       required: [ok, materialId, material]
       properties:
         ok: {const: true}

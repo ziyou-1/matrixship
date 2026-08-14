@@ -1,4 +1,17 @@
-﻿## 2026-08-03 账号矩阵新增账号 agent token 同步
+﻿## 2026-08-14 公网安装包默认开放同款替换与图文同款
+- `backend/platform_features.py#L27-L32`：`xhs_enabled()` 与 `video_replacement_enabled()` 改为 `default=True`，公网安装包不注入环境变量时即为开启；显式设置 `MATRIX_XHS_ENABLED=0` / `MATRIX_VIDEO_REPLACEMENT_ENABLED=0` 仍可关闭，解析规则和其余两个开关的默认关闭状态不变。
+- `backend/matrix_native_client.py#L7567-L7582`：内容采集页恢复“图文同款”按钮并加入操作行，可见性由 `xhs_enabled()` 控制。
+- `backend/matrix_native_client.py#L7759-L7790`：恢复 `ContentPage.note_replace()`，校验平台与小红书链接后提交 `xhs.download` 本地任务，并在 `c_note_replace` 回调里交接素材；非小红书链接只提示不发任务。
+- `backend/matrix_native_client.py#L7684-L7688`、`backend/matrix_native_client.py#L7877-L7879`：`_set_xhs_retry_busy()` 与结果处理同步禁用/恢复“图文同款”按钮，保持与“下载”按钮一致的忙碌态。
+- `backend/.env.example#L88-L96`、`docker-compose.prod.yml#L13-L14`：模板与生产 Compose 默认值改为 `MATRIX_XHS_ENABLED=1`、`MATRIX_VIDEO_REPLACEMENT_ENABLED=1`，待发布队列与数字人 TTS 上传仍为 `0`。
+- `docs/openapi.yaml#L399`、`docs/openapi.yaml#L531-L542`、`docs/openapi.yaml#L921`、`docs/openapi.yaml#L2072`、`docs/openapi.yaml#L2124`：XHS 相关描述改为“默认开启，`MATRIX_XHS_ENABLED=0` 时返回 `platform_disabled`”，路径、Schema 和响应码未变。
+- `tests/test_ui_feature_visibility.py#L31-L56`、`tests/test_ui_feature_visibility.py#L80-L103`、`tests/test_ui_feature_visibility.py#L143-L173`、`tests/test_ui_feature_visibility.py#L221-L259`：覆盖同款替换默认开启且可显式关闭、侧栏默认可点击、账号矩阵默认含小红书，以及四个开关在模板和 Compose 中的默认值；`.env.dev` / `.env.prod` 不在仓库时跳过。
+- `tests/test_xhs_platform_disable.py#L44-L48`：默认断言改为 XHS 默认开启、`MATRIX_XHS_ENABLED=0` 时关闭。
+- `tests/test_xhs_note_replacement.py#L590-L603`、`tests/test_xhs_note_replacement.py#L616-L645`：覆盖内容采集页默认显示“图文同款”按钮、`MATRIX_XHS_ENABLED=0` 时隐藏、非小红书链接不提交任务，以及采集页入口与交接处理同时存在。
+- 验证：全量 `python3 -m unittest discover -s tests` 1372 用例，失败集合与改动前完全一致（均为本容器缺少 ffmpeg/`imageio_ffmpeg` 与 Windows 路径断言导致的既有失败），改动前多出的 `test_temporary_ui_flags_are_default_off_in_all_runtime_templates` 环境错误已修复；`py_compile` 与 `git diff --check` 通过。
+- 影响与回滚：无 API 路径、JSON Schema、数据库表、Docker 镜像结构或 `migration.sql` 变更。客户端需重启生效；中心服若在部署环境显式写了 `=0` 需一并改为 `1` 并重启，否则图文同款草稿同步与小红书发布仍被 `platform_disabled` 拒绝。回滚把两个开关设回 `0` 并重启对应运行单元，或还原上述源码、配置、测试与文档。
+
+## 2026-08-03 账号矩阵新增账号 agent token 同步
 - `backend/local_browser_worker.py#L85-L95`：`read_local_token()` 继续优先读取 `MATRIX_AGENT_TOKEN` / `LOCAL_AGENT_TOKEN`，没有环境变量时读取当前数据目录下的 `agent_token.txt`；文件读取改为 `with open(...)`，避免长期 worker 泄漏文件句柄。
 - `backend/local_browser_worker.py#L202-L207`：`local_headers` 每次转发本机执行器请求前动态刷新本地 agent token，并更新 `self.local_token` 缓存，避免新用户登录、账号隔离目录切换或 token 文件刷新后仍使用旧 token。
 - `backend/matrix_native_client.py#L1629-L1699`：新增账号矩阵专用 `submit_account_login_direct()`，由原生客户端直接请求本机执行器 `/api/login/start` 或 `/api/xhs/login`，再轮询 `/api/login/status` 并读取 `/api/accounts` 回填账号摘要，避免登录新增账号时再绕中心服本地浏览器任务队列。

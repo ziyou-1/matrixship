@@ -41,9 +41,9 @@ class XhsPlatformDisableTest(unittest.TestCase):
         handler.rfile = io.BytesIO(body)
         return handler
 
-    def test_xhs_is_disabled_by_default_and_can_be_explicitly_restored(self):
+    def test_xhs_is_enabled_by_default_and_can_be_explicitly_disabled(self):
         self.assertIsNotNone(self.features, "platform_features module is required")
-        self.assertFalse(self.features.xhs_enabled({}))
+        self.assertTrue(self.features.xhs_enabled({}))
         self.assertFalse(self.features.xhs_enabled({"MATRIX_XHS_ENABLED": "0"}))
         self.assertTrue(self.features.xhs_enabled({"MATRIX_XHS_ENABLED": "1"}))
         self.assertTrue(self.features.xhs_enabled({"MATRIX_XHS_ENABLED": "true"}))

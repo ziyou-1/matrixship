@@ -35,16 +35,22 @@
 - Rollback: set `MINIMAX_ENABLED=0` to stop new submissions. For remote AI Canvas, restore `/root/AI-CanvasPro/server.py.bak.<timestamp>`, restart `ai-canvas.service`, verify active status, port `8777`, and `/login` 200.
 - Verification: run `.\.venv-win\Scripts\python.exe -m unittest tests.test_minimax_direct tests.test_minimax_pricing tests.test_minimax_central_server tests.test_minimax_aicanvas_remote tests.test_openapi_contract -v`.
 
+## 2026-08-14 图文同款或同款替换在安装包里看不到
+- 现象：新装的公网客户端里没有“🧩 图文同款”导航、内容采集页没有“图文同款”按钮，或左侧“同款替换”是灰的。
+- 原因：`MATRIX_XHS_ENABLED` 和 `MATRIX_VIDEO_REPLACEMENT_ENABLED` 的代码默认值现在是开启，安装包本身不注入这两个变量。所以看到旧状态只有两种可能：运行的是旧版客户端，或运行环境里显式设置了 `=0`（系统环境变量、启动脚本、`.env.prod`、编排配置）。
+- 排查：检查客户端进程的实际环境变量，不要只看 `.env` 模板；确认安装的是包含本次变更的客户端版本；改动环境变量后必须完整退出并重启客户端，运行中的 Qt 控件不会热更新。
+- 中心服不一致：客户端开、中心服关时，图文同款预览和本机草稿可用，但草稿同步到中心素材库和小红书发布会返回 `platform_disabled`。把中心服的 `MATRIX_XHS_ENABLED` 也设为 `1` 并重启即可。
+
 ## 2026-08-03 小红书入口或接口返回 `platform_disabled`
-- 现象：本地客户端只显示抖音；调用 `/api/xhs/*`、`/api/xhs-note-replacement/*`、`xhs.*` 本地浏览器任务，或在 payload 中传 `platform=xhs/xiaohongshu/rednote/小红书` 时，返回 HTTP 404、`error=platform_disabled`。
-- 原因：当前生产默认按抖音单平台运行，`MATRIX_XHS_ENABLED` 默认为 `0`。本地客户端、本地执行器、中心服和平台适配器都会在进入浏览器或节点调度前拦截。
+- 现象：调用 `/api/xhs/*`、`/api/xhs-note-replacement/*`、`xhs.*` 本地浏览器任务，或在 payload 中传 `platform=xhs/xiaohongshu/rednote/小红书` 时，返回 HTTP 404、`error=platform_disabled`。
+- 原因：运行环境把 `MATRIX_XHS_ENABLED` 显式设成了 `0`（代码默认值为 `1`）。本地客户端、本地执行器、中心服和平台适配器都会在进入浏览器或节点调度前拦截。
 - 排查：确认本地客户端、本地执行器和中心服进程都加载了同一环境变量；检查结构化日志事件 `platform_disabled`，日志只包含平台、路由、任务类型、阶段和 `errorId`，不得记录 Cookie、Token、Authorization 或完整私有 URL。
 - 恢复：设置 `MATRIX_XHS_ENABLED=1` 后重启本地客户端、本地执行器和中心服，再执行小红书登录态、搜索、下载、评论、发布和图文同款冒烟。恢复失败时改回 `0` 并重启即可回滚。
 - 清理历史账号：先运行 `.\.venv-win\Scripts\python.exe scripts\disable_xhs_accounts.py --data-dir backend\datas --central-state backend\central_data\scheduler_state.json --dry-run`，确认只命中小红书状态后再去掉 `--dry-run`。该脚本不删除抖音账号或素材文件。
 
 ## 2026-08-03 同款替换置灰、待发布队列或 TTS 上传不显示
 - 现象：左侧“同款替换”可见但为灰色，悬浮显示“功能完善中，敬请期待”；分解视频、工作流助手和资产库不显示替换跳转；素材发布只有“素材库与发布”标签；数字人口播没有“上传TTS声音”和声音预览。
-- 原因：这是当前生产默认状态。`MATRIX_VIDEO_REPLACEMENT_ENABLED`、`MATRIX_PENDING_PUBLISH_UI_ENABLED`、`MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` 默认均为 `0`。待发布数据、后台队列、同款替换页面/生成代码、TTS 上传处理器和自动 TTS 均未删除。
+- 原因：`MATRIX_PENDING_PUBLISH_UI_ENABLED` 和 `MATRIX_DIGITAL_HUMAN_TTS_UPLOAD_ENABLED` 默认仍为 `0`，属于预期状态；同款替换默认已开放，置灰只会出现在运行环境显式设置 `MATRIX_VIDEO_REPLACEMENT_ENABLED=0` 时。待发布数据、后台队列、同款替换页面/生成代码、TTS 上传处理器和自动 TTS 均未删除。
 - 意外仍显示：检查运行进程实际环境，不要只检查 `.env` 模板；确认运行的是当前源码或新构建客户端，而不是旧 EXE。修改开关后必须完整退出并重启本地客户端，运行中的 Qt 控件不会热更新。
 - 恢复：只把需要恢复的开关设为 `1` 并重启客户端。先在 dev/staging 验证对应入口和真实工作流；错误率超过 1% 时恢复为 `0` 并重启客户端。
 - 边界：这三个临时 UI 开关没有删除队列或账号数据，不修改 API、OpenAPI、数据库或 `migration.sql`；XHS 历史账号由独立清理脚本处理，见下一节。自动 TTS 在上传入口隐藏时仍应使用页面音色选择器生成。

@@ -7564,6 +7564,10 @@ class ContentPage(BasePage):
         self.b_dl = QtWidgets.QPushButton("下载")
         self.b_dl.setObjectName("ghost")
         self.b_dl.clicked.connect(self.download)
+        self.b_note_replace = QtWidgets.QPushButton("图文同款")
+        self.b_note_replace.setObjectName("primary")
+        self.b_note_replace.clicked.connect(self.note_replace)
+        self.b_note_replace.setVisible(xhs_enabled())
         self.b_break = QtWidgets.QPushButton("分解")
         self.b_break.setObjectName("primary")
         self.b_break.clicked.connect(self.breakdown)
@@ -7572,6 +7576,7 @@ class ContentPage(BasePage):
         self.b_cm.clicked.connect(self.comments)
         ab.addWidget(self.url, 3)
         ab.addWidget(self.b_dl)
+        ab.addWidget(self.b_note_replace)
         ab.addWidget(self.b_break)
         ab.addWidget(self.b_cm)
         self.v.addLayout(ab)
@@ -7678,6 +7683,7 @@ class ContentPage(BasePage):
         elif tag == "c_dl":
             self.b_dl.setEnabled(False)
         elif tag == "c_note_replace":
+            self.b_note_replace.setEnabled(False)
             self.b_dl.setEnabled(False)
         elif tag == "c_cm":
             self.b_cm.setEnabled(False)
@@ -7749,6 +7755,39 @@ class ContentPage(BasePage):
             return
         self._xhs_retry_context.pop("c_dl", None)
         run_bg(lambda: BRIDGE.payload.emit("c_dl", submit_local_task(pf + ".download", payload, 600)))
+
+    def note_replace(self):
+        u = self.url.text().strip()
+        if not u:
+            self.status.setText("请先选择或粘贴小红书笔记链接")
+            return
+        host = (urlparse(u).hostname or "").lower()
+        is_xhs_url = host.endswith("xiaohongshu.com") or host.endswith("xhslink.com")
+        if self._pf() != "xhs" or not is_xhs_url:
+            self.status.setText("图文同款仅支持小红书笔记，请先切换到小红书或选择小红书链接")
+            return
+        self.b_note_replace.setEnabled(False)
+        self.b_dl.setEnabled(False)
+        self.status.setText("账号下载中：使用账号矩阵里已登录的小红书账号")
+        payload = {
+            "url": u,
+            "noteUrl": u,
+            "save_choice": "all",
+            "platform": "xhs",
+            "guestMode": False,
+            "accountCollectionConfirmed": True,
+        }
+        payload = self._attach_content_account(payload)
+        if payload is None:
+            self.b_note_replace.setEnabled(True)
+            self.b_dl.setEnabled(True)
+            return
+        self._xhs_retry_context.pop("c_note_replace", None)
+
+        def work():
+            task = submit_local_task("xhs.download", payload, 600)
+            BRIDGE.payload.emit("c_note_replace", {"task": task, "url": u, "platform": "xhs"})
+        run_bg(work)
 
     def breakdown(self):
         u = self.url.text().strip()
@@ -7836,6 +7875,7 @@ class ContentPage(BasePage):
             self.status.setText("下载完成并入库。" if (d.get("status") == "done" and rr.get("ok") is not False)
                                 else ("下载失败:" + str(d.get("error") or rr.get("error") or "")))
         elif tag == "c_note_replace":
+            self.b_note_replace.setEnabled(True)
             self.b_dl.setEnabled(True)
             payload = d if isinstance(d, dict) else {}
             if self._xhs_retry_with_account(tag, payload):

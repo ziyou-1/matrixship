@@ -19,9 +19,9 @@
 
 ## 平台启用范围
 
-当前生产默认只开放抖音。小红书/XHS 的本地客户端入口、本地执行器接口、中心服调度、平台适配器和任务类型默认禁用；命中后返回 HTTP 404 与稳定错误码 `platform_disabled`，响应不包含 Cookie、Token、Authorization 或完整私有 URL。需要恢复时，显式设置 `MATRIX_XHS_ENABLED=1` 并重启本地客户端、本地执行器和中心服。
+当前生产默认同时开放抖音和小红书，`MATRIX_XHS_ENABLED` 的默认值是 `1`。显式设置 `MATRIX_XHS_ENABLED=0` 并重启本地客户端、本地执行器和中心服后，小红书/XHS 的本地客户端入口、本地执行器接口、中心服调度、平台适配器和任务类型全部禁用；命中后返回 HTTP 404 与稳定错误码 `platform_disabled`，响应不包含 Cookie、Token、Authorization 或完整私有 URL。
 
-禁用范围包括 `/api/xhs/*`、`/api/xhs-note-replacement/*`、`xhs.*` 本地浏览器任务、`platform=xhs/xiaohongshu/rednote/小红书` 的任务 payload，以及账号矩阵中小红书账号的默认展示。历史小红书账号无需保留，可用 `scripts/disable_xhs_accounts.py --dry-run --data-dir <本地数据目录> --central-state <scheduler_state.json>` 预览清理，再去掉 `--dry-run` 执行。
+可被禁用的范围包括 `/api/xhs/*`、`/api/xhs-note-replacement/*`、`xhs.*` 本地浏览器任务、`platform=xhs/xiaohongshu/rednote/小红书` 的任务 payload，以及账号矩阵中小红书账号的展示。历史小红书账号无需保留，可用 `scripts/disable_xhs_accounts.py --dry-run --data-dir <本地数据目录> --central-state <scheduler_state.json>` 预览清理，再去掉 `--dry-run` 执行。
 
 ## MiniMax H3 直连视频
 
